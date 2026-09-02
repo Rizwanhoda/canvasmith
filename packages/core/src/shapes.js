@@ -35,6 +35,29 @@ export function makeShape(fabric, tool, pt, o = {}) {
   return obj;
 }
 
+/* Resize a shape made by makeShape() to span two drag points, keeping it live during mouse:move.
+   Mirrors makeShape's own per-type geometry so a click-drag ends up exactly where a click-release
+   would place a shape of that size. */
+export function resizeShapeTo(obj, tool, from, to) {
+  const x = Math.min(from.x, to.x), y = Math.min(from.y, to.y);
+  const w = Math.max(1, Math.abs(to.x - from.x)), h = Math.max(1, Math.abs(to.y - from.y));
+  if (tool === 'rect' || tool === 'triangle') {
+    obj.set({ left: x, top: y, width: w, height: h });
+  } else if (tool === 'ellipse') {
+    obj.set({ left: x, top: y, rx: w / 2, ry: h / 2 });
+  } else if (tool === 'line') {
+    obj.set({ x1: from.x, y1: from.y, x2: to.x, y2: to.y });
+  } else if (tool === 'polygon' || tool === 'star') {
+    const cx = x + w / 2, cy = y + h / 2;
+    const pts = tool === 'polygon'
+      ? starPoints(cx, cy, w / 2, h / 2, 6).filter((_, i) => i % 2 === 0)
+      : starPoints(cx, cy, w / 2, h / 4, 5);
+    obj.set({ points: pts, left: x, top: y, width: w, height: h });
+    obj.setCoords();
+  }
+  obj.setCoords();
+}
+
 export function makeText(fabric, pt, o = {}) {
   const t = new fabric.IText(o.text || 'Double-click to edit', {
     ...BASE, left: pt.x, top: pt.y,

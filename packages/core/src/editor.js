@@ -15,7 +15,7 @@ import {
   buildEdgeMapFromImageData, snapToEdge,
   selectionPolys, polysToSelection, addPolyToSelection, selectionBounds, HoverCache,
 } from './selection.js';
-import { makeShape, makeText, layerLabel, uid } from './shapes.js';
+import { makeShape, resizeShapeTo, makeText, layerLabel, uid } from './shapes.js';
 import { getCropHandle, dragCropRect, applyCrop } from './crop.js';
 import { alignDelta, snapDelta } from './layout.js';
 import { EXTRA, serialize, restore, exportImage, addImageLayer, artboardForImage, loadImageEl } from './io.js';
@@ -151,7 +151,10 @@ export class Editor {
     }
     if (SHAPE_TOOLS.includes(t)) {
       const obj = makeShape(this.fabric, t, pt, this.toolOpts);
-      if (obj) { this.fc.add(obj); this.fc.setActiveObject(obj); this.commit('shape'); }
+      if (obj) {
+        this.fc.add(obj); this.fc.setActiveObject(obj);
+        this._drag = { kind: 'shape', tool: t, obj, from: pt };
+      }
       return;
     }
     if (t === 'type') {
@@ -199,6 +202,7 @@ export class Editor {
     }
     if (d.kind === 'paint') { this.engine.move(this.tool, pt, { ...this.toolOpts }); return; }
     if (d.kind === 'sel') { updateSelection(this.selection, pt, { square: e.shiftKey }); this.fc.renderAll(); this._emit('selection', this.selection); return; }
+    if (d.kind === 'shape') { resizeShapeTo(d.obj, d.tool, d.from, pt); this.fc.renderAll(); return; }
     if (d.kind === 'crop') {
       this.crop = dragCropRect(this.crop, d.handle, pt.x - d.last.x, pt.y - d.last.y, this.toolOpts.cropRatio || 0);
       d.last = pt;
@@ -214,6 +218,7 @@ export class Editor {
     if (d.kind === 'paint') { this.engine.up(); this.engine.setClip(null); this.commit('stroke'); }
     if (d.kind === 'sel') { this.selection = finalizeSelection(this.selection); this._emit('selection', this.selection); }
     if (d.kind === 'gradient' && this.engine._curPt !== null) { /* released without move: ignore */ }
+    if (d.kind === 'shape') { this.commit('shape'); this.setTool('select'); this.fc.setActiveObject(d.obj); }
   }
 
   /* Gradient is click-drag-release across two points. */
@@ -486,7 +491,15 @@ export class Editor {
     this.fc.renderAll(); this.commit('reorder');
   }
   removeLayer(id) { const o = this._byId(id); if (o) { this.fc.remove(o); this.commit('remove'); } }
-  activate(id) { const o = this._byId(id); if (o) { this.fc.setActiveObject(o); this.fc.renderAll(); this._emit('change', { label: 'activate' }); } }
+  activate(id) {
+    const o = this._byId(id);
+    if (o) {
+      if (this.tool !== 'select') this.setTool('select');
+      this.fc.setActiveObject(o);
+      this.fc.renderAll();
+      this._emit('change', { label: 'activate' });
+    }
+  }
 
   duplicateLayer(id, offset = 12) {
     const o = this._byId(id); if (!o) return;
@@ -511,6 +524,35 @@ export class Editor {
     o.left = (o.left || 0) + dx;
     o.top = (o.top || 0) + dy;
     o.setCoords();
+    this.fc.renderAll();
+    this.commit('align');
+  }
+
+  /* Aligns the current selection: a single layer aligns to the artboard (alignLayer above); two or
+     more (a fabric activeSelection) align to each other's combined bounds instead, Figma-style —
+     each member moves independently to line up on the shared edge/axis, the group shape unchanged. */
+  alignActiveSelection(edge) {
+    const a = this.fc.getActiveObject();
+    if (!a) return;
+    if (a.type !== 'activeSelection') { if (a.id) this.alignLayer(a.id, edge); return; }
+    const members = a.getObjects();
+    if (!members.length) return;
+    a.setCoords();
+    /* A fabric ActiveSelection positions its members relative to its own center, not the canvas —
+       member.left/top and member.getBoundingRect(true) already live in that shifted space. Adding
+       half the selection's own size re-origins that space to the selection's top-left corner, which
+       is what alignDelta expects (a box measured from a 0,0 reference). */
+    const selW = a.width * (a.scaleX || 1), selH = a.height * (a.scaleY || 1);
+    members.forEach(o => {
+      o.setCoords();
+      const b = o.getBoundingRect(true);
+      const local = { left: b.left + selW / 2, top: b.top + selH / 2, width: b.width, height: b.height };
+      const { dx, dy } = alignDelta(local, selW, selH, edge);
+      o.left = (o.left || 0) + dx;
+      o.top = (o.top || 0) + dy;
+      o.setCoords();
+    });
+    a.setCoords();
     this.fc.renderAll();
     this.commit('align');
   }
