@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { hexRgb, rgba, toHex, relLum, rgbToHsl, hslToRgb, hexToHsl, recolorPixels, fxToFilterSpecs, FX_DEFAULTS } from '../packages/core/src/color.js';
+import { hexRgb, rgba, toHex, relLum, rgbToHsl, hslToRgb, hexToHsl, recolorPixels, fxToFilterSpecs, FX_DEFAULTS, normalizeGradientStops, splitGradientStopColor } from '../packages/core/src/color.js';
 import { History } from '../packages/core/src/history.js';
 import {
   startSelection, updateSelection, finalizeSelection, floodSelectPolygon, selectionFillRule,
@@ -316,23 +316,60 @@ test('cv: CvEngine degrades to null (never throws) with no Worker support', asyn
 /* ── image adjustment: fx -> Fabric filter spec mapping (Editor#setImageFilters) ──────────── */
 test('color: fxToFilterSpecs maps defaults to zero/neutral filter params', () => {
   const specs = fxToFilterSpecs(FX_DEFAULTS);
-  assert.deepEqual(specs.map(s => s.type), ['Brightness', 'Contrast', 'Saturation', 'Blur']);
+  assert.deepEqual(specs.map(s => s.type), ['Brightness', 'Contrast', 'Saturation', 'Blur', 'HueRotation', 'Vibrance', 'Invert']);
   assert.deepEqual(specs.find(s => s.type === 'Brightness').params, { brightness: 0 });
   assert.deepEqual(specs.find(s => s.type === 'Contrast').params, { contrast: 0 });
   assert.deepEqual(specs.find(s => s.type === 'Saturation').params, { saturation: 0 });
   assert.deepEqual(specs.find(s => s.type === 'Blur').params, { blur: 0 });
+  assert.deepEqual(specs.find(s => s.type === 'HueRotation').params, { rotation: 0 });
+  assert.deepEqual(specs.find(s => s.type === 'Vibrance').params, { vibrance: 0 });
+  assert.deepEqual(specs.find(s => s.type === 'Invert').params, { invert: false });
 });
 
 test('color: fxToFilterSpecs maps non-default human values exactly like the reference setFx', () => {
-  const specs = fxToFilterSpecs({ brightness: 150, contrast: 50, saturate: 200, blur: 10 });
+  const specs = fxToFilterSpecs({ brightness: 150, contrast: 50, saturate: 200, blur: 10, hue: 90, vibrance: 50, invert: true });
   assert.deepEqual(specs.find(s => s.type === 'Brightness').params, { brightness: 0.5 });
   assert.deepEqual(specs.find(s => s.type === 'Contrast').params, { contrast: -0.5 });
   assert.deepEqual(specs.find(s => s.type === 'Saturation').params, { saturation: 1 });
   assert.deepEqual(specs.find(s => s.type === 'Blur').params, { blur: 0.5 });
+  assert.deepEqual(specs.find(s => s.type === 'HueRotation').params, { rotation: 0.5 });
+  assert.deepEqual(specs.find(s => s.type === 'Vibrance').params, { vibrance: 0.5 });
+  assert.deepEqual(specs.find(s => s.type === 'Invert').params, { invert: true });
 });
 
 test('color: fxToFilterSpecs fills in missing keys from FX_DEFAULTS', () => {
   const specs = fxToFilterSpecs({ blur: 4 });
   assert.deepEqual(specs.find(s => s.type === 'Brightness').params, { brightness: 0 });
   assert.deepEqual(specs.find(s => s.type === 'Blur').params, { blur: 0.2 });
+});
+
+/* ── gradient stops: alpha folding + round-trip (Editor#getShapeGradient's UI-facing consumers) ── */
+test('color: normalizeGradientStops passes a fully-opaque stop color through unchanged', () => {
+  const norm = normalizeGradientStops([{ offset: 0, color: '#ff0000' }, { offset: 1, color: '#00ff00', alpha: 1 }]);
+  assert.equal(norm[0].color, '#ff0000');
+  assert.equal(norm[1].color, '#00ff00');
+});
+
+test('color: normalizeGradientStops folds alpha < 1 into an rgba() string', () => {
+  const norm = normalizeGradientStops([{ offset: 0, color: '#ff0000', alpha: 0.5 }]);
+  assert.equal(norm[0].color, 'rgba(255,0,0,0.5)');
+});
+
+test('color: normalizeGradientStops clamps a negative alpha to 0 rather than going negative', () => {
+  const norm = normalizeGradientStops([{ offset: 0, color: '#0000ff', alpha: -5 }]);
+  assert.equal(norm[0].color, 'rgba(0,0,255,0)');
+});
+
+test('color: normalizeGradientStops treats alpha >= 1 as fully opaque (plain hex, no rgba wrap)', () => {
+  const norm = normalizeGradientStops([{ offset: 0, color: '#0000ff', alpha: 5 }]);
+  assert.equal(norm[0].color, '#0000ff');
+});
+
+test('color: splitGradientStopColor decodes an rgba() string back to color + alpha', () => {
+  assert.deepEqual(splitGradientStopColor('rgba(255,0,0,0.5)'), { color: '#ff0000', alpha: 0.5 });
+  assert.deepEqual(splitGradientStopColor('rgb(0,255,0)'), { color: '#00ff00', alpha: 1 });
+});
+
+test('color: splitGradientStopColor treats a plain hex as fully opaque', () => {
+  assert.deepEqual(splitGradientStopColor('#7c3aed'), { color: '#7c3aed', alpha: 1 });
 });

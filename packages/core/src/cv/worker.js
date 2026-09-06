@@ -23,7 +23,7 @@ export function cvWorkerBody() {
     var e = new cv.Mat(); cv.Canny(g, e, 40, 130); var k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3)); cv.dilate(e, e, k);
     var cs = new cv.MatVector(), h = new cv.Mat(); cv.findContours(e, cs, h, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
     var raw = [], minA = W * H * 0.0025, maxA = W * H * 0.55;
-    for (var i = 0; i < cs.size(); i++) { var r = cv.boundingRect(cs.get(i)); var a = r.width * r.height; if (a >= minA && a <= maxA && r.width > 10 && r.height > 10) raw.push({ x: r.x, y: r.y, w: r.width, h: r.height }); }
+    for (var i = 0; i < cs.size(); i++) { var ci = cs.get(i); var r = cv.boundingRect(ci); ci.delete(); var a = r.width * r.height; if (a >= minA && a <= maxA && r.width > 10 && r.height > 10) raw.push({ x: r.x, y: r.y, w: r.width, h: r.height }); }
     raw.sort(function (a, b) { return b.w * b.h - a.w * a.h; }); if (raw.length > 20) raw = raw.slice(0, 20);
     var gap = Math.round(Math.max(W, H) * 0.012), ch = true, guard = 0;
     while (ch && guard++ < 2000) { ch = false; for (var i2 = 0; i2 < raw.length && !ch; i2++) for (var j = i2 + 1; j < raw.length; j++) { var A = raw[i2], C = raw[j]; if (A.x < C.x + C.w + gap && C.x < A.x + A.w + gap && A.y < C.y + C.h + gap && C.y < A.y + A.h + gap) { var nx = Math.min(A.x, C.x), ny = Math.min(A.y, C.y); raw.splice(j, 1); raw.splice(i2, 1, { x: nx, y: ny, w: Math.max(A.x + A.w, C.x + C.w) - nx, h: Math.max(A.y + A.h, C.y + C.h) - ny }); ch = true; break; } } }
@@ -48,7 +48,8 @@ export function cvWorkerBody() {
     var cs = new cv.MatVector(), h = new cv.Mat(); cv.findContours(con, cs, h, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
     var out = [], minA = W * H * 0.0008;
     for (var i = 0; i < cs.size(); i++) {
-      var r = cv.boundingRect(cs.get(i)), a = r.width * r.height, ar = r.width / Math.max(1, r.height);
+      var ci = cs.get(i), r = cv.boundingRect(ci); ci.delete();
+      var a = r.width * r.height, ar = r.width / Math.max(1, r.height);
       if (a >= minA && r.width > W * 0.04 && r.height > H * 0.012 && r.height < H * 0.4 && ar > 1.2 && a < W * H * 0.6)
         out.push({ x: r.x, y: r.y, w: r.width, h: r.height });
     }
@@ -68,9 +69,9 @@ export function cvWorkerBody() {
     var bg = new cv.Mat(), fg = new cv.Mat(); cv.grabCut(rgb, mask, new cv.Rect(0, 0, 1, 1), bg, fg, 3, cv.GC_INIT_WITH_MASK);
     var fm = cv.Mat.zeros(H, W, cv.CV_8UC1), dat = mask.data, fd = fm.data; for (var i = 0; i < dat.length; i++) { var v = dat[i]; if (v === cv.GC_FGD || v === cv.GC_PR_FGD) fd[i] = 255; }
     var cs = new cv.MatVector(), h = new cv.Mat(); cv.findContours(fm, cs, h, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-    var pick = -1, pa = 0; for (var i3 = 0; i3 < cs.size(); i3++) { var c = cs.get(i3), a = cv.contourArea(c), r = cv.boundingRect(c), ins = seed.cx >= r.x && seed.cx <= r.x + r.width && seed.cy >= r.y && seed.cy <= r.y + r.height; if ((ins && a > pa) || (pick < 0 && a > pa)) { pa = a; pick = i3; } }
+    var pick = -1, pa = 0; for (var i3 = 0; i3 < cs.size(); i3++) { var c = cs.get(i3), a = cv.contourArea(c), r = cv.boundingRect(c), ins = seed.cx >= r.x && seed.cx <= r.x + r.width && seed.cy >= r.y && seed.cy <= r.y + r.height; if ((ins && a > pa) || (pick < 0 && a > pa)) { pa = a; pick = i3; } c.delete(); }
     var pts = null;
-    if (pick >= 0) { var cc = cs.get(pick), ap = new cv.Mat(); cv.approxPolyDP(cc, ap, 0.0025 * cv.arcLength(cc, true), true); pts = []; for (var i4 = 0; i4 < ap.rows; i4++) pts.push({ x: ap.intPtr(i4, 0)[0], y: ap.intPtr(i4, 0)[1] }); ap.delete(); }
+    if (pick >= 0) { var cc = cs.get(pick), ap = new cv.Mat(); cv.approxPolyDP(cc, ap, 0.0025 * cv.arcLength(cc, true), true); pts = []; for (var i4 = 0; i4 < ap.rows; i4++) pts.push({ x: ap.intPtr(i4, 0)[0], y: ap.intPtr(i4, 0)[1] }); ap.delete(); cc.delete(); }
     [src, rgb, mask, bg, fg, fm, h].forEach(function (m) { m.delete(); }); cs.delete();
     return (pts && pts.length >= 3) ? pts : null;
   }
@@ -109,8 +110,8 @@ export function cvWorkerBody() {
       cv.GaussianBlur(fm, fm, new cv.Size(3, 3), 0); cv.threshold(fm, fm, 127, 255, cv.THRESH_BINARY);
       var cs = new cv.MatVector(), h = new cv.Mat(); cv.findContours(fm, cs, h, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE);
       var pick = -1, pa = 0;
-      for (var j = 0; j < cs.size(); j++) { var c = cs.get(j), a = cv.contourArea(c), r = cv.boundingRect(c), ins = seed.cx >= r.x && seed.cx <= r.x + r.width && seed.cy >= r.y && seed.cy <= r.y + r.height; if ((ins && a > pa) || (pick < 0 && a > pa)) { pa = a; pick = j; } }
-      if (pick >= 0) { var cc = cs.get(pick), ap = new cv.Mat(); cv.approxPolyDP(cc, ap, EPS * cv.arcLength(cc, true), true); pts = []; for (var p = 0; p < ap.rows; p++) pts.push({ x: ap.intPtr(p, 0)[0], y: ap.intPtr(p, 0)[1] }); ap.delete(); }
+      for (var j = 0; j < cs.size(); j++) { var c = cs.get(j), a = cv.contourArea(c), r = cv.boundingRect(c), ins = seed.cx >= r.x && seed.cx <= r.x + r.width && seed.cy >= r.y && seed.cy <= r.y + r.height; if ((ins && a > pa) || (pick < 0 && a > pa)) { pa = a; pick = j; } c.delete(); }
+      if (pick >= 0) { var cc = cs.get(pick), ap = new cv.Mat(); cv.approxPolyDP(cc, ap, EPS * cv.arcLength(cc, true), true); pts = []; for (var p = 0; p < ap.rows; p++) pts.push({ x: ap.intPtr(p, 0)[0], y: ap.intPtr(p, 0)[1] }); ap.delete(); cc.delete(); }
       fm.delete(); cs.delete(); h.delete();
     }
     [src, rgb, ff, region, k].forEach(function (m) { m.delete(); });
@@ -132,10 +133,10 @@ export function cvWorkerBody() {
     var cs = new cv.MatVector(), h = new cv.Mat(); cv.findContours(m, cs, h, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
     var out = [];
     for (var c = 0; c < cs.size(); c++) {
-      var cc = cs.get(c); if (cv.contourArea(cc) < 12) continue;
+      var cc = cs.get(c); if (cv.contourArea(cc) < 12) { cc.delete(); continue; }
       var ap = new cv.Mat(); cv.approxPolyDP(cc, ap, 0.006 * cv.arcLength(cc, true), true);
       var pts = []; for (var p = 0; p < ap.rows; p++) pts.push({ x: ap.intPtr(p, 0)[0], y: ap.intPtr(p, 0)[1] });
-      if (pts.length >= 3) out.push(pts); ap.delete();
+      if (pts.length >= 3) out.push(pts); ap.delete(); cc.delete();
     }
     tmp.forEach(function (x) { x.delete(); }); [m, k, h].forEach(function (x) { x.delete(); }); mv.delete(); cs.delete();
     return out;
@@ -150,7 +151,7 @@ export function cvWorkerBody() {
     if (r >= 0) cv.dilate(m, m, k); else cv.erode(m, m, k);
     var cs = new cv.MatVector(), h = new cv.Mat(); cv.findContours(m, cs, h, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
     var out = [];
-    for (var c = 0; c < cs.size(); c++) { var cc = cs.get(c); if (cv.contourArea(cc) < 12) continue; var ap = new cv.Mat(); cv.approxPolyDP(cc, ap, 0.004 * cv.arcLength(cc, true), true); var pts = []; for (var q = 0; q < ap.rows; q++) pts.push({ x: ap.intPtr(q, 0)[0], y: ap.intPtr(q, 0)[1] }); if (pts.length >= 3) out.push(pts); ap.delete(); }
+    for (var c = 0; c < cs.size(); c++) { var cc = cs.get(c); if (cv.contourArea(cc) < 12) { cc.delete(); continue; } var ap = new cv.Mat(); cv.approxPolyDP(cc, ap, 0.004 * cv.arcLength(cc, true), true); var pts = []; for (var q = 0; q < ap.rows; q++) pts.push({ x: ap.intPtr(q, 0)[0], y: ap.intPtr(q, 0)[1] }); if (pts.length >= 3) out.push(pts); ap.delete(); cc.delete(); }
     tmp.forEach(function (x) { x.delete(); }); [m, k, h].forEach(function (x) { x.delete(); }); mv.delete(); cs.delete();
     return out;
   }
@@ -162,7 +163,7 @@ export function cvWorkerBody() {
     fill(base, 255); fill(cut, 0);
     var cs = new cv.MatVector(), h = new cv.Mat(); cv.findContours(m, cs, h, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
     var out = [];
-    for (var c = 0; c < cs.size(); c++) { var cc = cs.get(c); if (cv.contourArea(cc) < 12) continue; var ap = new cv.Mat(); cv.approxPolyDP(cc, ap, 0.004 * cv.arcLength(cc, true), true); var pts = []; for (var q = 0; q < ap.rows; q++) pts.push({ x: ap.intPtr(q, 0)[0], y: ap.intPtr(q, 0)[1] }); if (pts.length >= 3) out.push(pts); ap.delete(); }
+    for (var c = 0; c < cs.size(); c++) { var cc = cs.get(c); if (cv.contourArea(cc) < 12) { cc.delete(); continue; } var ap = new cv.Mat(); cv.approxPolyDP(cc, ap, 0.004 * cv.arcLength(cc, true), true); var pts = []; for (var q = 0; q < ap.rows; q++) pts.push({ x: ap.intPtr(q, 0)[0], y: ap.intPtr(q, 0)[1] }); if (pts.length >= 3) out.push(pts); ap.delete(); cc.delete(); }
     [m, h].forEach(function (x) { x.delete(); }); cs.delete();
     return out;
   }
@@ -178,7 +179,7 @@ export function cvWorkerBody() {
     cv.morphologyEx(mask, mask, cv.MORPH_OPEN, k); cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, k);
     var cs = new cv.MatVector(), h = new cv.Mat(); cv.findContours(mask, cs, h, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
     var out = [], minA = W * H * 0.0006;
-    for (var c = 0; c < cs.size(); c++) { var cc = cs.get(c); if (cv.contourArea(cc) < minA) continue; var ap = new cv.Mat(); cv.approxPolyDP(cc, ap, 0.003 * cv.arcLength(cc, true), true); var pts = []; for (var q = 0; q < ap.rows; q++) pts.push({ x: ap.intPtr(q, 0)[0], y: ap.intPtr(q, 0)[1] }); if (pts.length >= 3) out.push(pts); ap.delete(); }
+    for (var c = 0; c < cs.size(); c++) { var cc = cs.get(c); if (cv.contourArea(cc) < minA) { cc.delete(); continue; } var ap = new cv.Mat(); cv.approxPolyDP(cc, ap, 0.003 * cv.arcLength(cc, true), true); var pts = []; for (var q = 0; q < ap.rows; q++) pts.push({ x: ap.intPtr(q, 0)[0], y: ap.intPtr(q, 0)[1] }); if (pts.length >= 3) out.push(pts); ap.delete(); cc.delete(); }
     [src, rgb, lo, hi, mask, k, h].forEach(function (x) { x.delete(); }); cs.delete();
     return out.slice(0, 40);
   }

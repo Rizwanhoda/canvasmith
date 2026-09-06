@@ -148,6 +148,27 @@ export function maskLine(ctx, from, to, o, erase) {
   }
 }
 
+/* Inverts a mask canvas in place (Photoshop's Cmd/Ctrl+I on a mask): white<->black, and any
+   untouched (fully transparent) area — which applyTo2d treats as "fully visible" per its own
+   "untouched = visible" default — is turned into an explicit opaque black stamp, i.e. "fully
+   hidden", since there is no such thing as "untouched" once you've deliberately inverted the
+   whole canvas. Mutates the canvas directly; the caller (Editor#invertMask) is responsible for
+   re-running applyFilters()/commit() the same way every other mask edit does. */
+export function invertMaskCanvas(mc) {
+  if (!mc || !mc.width || !mc.height) return;
+  const ctx = mc.getContext('2d');
+  const imgd = ctx.getImageData(0, 0, mc.width, mc.height);
+  const data = imgd.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const wasUntouched = data[i + 3] === 0;
+    data[i] = wasUntouched ? 0 : 255 - data[i];
+    data[i + 1] = data[i];
+    data[i + 2] = data[i];
+    data[i + 3] = 255;
+  }
+  ctx.putImageData(imgd, 0, 0);
+}
+
 /* Serialize a mask canvas to a dataURL for history/save (mirrors how paint layers round-trip
    through <img> src on restore) — null if the layer has no mask. */
 export function serializeMask(o) {

@@ -62,6 +62,9 @@ const ICONS = {
   expand: <path d="M3 8V3h5M21 8V3h-5M3 16v5h5M21 16v5h-5" />,
   contract: <path d="M8 3v5H3M16 3v5h5M8 21v-5H3M16 21v-5h5" />,
   similar: <><circle cx="7" cy="7" r="3" /><circle cx="17" cy="7" r="3" /><circle cx="7" cy="17" r="3" /><circle cx="17" cy="17" r="3" /></>,
+  hue: <><circle cx="12" cy="12" r="9" /><path d="M12 3a9 9 0 0 1 0 18" fill="currentColor" stroke="none" /></>,
+  vibrance: <><circle cx="12" cy="12" r="4" /><path d="M12 2v3m0 14v3m10-9h-3M5 12H2m15.5-6.5-2.1 2.1M8.6 15.4l-2.1 2.1m11 0-2.1-2.1M8.6 8.6 6.5 6.5" /></>,
+  invert: <><circle cx="12" cy="12" r="9" /><path d="M12 3v18a9 9 0 0 0 0-18Z" fill="currentColor" stroke="none" /></>,
   'align-left': <><path d="M3 2v20" /><rect x="6" y="6" width="7" height="4" rx="1" fill="currentColor" stroke="none" /><rect x="6" y="14" width="12" height="4" rx="1" fill="currentColor" stroke="none" /></>,
   'align-h-center': <><path d="M12 2v20" /><rect x="8.5" y="6" width="7" height="4" rx="1" fill="currentColor" stroke="none" /><rect x="6" y="14" width="12" height="4" rx="1" fill="currentColor" stroke="none" /></>,
   'align-right': <><path d="M21 2v20" /><rect x="11" y="6" width="7" height="4" rx="1" fill="currentColor" stroke="none" /><rect x="6" y="14" width="12" height="4" rx="1" fill="currentColor" stroke="none" /></>,
@@ -70,11 +73,11 @@ const ICONS = {
   'align-bottom': <><path d="M2 21h20" /><rect x="6" y="11" width="4" height="7" rx="1" fill="currentColor" stroke="none" /><rect x="14" y="6" width="4" height="12" rx="1" fill="currentColor" stroke="none" /></>,
 };
 
-function Icon({ name, size = 15 }) {
+function Icon({ name, size = 15, style }) {
   const glyph = ICONS[name];
   if (!glyph) return null;
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={style}>
       {glyph}
     </svg>
   );
@@ -104,10 +107,10 @@ const SEL_REASON_MSG = {
 };
 
 const EMPTY_PROPS = {
-  active: false, title: 'Properties', isImage: false, isAdjustment: false, fx: { brightness: 100, contrast: 100, saturate: 100, blur: 0 },
+  active: false, title: 'Properties', isImage: false, isAdjustment: false, fx: { brightness: 100, contrast: 100, saturate: 100, blur: 0, hue: 0, vibrance: 0, invert: false },
   text: null,
   hasFill: false, fill: '#d4ff45', shapeGradient: null, blend: 'source-over', opacity: 1,
-  angle: 0, x: '', y: '', w: '', h: '', skewX: 0, skewY: 0,
+  angle: 0, x: '', y: '', w: '', h: '', skewX: 0, skewY: 0, isRect: false, rx: 0,
   shadow: { color: '#000000', blur: 0, offsetX: 0, offsetY: 0 },
   canGroup: false, canUngroup: false, hasSelectionPixels: false,
 };
@@ -143,6 +146,7 @@ function readProps(ed) {
     w: Math.round(o.getScaledWidth ? o.getScaledWidth() : (o.width || 0)),
     h: Math.round(o.getScaledHeight ? o.getScaledHeight() : (o.height || 0)),
     skewX: Math.round(o.skewX || 0), skewY: Math.round(o.skewY || 0),
+    isRect: o.type === 'rect', rx: Math.round(o.rx || 0),
     shadow: {
       color: (o.shadow && o.shadow.color) || '#000000',
       blur: (o.shadow && o.shadow.blur) || 0,
@@ -469,9 +473,14 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                 {maskEdit && (
                   <div style={{ background: 'var(--cm-accent)', color: 'var(--cm-accent-ink)', borderRadius: 8, padding: '8px 10px', marginBottom: 10, fontSize: 12, fontWeight: 600 }}>
                     Editing layer mask — paint white to reveal, black to hide.
-                    <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 8, background: 'var(--cm-panel)', color: 'var(--cm-ink)' }} onClick={() => ed().exitMaskEdit()}>
-                      Done editing mask
-                    </button>
+                    <div className="cm-row" style={{ marginTop: 8 }}>
+                      <button className="cm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--cm-panel)', color: 'var(--cm-ink)' }} onClick={() => ed().invertMask(maskEdit.layerId)} title="Swap hidden/visible across the whole mask">
+                        Invert mask
+                      </button>
+                      <button className="cm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--cm-panel)', color: 'var(--cm-ink)' }} onClick={() => ed().exitMaskEdit()}>
+                        Done editing mask
+                      </button>
+                    </div>
                   </div>
                 )}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
@@ -501,8 +510,12 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                             const stops = opts.gradientStops.map((s, si) => si === i ? { ...s, color: e.target.value } : s);
                             ed().setToolOptions({ gradientStops: stops });
                           }} />
-                          <input type="range" min="0" max="1" step="0.01" value={stop.offset} style={{ flex: 1 }} onChange={e => {
+                          <input type="range" min="0" max="1" step="0.01" value={stop.offset} style={{ flex: 1 }} title="Position" onChange={e => {
                             const stops = opts.gradientStops.map((s, si) => si === i ? { ...s, offset: +e.target.value } : s);
+                            ed().setToolOptions({ gradientStops: stops });
+                          }} />
+                          <input type="range" min="0" max="1" step="0.01" value={stop.alpha ?? 1} style={{ flex: 1 }} title="Opacity" onChange={e => {
+                            const stops = opts.gradientStops.map((s, si) => si === i ? { ...s, alpha: +e.target.value } : s);
                             ed().setToolOptions({ gradientStops: stops });
                           }} />
                           <button className="cm-icon-btn" disabled={opts.gradientStops.length <= 2} title="Remove stop"
@@ -512,10 +525,16 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                         </div>
                       ))}
                     </div>
-                    <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} onClick={() => {
-                      const last = opts.gradientStops[opts.gradientStops.length - 1];
-                      ed().setToolOptions({ gradientStops: [...opts.gradientStops, { offset: Math.min(1, last?.offset ?? 1), color: last?.color || '#ffffff' }] });
-                    }}>+ Add stop</button>
+                    <div className="cm-row" style={{ marginTop: 6 }}>
+                      <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => {
+                        const last = opts.gradientStops[opts.gradientStops.length - 1];
+                        ed().setToolOptions({ gradientStops: [...opts.gradientStops, { offset: Math.min(1, last?.offset ?? 1), color: last?.color || '#ffffff', alpha: last?.alpha ?? 1 }] });
+                      }}>+ Add stop</button>
+                      <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} title="Reverse stop order"
+                        onClick={() => ed().setToolOptions({ gradientStops: opts.gradientStops.map(s => ({ ...s, offset: 1 - s.offset })).sort((a, b) => a.offset - b.offset) })}>
+                        <Icon name="flip" size={13} /> Reverse
+                      </button>
+                    </div>
                   </React.Fragment>
                 )}
 
@@ -587,9 +606,9 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
 
                     <div className="cm-grp" style={{ marginTop: 0, paddingTop: 0, borderTop: 'none' }}>Stacking</div>
                     <div className="cm-row">
-                      <button className="cm-icon-btn" title="Bring to front" style={{ width: 'auto', flex: 1 }} onClick={() => stack('top')}><Icon name="chevronD" size={14} /></button>
-                      <button className="cm-icon-btn" title="Bring forward" style={{ width: 'auto', flex: 1 }} onClick={() => stack('up')}><Icon name="chevronD" size={14} /></button>
-                      <button className="cm-icon-btn" title="Send backward" style={{ width: 'auto', flex: 1 }} onClick={() => stack('down')}><Icon name="chevronD" size={14} /></button>
+                      <button className="cm-icon-btn" title="Bring to front" style={{ width: 'auto', flex: 1 }} onClick={() => stack('top')}><Icon name="chevronD" size={14} style={{ transform: 'rotate(180deg)' }} /></button>
+                      <button className="cm-icon-btn" title="Bring forward" style={{ width: 'auto', flex: 1 }} onClick={() => stack('up')}><Icon name="chevron" size={14} style={{ transform: 'rotate(90deg)' }} /></button>
+                      <button className="cm-icon-btn" title="Send backward" style={{ width: 'auto', flex: 1 }} onClick={() => stack('down')}><Icon name="chevron" size={14} style={{ transform: 'rotate(-90deg)' }} /></button>
                       <button className="cm-icon-btn" title="Send to back" style={{ width: 'auto', flex: 1 }} onClick={() => stack('bottom')}><Icon name="chevronD" size={14} /></button>
                     </div>
                     <div className="cm-row" style={{ marginTop: 6 }}>
@@ -605,6 +624,12 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                         <div className="cm-slider-row"><Icon name="contrast" size={13} /> Contrast <input type="range" min="50" max="150" value={props.fx.contrast} onChange={e => setAdjust({ contrast: +e.target.value })} /></div>
                         <div className="cm-slider-row"><Icon name="droplet" size={13} /> Saturation <input type="range" min="0" max="200" value={props.fx.saturate} onChange={e => setAdjust({ saturate: +e.target.value })} /></div>
                         <div className="cm-slider-row"><Icon name="blurfilter" size={13} /> Blur <input type="range" min="0" max="12" step="0.5" value={props.fx.blur} onChange={e => setAdjust({ blur: +e.target.value })} /></div>
+                        <div className="cm-slider-row"><Icon name="hue" size={13} /> Hue <input type="range" min="-180" max="180" value={props.fx.hue} onChange={e => setAdjust({ hue: +e.target.value })} /></div>
+                        <div className="cm-slider-row"><Icon name="vibrance" size={13} /> Vibrance <input type="range" min="-100" max="100" value={props.fx.vibrance} onChange={e => setAdjust({ vibrance: +e.target.value })} /></div>
+                        <label className="cm-slider-row" style={{ cursor: 'pointer' }}>
+                          <Icon name="invert" size={13} /> Invert
+                          <input type="checkbox" checked={!!props.fx.invert} onChange={e => setAdjust({ invert: e.target.checked })} style={{ marginLeft: 'auto' }} />
+                        </label>
                       </React.Fragment>
                     )}
 
@@ -668,8 +693,12 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                                     const stops = props.shapeGradient.stops.map((s, si) => si === i ? { ...s, color: e.target.value } : s);
                                     setShapeGradientPatch({ stops });
                                   }} />
-                                  <input type="range" min="0" max="1" step="0.01" value={stop.offset} style={{ flex: 1 }} onChange={e => {
+                                  <input type="range" min="0" max="1" step="0.01" value={stop.offset} style={{ flex: 1 }} title="Position" onChange={e => {
                                     const stops = props.shapeGradient.stops.map((s, si) => si === i ? { ...s, offset: +e.target.value } : s);
+                                    setShapeGradientPatch({ stops });
+                                  }} />
+                                  <input type="range" min="0" max="1" step="0.01" value={stop.alpha ?? 1} style={{ flex: 1 }} title="Opacity" onChange={e => {
+                                    const stops = props.shapeGradient.stops.map((s, si) => si === i ? { ...s, alpha: +e.target.value } : s);
                                     setShapeGradientPatch({ stops });
                                   }} />
                                   <button className="cm-icon-btn" disabled={props.shapeGradient.stops.length <= 2} title="Remove stop"
@@ -679,10 +708,16 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                                 </div>
                               ))}
                             </div>
-                            <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} onClick={() => {
-                              const last = props.shapeGradient.stops[props.shapeGradient.stops.length - 1];
-                              setShapeGradientPatch({ stops: [...props.shapeGradient.stops, { offset: Math.min(1, last?.offset ?? 1), color: last?.color || '#ffffff' }] });
-                            }}>+ Add stop</button>
+                            <div className="cm-row" style={{ marginTop: 6 }}>
+                              <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => {
+                                const last = props.shapeGradient.stops[props.shapeGradient.stops.length - 1];
+                                setShapeGradientPatch({ stops: [...props.shapeGradient.stops, { offset: Math.min(1, last?.offset ?? 1), color: last?.color || '#ffffff', alpha: last?.alpha ?? 1 }] });
+                              }}>+ Add stop</button>
+                              <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} title="Reverse stop order"
+                                onClick={() => setShapeGradientPatch({ stops: props.shapeGradient.stops.map(s => ({ ...s, offset: 1 - s.offset })).sort((a, b) => a.offset - b.offset) })}>
+                                <Icon name="flip" size={13} /> Reverse
+                              </button>
+                            </div>
                           </React.Fragment>
                         )}
                       </React.Fragment>
@@ -704,6 +739,9 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                       <label className="cm-field">W <input type="number" value={props.w} onChange={e => setNumeric({ w: +e.target.value })} /></label>
                       <label className="cm-field">H <input type="number" value={props.h} onChange={e => setNumeric({ h: +e.target.value })} /></label>
                     </div>
+                    {props.isRect && (
+                      <div className="cm-slider-row">Corner radius <input type="range" min="0" max={Math.max(1, Math.round(Math.min(props.w, props.h) / 2))} value={props.rx} onChange={e => setNumeric({ rx: +e.target.value })} /></div>
+                    )}
                     <div className="cm-field-grid">
                       <label className="cm-field">Skew X <input type="number" value={props.skewX} onChange={e => setNumeric({ skewX: +e.target.value })} /></label>
                       <label className="cm-field">Skew Y <input type="number" value={props.skewY} onChange={e => setNumeric({ skewY: +e.target.value })} /></label>

@@ -20,10 +20,10 @@ import { getCropHandle, dragCropRect, applyCrop } from './crop.js';
 import { alignDelta, snapDelta } from './layout.js';
 import { EXTRA, serialize, restore, exportImage, addImageLayer, artboardForImage, loadImageEl } from './io.js';
 import { selectionClipObject, renderSelectedPixels } from './pixels.js';
-import { recolorPixels, fxToFilterSpecs, FX_DEFAULTS, normalizeGradientStops } from './color.js';
+import { recolorPixels, fxToFilterSpecs, FX_DEFAULTS, normalizeGradientStops, splitGradientStopColor } from './color.js';
 import { AIRegistry } from './ai/registry.js';
 import { CvEngine, prepImageData } from './cv/client.js';
-import { makeMaskFilterClass, createMaskCanvas, maskStamp, maskLine, serializeMask, deserializeMask } from './mask.js';
+import { makeMaskFilterClass, createMaskCanvas, maskStamp, maskLine, serializeMask, deserializeMask, invertMaskCanvas } from './mask.js';
 
 export const SEL_TOOLS = ['marquee', 'marquee-ellipse', 'lasso', 'lasso-poly', 'lasso-mag', 'wand', 'objectselect', 'hoverselect'];
 export const SHAPE_TOOLS = ['rect', 'ellipse', 'line', 'triangle', 'polygon', 'star'];
@@ -84,6 +84,8 @@ export class Editor {
     this._edgeMap = null;           // magnetic-lasso Sobel edge map, built lazily per artboard capture
     this._lastWandSeed = null;      // last object-select click, scene px — feeds selectSimilar()
     this._hoverSeq = 0;             // monotonic token so a stale async hover preview can't land late
+    this._wandSeq = 0;              // monotonic token so an out-of-order wandPick RPC can't land late
+    this._edgeMapSeq = 0;           // monotonic token so an in-flight buildMagneticEdgeMap can't land after a resize/crop
     this._destroyed = false;        // set by destroy() — async continuations check this before touching this.fc
     this._maskEdit = null;           // {layerId} while a mask is being painted — see enterMaskEdit()
     this._maskDrag = null;
@@ -287,7 +289,7 @@ export class Editor {
   }
 
   _up() {
-    if (this._maskEdit && this._maskDrag) { this._maskDrag = null; this.commit('mask-paint'); return; }
+    if (this._maskEdit && this._maskDrag) { this._maskDrag = null; this._flushFrameJob('mask'); this.commit('mask-paint'); return; }
     const d = this._drag; this._drag = null;
     if (!d) return;
     if (d.kind === 'paint') { this.engine.up(); this.engine.setClip(null); this.commit('stroke'); }
@@ -320,15 +322,21 @@ export class Editor {
   }
 
   /* Magnetic lasso needs an edge map of the flattened scene before it can snap — build it once
-     when the tool is picked (or lazily on first use) rather than per mouse-move. */
+     when the tool is picked (or lazily on first use) rather than per mouse-move. Guarded by a
+     monotonic token (same pattern as _wandSeq/_hoverSeq): resizeCanvas()/applyCrop() bump it when
+     they invalidate _edgeMap, so a build that was already in flight when the artboard changed
+     size/origin can't land afterward and overwrite the (correct) null with stale pre-resize
+     geometry. */
   async buildMagneticEdgeMap() {
+    const seq = ++this._edgeMapSeq;
     this.engine.captureFlat();
     const flat = this.engine._flat;
-    if (!flat) { this._edgeMap = null; return; }
+    if (!flat) { if (seq === this._edgeMapSeq) this._edgeMap = null; return; }
     try {
       const data = prepImageData(flat, 700);
-      this._edgeMap = buildEdgeMapFromImageData(data, this.W, this.H);
-    } catch (e) { this._edgeMap = null; }
+      const edgeMap = buildEdgeMapFromImageData(data, this.W, this.H);
+      if (seq === this._edgeMapSeq) this._edgeMap = edgeMap;
+    } catch (e) { if (seq === this._edgeMapSeq) this._edgeMap = null; }
   }
 
   /* ── magic wand / object select: cv-backed hybrid flood+grabCut, falling back to plain flood ──
@@ -338,6 +346,11 @@ export class Editor {
      has no meaningful non-boolean fallback). */
   async wandPick(pt, { add = false, subtract = false } = {}) {
     this._lastWandSeed = pt;
+    // Monotonic token guarding against out-of-order resolution: _down() fires this fire-and-forget
+    // (never awaited), so a rapid double-click can have two wandPick calls in flight at once — if
+    // the first click's cv RPC resolves AFTER the second click's, it must not clobber the second
+    // click's (later, more current) selection. Mirrors _runHover's seq === this._hoverSeq guard.
+    const seq = ++this._wandSeq;
     this.engine.captureFlat();
     const flat = this.engine._flat;
     let poly = null;
@@ -351,6 +364,7 @@ export class Editor {
         if (pts && pts.length >= 3) poly = pts.map(p => ({ x: p.x / kx, y: p.y / ky }));
       } catch (e) { poly = null; }
     }
+    if (seq !== this._wandSeq) return { status: 'error', reason: 'superseded' };
     if (!poly && flat) {
       const sel = wandSelect(flat, pt, this.toolOpts.tolerance);
       poly = sel ? (sel.pts || selectionPolys(sel)[0]) : null;
@@ -622,7 +636,15 @@ export class Editor {
     else if (dir === 'top') this.fc.bringToFront(o); else if (dir === 'bottom') this.fc.sendToBack(o);
     this.fc.renderAll(); this.commit('reorder');
   }
-  removeLayer(id) { const o = this._byId(id); if (o) { this.fc.remove(o); this.commit('remove'); } }
+  removeLayer(id) {
+    const o = this._byId(id); if (!o) return;
+    // Deleting the layer currently being mask-painted must drop the in-flight mask-edit state and
+    // cancel (not flush) any pending rAF refresh — the refresh's target is about to be removed
+    // from the canvas, so there's nothing left to apply it to (see removeMask's identical guard).
+    if (this._maskEdit && this._maskEdit.layerId === id) { this._cancelFrameJob('mask'); this._maskEdit = null; this._maskDrag = null; this._emit('maskedit', null); }
+    this.fc.remove(o);
+    this.commit('remove');
+  }
   activate(id) {
     const o = this._byId(id);
     if (o) {
@@ -738,8 +760,10 @@ export class Editor {
     this._snap = !!on;
     if (on && !this._snapBound) {
       this._snapBound = true;
-      this.fc.on('object:moving', (opt) => this._snapMove(opt.target));
-      this.fc.on('object:modified', () => this._emit('guides', null));
+      this.fc.on('object:moving', (opt) => { this._snapMove(opt.target); this._liveAdjustmentPreview(); });
+      this.fc.on('object:scaling', () => this._liveAdjustmentPreview());
+      this.fc.on('object:rotating', () => this._liveAdjustmentPreview());
+      this.fc.on('object:modified', () => { this._flushFrameJob('adjustment'); this._emit('guides', null); });
       this.fc.on('mouse:up', () => this._emit('guides', null));
     }
   }
@@ -754,6 +778,51 @@ export class Editor {
     if (snappedX || snappedY) o.setCoords();
     this._emit('snap', { x: snappedX, y: snappedY });
     this._emit('guides', (guideX || guideY) ? { x: guideX, y: guideY } : null);
+  }
+
+  /* Adjustment layers only recompute their captured bitmap in commit() (mouseup) — without this,
+     transforming (move/scale/rotate) a layer that sits below an adjustment layer shows a stale,
+     un-adjusted preview of it mid-gesture that only snaps to the correct filtered composite once
+     the gesture ends. Skipped entirely when there are no adjustment layers in the scene, so the
+     common case (no adjustment layers at all) pays no extra per-frame cost while dragging.
+     _recomputeAdjustmentLayers() is a full re-flatten + per-pixel filter pass per adjustment
+     layer, too expensive to run on every raw pointermove/scaling tick (those can fire faster than
+     the display refreshes) — coalesced to the shared per-animation-frame scheduler below, same
+     pattern as _refreshMaskFilter's mask-paint throttling. */
+  _liveAdjustmentPreview() {
+    if (this.fc.getObjects().some(o => o.role === 'adjustment')) this._coalesceToFrame('adjustment');
+  }
+
+  /* Shared "run this at most once per animation frame" scheduler — later calls with the same key
+     before the frame fires just replace which job runs, so a burst of raw pointer events during a
+     drag/scale/rotate collapses to a single recompute per frame instead of one per event. `flush`
+     runs the job synchronously right now (used at a gesture's end, so a commit()/serialize() right
+     after never captures a scene whose last-tick recompute hasn't actually run yet). */
+  _coalesceToFrame(key, job) {
+    this._frameJobs = this._frameJobs || {};
+    this._frameHandles = this._frameHandles || {};
+    if (job) this._frameJobs[key] = job;
+    if (this._frameHandles[key]) return;
+    this._frameHandles[key] = requestAnimationFrame(() => { this._frameHandles[key] = null; this._flushFrameJob(key); });
+  }
+  _flushFrameJob(key) {
+    if (this._frameHandles && this._frameHandles[key]) { cancelAnimationFrame(this._frameHandles[key]); this._frameHandles[key] = null; }
+    const job = this._frameJobs && this._frameJobs[key]; if (this._frameJobs) this._frameJobs[key] = null;
+    if (key === 'adjustment') { this._recomputeAdjustmentLayers(); this.fc.requestRenderAll(); }
+    else if (key === 'mask') {
+      const target = this._pendingMaskTarget; this._pendingMaskTarget = null;
+      if (!target) return;
+      const f = (target.filters || []).find(x => x.type === 'MaskFilter');
+      if (f) { f.maskCanvas = target.maskEnabled !== false ? target.maskCanvas : null; target.applyFilters(); this.fc.requestRenderAll(); }
+    }
+    else if (typeof job === 'function') job();
+  }
+  /* Cancels a scheduled frame job without running it — used when the target it would have acted
+     on is gone (layer deleted, editor destroyed) so the deferred work has nothing left to do. */
+  _cancelFrameJob(key) {
+    if (this._frameHandles && this._frameHandles[key]) { cancelAnimationFrame(this._frameHandles[key]); this._frameHandles[key] = null; }
+    if (this._frameJobs) this._frameJobs[key] = null;
+    if (key === 'mask') this._pendingMaskTarget = null;
   }
 
   /* Shift+drag a side handle (mr/ml/mt/mb — normally single-axis) keeps the object's aspect
@@ -1013,6 +1082,17 @@ export class Editor {
     this.fc.renderAll();
     this.commit('mask-enabled');
   }
+  /* Cmd/Ctrl+I on a mask (Photoshop) — swaps hidden<->visible across the WHOLE mask in one step,
+     the single most-reached-for mask edit after "paint it": flip a mask that hid the wrong region
+     instead of repainting it by hand. A no-op re-paint of the enable/apply plumbing every other
+     mask edit already goes through, so undo/redo and the enabled-toggle keep working unchanged. */
+  invertMask(id) {
+    const o = this._byId(id); if (!o || !o.maskCanvas) return;
+    invertMaskCanvas(o.maskCanvas);
+    o.applyFilters();
+    this.fc.renderAll();
+    this.commit('invert-mask');
+  }
   enterMaskEdit(id) {
     const o = this._byId(id); if (!this._maskable(o) || !o.maskCanvas) return;
     this._maskEdit = { layerId: id };
@@ -1022,15 +1102,25 @@ export class Editor {
     if (!['brush', 'pencil', 'eraser'].includes(this.tool)) this.setTool('brush');
     this._emit('maskedit', this._maskEdit);
   }
+  /* Ending mask edit outside the normal mouseup path (a host UI switching layers mid-stroke, or
+     picking another tool) must still flush any pending rAF-coalesced refresh — otherwise a stale
+     callback fires a frame later against whatever state the editor has moved on to. */
   exitMaskEdit() {
     if (!this._maskEdit) return;
+    this._flushFrameJob('mask');
     this._maskEdit = null;
     this._maskDrag = null;
     this._emit('maskedit', null);
   }
+  /* applyFilters() re-runs the WHOLE filter chain from the pristine source (including MaskFilter's
+     own full getImageData + per-pixel loop over the artboard) — expensive enough that calling it
+     once per mousemove tick while painting a mask is visibly janky on a large artboard. mousemove
+     can fire faster than the display refreshes, so coalesce to at most one actual refresh per
+     animation frame via the shared _coalesceToFrame scheduler (same one _liveAdjustmentPreview
+     uses) — later calls within the same frame just replace which layer's refresh will run. */
   _refreshMaskFilter(o) {
-    const f = (o.filters || []).find(x => x.type === 'MaskFilter');
-    if (f) { f.maskCanvas = o.maskEnabled !== false ? o.maskCanvas : null; o.applyFilters(); }
+    this._pendingMaskTarget = o;
+    this._coalesceToFrame('mask');
   }
 
   /* ── group / ungroup active multi-selection ──────────────────────────────────────────────
@@ -1064,16 +1154,35 @@ export class Editor {
     this.fc.renderAll();
     this.commit('flip');
   }
-  /* patch keys: any of x, y, w, h, angle, skewX, skewY — mirrors the reference's setNumeric. */
+  /* patch keys: any of x, y, w, h, angle, skewX, skewY, rx — mirrors the reference's setNumeric.
+     w/h are read off the same getScaledWidth()/getScaledHeight() the properties panel displays
+     (readProps in @canvasmith/react), which factor in stroke width and skew — not just
+     `width * scaleX` — so the new scale is derived from the CURRENT scaled size rather than
+     assumed to be `patch.w / o.width`, which drifted for any object with a stroke or a nonzero
+     skew (the field would resize by the wrong factor). rx sets a rect's corner radius uniformly
+     (both rx and ry together — the properties panel exposes one "corner radius" field, not
+     independent x/y radii); no-op on anything but a rect, same silent-no-op contract as
+     setFill/setShapeGradient for a property that doesn't apply to the active object's type. */
   setNumeric(patch) {
     const o = this.fc.getActiveObject(); if (!o) return;
     if ('x' in patch) o.left = patch.x;
     if ('y' in patch) o.top = patch.y;
-    if ('w' in patch && o.width) o.scaleX = Math.max(1, patch.w) / o.width;
-    if ('h' in patch && o.height) o.scaleY = Math.max(1, patch.h) / o.height;
+    if ('w' in patch) {
+      const curW = o.getScaledWidth ? o.getScaledWidth() : o.width * (o.scaleX || 1);
+      if (curW) o.scaleX = (o.scaleX || 1) * (Math.max(1, patch.w) / curW);
+    }
+    if ('h' in patch) {
+      const curH = o.getScaledHeight ? o.getScaledHeight() : o.height * (o.scaleY || 1);
+      if (curH) o.scaleY = (o.scaleY || 1) * (Math.max(1, patch.h) / curH);
+    }
     if ('angle' in patch) o.angle = patch.angle;
     if ('skewX' in patch) o.skewX = patch.skewX;
     if ('skewY' in patch) o.skewY = patch.skewY;
+    if ('rx' in patch && o.type === 'rect') {
+      const r = Math.max(0, patch.rx);
+      o.set({ rx: r, ry: r });
+      o.dirty = true;
+    }
     o.setCoords();
     this.fc.renderAll();
     this.commit('transform');
@@ -1122,7 +1231,7 @@ export class Editor {
     const t = o && o.type === 'activeSelection' ? o.getObjects()[0] : o;
     const g = t && t.fill && typeof t.fill === 'object' && t.fill.type ? t.fill : null;
     if (!g) return null;
-    return { type: g.type, stops: (g.colorStops || []).map(s => ({ offset: s.offset, color: s.color })) };
+    return { type: g.type, stops: (g.colorStops || []).map(s => ({ offset: s.offset, ...splitGradientStopColor(s.color) })) };
   }
 
   /* Typography — patch keys: any of fontFamily, fontSize, fontWeight, fontStyle ('normal'|'italic'),
@@ -1159,6 +1268,14 @@ export class Editor {
     this.W = w; this.H = h;
     this.fc.setDimensions({ width: w, height: h });
     this.engine.W = w; this.engine.H = h;
+    // The magnetic-lasso edge map, the last wand seed, and every cached hover-preview polygon are
+    // all scene-space coordinates measured against the OLD artboard size/origin — stale (and
+    // potentially out of bounds) once W/H change, so drop them rather than let the next magnetic-
+    // lasso/select-similar/hover-confirm call snap against or commit pre-resize geometry.
+    this._edgeMap = null;
+    this._lastWandSeed = null;
+    this._edgeMapSeq++;
+    if (this._hoverCache) this._hoverCache.clear();
     this.fc.renderAll();
     this.commit('resize-canvas');
     this._emit('resize', { width: w, height: h });
@@ -1171,6 +1288,12 @@ export class Editor {
     this.W = dim.width; this.H = dim.height;
     this.fc.setDimensions(dim);
     this.crop = null;
+    // Same reasoning as resizeCanvas(): the artboard origin just shifted (every object was
+    // re-based by -x,-y) so any cached scene-space geometry from before the crop is stale.
+    this._edgeMap = null;
+    this._lastWandSeed = null;
+    this._edgeMapSeq++;
+    if (this._hoverCache) this._hoverCache.clear();
     this.setTool('select');
     this.commit('crop');
     this._emit('resize', dim);
@@ -1320,5 +1443,11 @@ export class Editor {
     return { status: 'ok', result: regions.length };
   }
 
-  destroy() { this._destroyed = true; this.fc.dispose(); this._listeners = {}; if (this.cv) this.cv.destroy(); }
+  destroy() {
+    this._destroyed = true;
+    if (this._frameHandles) Object.keys(this._frameHandles).forEach(key => this._cancelFrameJob(key));
+    this.fc.dispose();
+    this._listeners = {};
+    if (this.cv) this.cv.destroy();
+  }
 }

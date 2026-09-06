@@ -81,22 +81,53 @@ export function recolorPixels(data, hex) {
 /* Normalizes a gradient stop list: sorts by offset, clamps each to [0,1], and guarantees at least
    2 stops exist (falls back to a default 2-color ramp) — the one piece of gradient-stop validation
    shared by both the raster paint-tool gradient (engine.js) and vector shape-fill gradients
-   (shapes take a Fabric gradient object built from the same stop shape). */
+   (shapes take a Fabric gradient object built from the same stop shape). Each stop's `color` is
+   resolved to the final CSS color string a real CanvasGradient/fabric.Gradient consumes: a plain
+   hex passes through unchanged, and an `alpha` field (0..1, defaulting to 1 when absent) folds
+   into an `rgba(...)` string via `rgba()` so a stop can fade toward transparent — Canvas2D's
+   addColorStop and Fabric's colorStops both accept any valid CSS color string, so this needed no
+   change on the consuming side (engine.js's buildCanvasGradient, editor.js's setShapeGradient). */
 export function normalizeGradientStops(stops) {
   const s = (Array.isArray(stops) && stops.length ? stops : [{ offset: 0, color: '#d4ff45' }, { offset: 1, color: '#7c3aed' }])
-    .map(st => ({ offset: Math.max(0, Math.min(1, st.offset)), color: st.color }))
+    .map(st => ({
+      offset: Math.max(0, Math.min(1, st.offset)),
+      color: (st.alpha == null || st.alpha >= 1) ? st.color : rgba(st.color, Math.max(0, st.alpha)),
+    }))
     .sort((a, b) => a.offset - b.offset);
   return s;
 }
 
+/* Splits a resolved gradient-stop color string back into the {color, alpha} pair the stop-editor
+   UI edits separately (a hex swatch input can't represent alpha on its own) — `color` keeps the
+   same key/shape getShapeGradient always returned (a plain hex, safe to feed straight back into
+   an <input type="color">), `alpha` is the new 0..1 field alongside it. Round-trips whatever
+   normalizeGradientStops/rgba() produced: an `rgba(r,g,b,a)` string decodes to its hex + alpha,
+   anything else (a plain hex, or a named CSS color already resolved upstream) is treated as fully
+   opaque. Used by Editor#getShapeGradient's UI-facing consumers to redisplay a stop that may have
+   been read back from a live Fabric gradient (whose colorStops always hold the resolved string,
+   never the original {color, alpha} the UI last set). */
+export function splitGradientStopColor(color) {
+  const m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(color || '');
+  if (!m) return { color: color || '#000000', alpha: 1 };
+  return { color: toHex(+m[1], +m[2], +m[3]), alpha: m[4] != null ? Math.max(0, Math.min(1, +m[4])) : 1 };
+}
+
 /* Defaults for non-destructive image adjustment (Editor#setImageFilters/getImageFilters). Human
-   units: brightness/contrast/saturate are 100 = unchanged (50..150-ish range), blur is px (0 = none). */
-export const FX_DEFAULTS = { brightness: 100, contrast: 100, saturate: 100, blur: 0 };
+   units: brightness/contrast/saturate are 100 = unchanged (50..150-ish range), blur is px (0 =
+   none), hue is degrees (-180..180, 0 = unchanged), vibrance is -100..100 (0 = unchanged, same
+   shape as saturate but weighted toward already-muted colors), invert is a plain on/off toggle. */
+export const FX_DEFAULTS = { brightness: 100, contrast: 100, saturate: 100, blur: 0, hue: 0, vibrance: 0, invert: false };
 
 /* Pure mapping from human fx values to the Fabric Image.filters constructor args, so the mapping
    itself is testable without touching fabric. Mirrors the reference editor's setFx exactly:
-   brightness/contrast/saturate are (v-100)/100, blur is v/20. Editor#setImageFilters turns this
-   spec into real `new fabric.Image.filters.X(params)` instances. */
+   brightness/contrast/saturate are (v-100)/100, blur is v/20. hue/vibrance/invert follow the same
+   "human units in, Fabric's own filter units out" contract: hue's degrees map to Fabric's
+   HueRotation range of -1..1 (representing -180..180deg), vibrance's -100..100 maps to Fabric's
+   Vibrance range of -1..1, invert passes straight through to Fabric's boolean Invert filter.
+   Editor#setImageFilters turns this spec into real `new fabric.Image.filters.X(params)`
+   instances, and _recomputeAdjustmentLayers filters out any whose isNeutralState() is true before
+   applying — a filter instantiated at its neutral default (rotation:0, vibrance:0, invert:false)
+   is a correct no-op either way, this is just about skipping needless per-pixel passes. */
 export function fxToFilterSpecs(fx) {
   const f = { ...FX_DEFAULTS, ...fx };
   return [
@@ -104,5 +135,8 @@ export function fxToFilterSpecs(fx) {
     { type: 'Contrast', params: { contrast: (f.contrast - 100) / 100 } },
     { type: 'Saturation', params: { saturation: (f.saturate - 100) / 100 } },
     { type: 'Blur', params: { blur: f.blur / 20 } },
+    { type: 'HueRotation', params: { rotation: f.hue / 180 } },
+    { type: 'Vibrance', params: { vibrance: f.vibrance / 100 } },
+    { type: 'Invert', params: { invert: !!f.invert } },
   ];
 }
