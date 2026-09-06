@@ -14,7 +14,11 @@ const TIMEOUT_MS = 20000;
 
 export class CvEngine {
   constructor({ openCvUrl = DEFAULT_OPENCV_URL } = {}) {
-    this._openCvUrl = openCvUrl;
+    // Resolved to an absolute URL here, in the main-thread page context (where `location` is
+    // available) — a root-relative path like DEFAULT_OPENCV_URL's '/packages/...' reaches the
+    // worker's importScripts() as a bare string with no base to resolve against (its blob: URL
+    // doesn't count, per Chromium), which throws a SyntaxError there instead of loading.
+    this._openCvUrl = (typeof location !== 'undefined') ? new URL(openCvUrl, location.href).href : openCvUrl;
     this._worker = null;
     this._bootState = 'idle';      // idle | booting | ready | failed
     this._bootWait = null;

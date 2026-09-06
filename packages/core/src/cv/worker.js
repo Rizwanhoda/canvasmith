@@ -198,9 +198,23 @@ export function cvWorkerBody() {
   self.onmessage = function (e) { var m = e.data; if (!m || !m.type) return; if (ready) handle(m); else q.push(m); };
 }
 
-/* Loaded via importScripts INSIDE the worker at runtime — never bundled, never an npm dependency.
-   A host can pass its own URL (self-hosted mirror, pinned version) to cvWorkerSource()/CvEngine. */
-export const DEFAULT_OPENCV_URL = 'https://unpkg.com/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';
+/* Loaded via importScripts INSIDE the worker at runtime — never bundled as a JS module import.
+   Defaults to the copy vendored at packages/core/vendor/opencv/opencv.js (see VERSION alongside
+   it) so a cv-backed tool works offline and doesn't depend on unpkg.com being reachable.
+
+   This is a root-relative path, NOT `new URL('...', import.meta.url)`: this module ships both as
+   raw source (the demo imports packages/core/src/cv/worker.js directly, unbundled — import.meta.url
+   would work there) AND bundled into @canvasmith/react's dist/index.js and dist/standalone.js,
+   where import.meta.url would resolve against the bundled file's own location (wrong path
+   entirely), and the IIFE standalone build doesn't support import.meta at all (esbuild strips it
+   to an empty object). A root-relative path has none of those failure modes, but it does assume
+   packages/core/vendor/opencv/opencv.js is served at that same path from the consuming site's
+   root — true for this repo's own Netlify deploy, NOT guaranteed for a downstream host.
+   Any host bundling @canvasmith/react (or serving the demo from a subpath) MUST either copy
+   vendor/opencv/opencv.js to that path themselves, or override it explicitly:
+     new CvEngine({ openCvUrl: '/my-assets/opencv.js' })
+   — see packages/react/README (mount()'s `openCvUrl` option) for the React-package equivalent. */
+export const DEFAULT_OPENCV_URL = '/packages/core/vendor/opencv/opencv.js';
 
 export function cvWorkerSource(openCvUrl = DEFAULT_OPENCV_URL) {
   return 'self.OPENCV_URL=' + JSON.stringify(openCvUrl) + ';(' + cvWorkerBody.toString() + ')();';

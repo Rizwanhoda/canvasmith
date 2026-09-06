@@ -78,6 +78,17 @@ export function recolorPixels(data, hex) {
   return data;
 }
 
+/* Normalizes a gradient stop list: sorts by offset, clamps each to [0,1], and guarantees at least
+   2 stops exist (falls back to a default 2-color ramp) — the one piece of gradient-stop validation
+   shared by both the raster paint-tool gradient (engine.js) and vector shape-fill gradients
+   (shapes take a Fabric gradient object built from the same stop shape). */
+export function normalizeGradientStops(stops) {
+  const s = (Array.isArray(stops) && stops.length ? stops : [{ offset: 0, color: '#d4ff45' }, { offset: 1, color: '#7c3aed' }])
+    .map(st => ({ offset: Math.max(0, Math.min(1, st.offset)), color: st.color }))
+    .sort((a, b) => a.offset - b.offset);
+  return s;
+}
+
 /* Defaults for non-destructive image adjustment (Editor#setImageFilters/getImageFilters). Human
    units: brightness/contrast/saturate are 100 = unchanged (50..150-ish range), blur is px (0 = none). */
 export const FX_DEFAULTS = { brightness: 100, contrast: 100, saturate: 100, blur: 0 };

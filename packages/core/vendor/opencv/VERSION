@@ -1,0 +1,9 @@
+@techstark/opencv-js@4.10.0-release.1
+Source: https://unpkg.com/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js
+Vendored: 2026-09-06
+
+Single-file UMD build with the OpenCV WASM binary embedded as base64 — no separate .wasm fetch.
+Committed directly (not installed via npm) so the no-build static site (Netlify + the vanilla
+demo's raw ES module imports) can serve it as a plain static asset with no install/build step.
+
+To refresh: download the same URL with a newer release tag and replace opencv.js + this file.

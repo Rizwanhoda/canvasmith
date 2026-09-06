@@ -38,6 +38,9 @@
   .rail-btn[data-on=true] .rail-caret { border-bottom-color:var(--accent-ink) }
   .rail-group { position:relative }
   .rail-flyout { position:absolute; left:46px; top:0; z-index:60; min-width:190px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:6px; box-shadow:0 8px 24px rgba(0,0,0,.35) }
+  .popover { position:absolute; right:0; top:calc(100% + 6px); z-index:60; width:220px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; box-shadow:0 8px 24px rgba(0,0,0,.35) }
+  .popover h4 { margin:0 0 10px; font-size:12px }
+  .popover-anchor { position:relative }
   .rail-flyout-item { display:flex; align-items:center; gap:9px; padding:7px 9px; border-radius:7px; cursor:pointer; font-size:12.5px; color:var(--ink) }
   .rail-flyout-item:hover, .rail-flyout-item[data-on=true] { background:var(--bg) }
   .rail-flyout-item svg { flex-shrink:0; color:var(--dim) }
@@ -68,8 +71,9 @@
   button:hover { background:var(--bg) } button[data-on=true] { background:var(--accent); color:var(--accent-ink) }
   button[data-on=true] svg { color:var(--accent-ink) }
   .act { border:1px solid var(--line); text-align:center; margin-top:6px; width:auto; display:inline-flex; justify-content:center } .act:hover { border-color:var(--accent) }
-  .icon-btn { all:unset; box-sizing:border-box; cursor:pointer; display:flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:7px; border:1px solid var(--line); color:var(--ink); transition:border-color .1s,color .1s }
+  .icon-btn { all:unset; box-sizing:border-box; cursor:pointer; display:flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:7px; border:1px solid var(--line); color:var(--ink); transition:border-color .1s,color .1s,background .1s }
   .icon-btn:hover { border-color:var(--accent) }
+  .icon-btn[data-active=true] { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) }
   nav button svg, .layer svg { flex-shrink:0; color:inherit }
   input[type=color] { width:26px; height:24px; border:none; background:none }
   /* ── range sliders: flat themed track + thumb, cross-browser (native chrome doesn't follow the
@@ -143,6 +147,23 @@
   <input type="color" id="col" value="#d4ff45" title="colour">
   <button class="icon-btn" id="undo" title="Undo"></button>
   <button class="icon-btn" id="redo" title="Redo"></button>
+  <div class="popover-anchor">
+    <button class="act" style="width:auto;padding:6px 12px;margin-top:0" id="canvas-size-btn">Canvas size</button>
+    <div class="popover" id="canvas-size-pop" hidden>
+      <h4>Canvas size</h4>
+      <div class="field-grid">
+        <label class="field">W <input type="number" id="cs-w" min="1" max="8000"></label>
+        <label class="field">H <input type="number" id="cs-h" min="1" max="8000"></label>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11.5px">
+        <input type="checkbox" id="cs-lock" checked> Lock aspect ratio
+      </label>
+      <div style="display:flex;gap:6px;margin-top:12px">
+        <button class="act" id="cs-cancel" style="flex:1">Cancel</button>
+        <button class="act" id="cs-apply" style="flex:1">Apply</button>
+      </div>
+    </div>
+  </div>
   <button class="icon-btn" id="theme-toggle" title="Toggle light/dark theme"></button>
   <button class="act" style="width:auto;padding:6px 12px;margin-top:0" id="png">⬇ PNG</button>
   <button class="act" style="width:auto;padding:6px 12px;margin-top:0" id="svg">⬇ SVG</button>
@@ -157,18 +178,37 @@
       <button data-tab="layers"></button>
     </div>
     <div id="tool-panel">
+      <div id="maskedit-banner" style="display:none;background:var(--accent);color:var(--accent-ink);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12px;font-weight:600">
+        Editing layer mask — paint white to reveal, black to hide.
+        <button class="act" id="maskedit-done" style="width:100%;margin-top:8px;background:var(--panel);color:var(--ink)">Done editing mask</button>
+      </div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span id="tool-icon"></span><strong id="tool-name" style="text-transform:capitalize"></strong>
       </div>
       <div class="note" id="tool-hint" style="margin-top:0"></div>
       <button class="pill-toggle" id="snap-toggle" data-on="true">Snap: on</button>
 
+      <div id="gradient-section" style="display:none">
+        <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Gradient</div>
+        <div style="display:flex;gap:6px">
+          <button class="act" id="grad-type-linear" style="flex:1">Linear</button>
+          <button class="act" id="grad-type-radial" style="flex:1">Radial</button>
+        </div>
+        <div id="grad-stops" style="display:flex;flex-direction:column;gap:6px;margin-top:8px"></div>
+        <button class="act" id="grad-add-stop" style="width:100%;margin-top:6px">+ Add stop</button>
+        <div class="note">Drag on the canvas to paint the gradient.</div>
+      </div>
+
       <div class="grp">Align to canvas</div>
       <div class="align-grid">
-        <button data-edge="left">L</button><button data-edge="center">C</button><button data-edge="right">R</button>
-        <button data-edge="top">T</button><button data-edge="middle">M</button><button data-edge="bottom">B</button>
+        <button data-edge="left" title="Align left"></button><button data-edge="center" title="Align center"></button><button data-edge="right" title="Align right"></button>
+        <button data-edge="top" title="Align top"></button><button data-edge="middle" title="Align middle"></button><button data-edge="bottom" title="Align bottom"></button>
       </div>
       <button class="act" id="duplicate" style="width:100%"></button>
+
+      <div class="grp">Auto-detect</div>
+      <button class="act" id="sel-detect" style="width:100%"></button>
+      <div id="detect-results" style="display:flex;flex-direction:column;gap:2px;margin-top:6px"></div>
 
       <div class="grp">Selection (needs a selection)</div>
       <div style="display:flex;gap:6px">
@@ -190,6 +230,7 @@
         <button class="chip" id="add-circle"></button>
         <button class="chip" id="add-image"></button>
         <button class="chip" id="add-paint"></button>
+        <button class="chip" id="add-adjustment"></button>
       </div>
       <div class="grp">Open</div>
       <button class="act" id="openfile">📁 Open image…</button>
@@ -230,11 +271,57 @@
     </div>
 
     <div id="adjust-section" style="display:none">
-      <div class="grp">Adjust</div>
+      <div class="grp" id="adjust-section-label">Adjust</div>
+      <div class="note" id="adjust-section-note" style="display:none;margin-top:0">Affects every layer below this one in the stack.</div>
       <div class="slider-row" id="adj-brightness-row">Brightness <input type="range" id="adj-brightness" min="50" max="150" value="100"></div>
       <div class="slider-row" id="adj-contrast-row" style="margin-top:6px">Contrast <input type="range" id="adj-contrast" min="50" max="150" value="100"></div>
       <div class="slider-row" id="adj-saturate-row" style="margin-top:6px">Saturation <input type="range" id="adj-saturate" min="0" max="200" value="100"></div>
       <div class="slider-row" id="adj-blur-row" style="margin-top:6px">Blur <input type="range" id="adj-blur" min="0" max="12" step="0.5" value="0"></div>
+    </div>
+
+    <div id="typography-section" style="display:none">
+      <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Typography</div>
+      <select id="tx-font" style="width:100%;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:12px"></select>
+      <div class="field-grid">
+        <label class="field">Size <input type="number" id="tx-size" min="1" max="800"></label>
+        <label class="field">Weight
+          <select id="tx-weight" style="width:100%;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:12px">
+            <option value="300">Light</option><option value="400">Regular</option><option value="500">Medium</option>
+            <option value="600">Semibold</option><option value="700">Bold</option><option value="800">Extrabold</option>
+          </select>
+        </label>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="icon-btn" id="tx-italic" style="width:auto;flex:1" title="Italic"><i>I</i></button>
+        <button class="icon-btn" id="tx-underline" style="width:auto;flex:1" title="Underline"><u>U</u></button>
+        <button class="icon-btn" id="tx-strike" style="width:auto;flex:1" title="Strikethrough"><s>S</s></button>
+        <button class="icon-btn" id="tx-align-left" style="width:auto;flex:1" title="Align left"></button>
+        <button class="icon-btn" id="tx-align-center" style="width:auto;flex:1" title="Align center"></button>
+        <button class="icon-btn" id="tx-align-right" style="width:auto;flex:1" title="Align right"></button>
+      </div>
+      <div class="slider-row" style="margin-top:8px">Line height <input type="range" id="tx-lineheight" min="0.8" max="2.5" step="0.05"></div>
+      <div class="slider-row" style="margin-top:6px">Letter spacing <input type="range" id="tx-spacing" min="-100" max="800" step="10"></div>
+    </div>
+
+    <div class="grp" id="fill-section-label">Fill</div>
+    <div id="fill-section">
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <button class="act" id="fill-mode-solid" style="flex:1">Solid</button>
+        <button class="act" id="fill-mode-gradient" style="flex:1">Gradient</button>
+      </div>
+      <div id="fill-solid" style="display:flex;align-items:center;gap:8px">
+        <input type="color" id="xf-fill" value="#d4ff45" title="Fill colour" style="flex-shrink:0">
+        <span class="note" style="margin:0">Colour of the selected shape or text.</span>
+      </div>
+      <div id="fill-gradient" style="display:none">
+        <div style="display:flex;gap:6px">
+          <button class="act" id="fg-type-linear" style="flex:1">Linear</button>
+          <button class="act" id="fg-type-radial" style="flex:1">Radial</button>
+        </div>
+        <div class="slider-row" id="fg-angle-row" style="margin-top:8px">Angle <input type="range" id="fg-angle" min="0" max="360" value="0"></div>
+        <div id="fg-stops" style="display:flex;flex-direction:column;gap:6px;margin-top:8px"></div>
+        <button class="act" id="fg-add-stop" style="width:100%;margin-top:6px">+ Add stop</button>
+      </div>
     </div>
 
     <div class="grp">Blend &amp; opacity</div>
@@ -279,11 +366,19 @@
 </main>
 
 <script type="module">
-import { Editor, GeminiProvider, installBridge, installDropImport, selectionToPath2D, makeShape, makeText }
+import { Editor, GeminiProvider, installBridge, installDropImport, selectionToPath2D, makeShape, makeText, installKeybindings, FONT_GROUPS, FONT_STYLESHEET_URL }
   from '../../packages/core/src/index.js';
 
 const ed = new Editor({ fabric: window.fabric, canvasEl: document.getElementById('cv'), width: 960, height: 640 });
 window.ed = ed;   // poke at the API from the console
+
+/* Google Fonts stylesheet for the typography panel's non-system fonts — added as a real <link>
+   (not @import) so the browser can start the font fetch immediately rather than waiting on the
+   CSSOM. A picked Google font just shows its generic (serif/sans-serif/monospace) fallback until
+   this loads, same as any web font — no blocking, no flash-of-missing-glyph handling needed. */
+const fontLink = document.createElement('link');
+fontLink.rel = 'stylesheet'; fontLink.href = FONT_STYLESHEET_URL;
+document.head.appendChild(fontLink);
 
 /* ── icons: inline SVG paths, matched glyph-for-glyph to the reference editor's icon set
    (ditto-fe/src/components/primitives.jsx ICON_PATHS) so a tool always reads the same way
@@ -349,10 +444,20 @@ const ICON_PATHS = {
   droplet: 'M12 3s6 5.7 6 10a6 6 0 0 1-12 0c0-4.3 6-10 6-10z',               // ditto's droplet, for Saturation
   blurfilter: 'M4 5h16l-6 8v5l-4 2v-7L4 5z',                                 // ditto's filter, for Blur
   lock: 'M6 11V8a6 6 0 0 1 12 0v3M5 11h14v9H5z',                            // ditto's lock, for the per-layer lock toggle
+  mask: 'circle:12,12,9|M12 3v18',                                          // half-tone circle: layer mask affordance (canvasmith-only, no reference counterpart)
+  'align-left': 'M3 2v20|fillrect:6,6,7,4,1|fillrect:6,14,12,4,1',
+  'align-h-center': 'M12 2v20|fillrect:8.5,6,7,4,1|fillrect:6,14,12,4,1',
+  'align-right': 'M21 2v20|fillrect:11,6,7,4,1|fillrect:6,14,12,4,1',
+  'align-top': 'M2 3h20|fillrect:6,6,4,7,1|fillrect:14,6,4,12,1',
+  'align-v-center': 'M2 12h20|fillrect:6,8.5,4,7,1|fillrect:14,6,4,12,1',
+  'align-bottom': 'M2 21h20|fillrect:6,11,4,7,1|fillrect:14,6,4,12,1',
 };
 function iconSVG(name, size = 15) {
   const spec = ICON_PATHS[name]; if (!spec) return '';
   const shapes = spec.split('|').map(part => {
+    // a "fillrect:" bar renders solid (fill=currentColor, no stroke) — used for align glyphs'
+    // filled bars, kept distinct from "rect:" so every other icon's outlined boxes are untouched.
+    if (part.startsWith('fillrect:')) { const [x, y, w, h, rx] = part.slice(9).split(',').map(Number); return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${rx}" fill="currentColor" stroke="none"/>`; }
     if (part.startsWith('rect:')) { const [x, y, w, h, rx] = part.slice(5).split(',').map(Number); return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${rx}"/>`; }
     if (part.startsWith('circle:')) { const [cx, cy, r] = part.slice(7).split(',').map(Number); return `<circle cx="${cx}" cy="${cy}" r="${r}"/>`; }
     if (part.startsWith('ellipse:')) { const [cx, cy, rx, ry] = part.slice(8).split(',').map(Number); return `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}"/>`; }
@@ -376,6 +481,10 @@ themeBtn.onclick = () => applyMode(document.documentElement.dataset.mode === 'da
 const drawOverlays = () => {
   const ctx = ed.fc.contextTop; if (!ctx) return;
   ed.fc.clearContext(ctx);
+  // clearContext wipes contextTop wholesale, which is also where fabric draws its own live
+  // marquee/group-selection box (renderTopLayer, called just before this fires from
+  // renderTop's after:render). Redraw that layer first so our own overlay below doesn't erase it.
+  ed.fc.renderTopLayer(ctx);
   const v = ed.fc.viewportTransform;
   ctx.save(); ctx.transform(v[0], v[1], v[2], v[3], v[4], v[5]);
   if (ed.selection) {
@@ -409,39 +518,30 @@ const drawOverlays = () => {
                             [c.x + c.w / 2, c.y], [c.x + c.w / 2, c.y + c.h], [c.x, c.y + c.h / 2], [c.x + c.w, c.y + c.h / 2]])
       ctx.fillRect(hx - hs, hy - hs, hs * 2, hs * 2);
   }
+  if (dragGuides) {
+    // Figma-style smart guides — thin magenta lines showing what a dragged layer just aligned to.
+    ctx.strokeStyle = '#ff2fc0'; ctx.lineWidth = 1 / v[0]; ctx.setLineDash([]);
+    if (dragGuides.x) {
+      ctx.beginPath(); ctx.moveTo(dragGuides.x.x, dragGuides.x.y0); ctx.lineTo(dragGuides.x.x, dragGuides.x.y1); ctx.stroke();
+    }
+    if (dragGuides.y) {
+      ctx.beginPath(); ctx.moveTo(dragGuides.y.x0, dragGuides.y.y); ctx.lineTo(dragGuides.y.x1, dragGuides.y.y); ctx.stroke();
+    }
+  }
   ctx.restore();
 };
 let hoverPreview = null;
+let dragGuides = null;
+ed.on('guides', g => { dragGuides = g; ed.fc.requestRenderAll(); });
 ed.fc.on('after:render', drawOverlays);
 ed.on('selection', () => ed.fc.requestRenderAll());
 ed.on('crop', () => ed.fc.requestRenderAll());
 ed.on('hover', h => { hoverPreview = h; ed.fc.requestRenderAll(); });
 
-/* Enter/Escape finish or cancel an in-progress polygon/magnetic lasso build — the only keyboard
-   affordance this demo adds, since the rest of the shortcut set is a host-shell decision. */
-document.addEventListener('keydown', e => {
-  if (!['lasso-poly', 'lasso-mag'].includes(ed.tool) || !ed._polyBuild) return;
-  if (e.key === 'Enter') { e.preventDefault(); ed.finishPolyLasso(); }
-  else if (e.key === 'Escape') { e.preventDefault(); ed.cancelPolyLasso(); }
-});
-
-/* Delete/Backspace removes the active layer — but not while typing in a form field or editing
-   text on the canvas (IText owns Backspace there: it should delete a character, not the layer). */
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Delete' && e.key !== 'Backspace') return;
-  const tag = document.activeElement && document.activeElement.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  const active = ed.fc.getActiveObject();
-  if (!active || active.isEditing) return;
-  e.preventDefault();
-  if (active.type === 'activeSelection') {
-    active.getObjects().slice().forEach(o => o.id && ed.removeLayer(o.id));
-    ed.fc.discardActiveObject(); ed.fc.renderAll();
-  } else {
-    const layer = ed.layers().find(l => l.active);
-    if (layer) ed.removeLayer(layer.id);
-  }
-});
+/* Shared shortcut set — undo/redo, copy/paste, delete-active-layer, poly-lasso Enter/Escape,
+   single-letter tool switch, arrow-key nudge. Lives in core (keybindings.js) so the demo and the
+   React shell can't drift the way the Properties panel once did. */
+installKeybindings(ed);
 
 /* ── toolbar: a collapsed icon rail, one button per group, matching the reference editor's own
    rail (56px wide, 40x36 buttons, a corner caret + flyout for groups with 2+ tools) ──────────── */
@@ -536,8 +636,55 @@ ed.on('tool', t => {
   document.getElementById('tool-icon').innerHTML = iconSVG(t);
   document.getElementById('tool-name').textContent = t;
   document.getElementById('tool-hint').textContent = TOOL_HINTS[t] || 'Drag on the canvas to use this tool.';
+  document.getElementById('gradient-section').style.display = t === 'gradient' ? '' : 'none';
 });
 ed._emit('tool', ed.tool);   // initial paint of the Tool panel
+
+/* ── gradient tool options: type (linear/radial) + a stop list (add/remove/recolor/reposition) ──
+   Stops live on ed.toolOpts.gradientStops/gradientType (read by Editor#_move's live preview and
+   the final paintGradient() call on mouseup) — this panel is a pure view over that state, same
+   pattern as the Size/Opacity/Colour controls in the header. */
+const gradTypeLinear = document.getElementById('grad-type-linear'), gradTypeRadial = document.getElementById('grad-type-radial');
+const gradStopsEl = document.getElementById('grad-stops');
+function renderGradientStops() {
+  const { gradientStops, gradientType } = ed.toolOpts;
+  gradTypeLinear.dataset.on = String(gradientType === 'linear');
+  gradTypeRadial.dataset.on = String(gradientType === 'radial');
+  gradStopsEl.innerHTML = '';
+  gradientStops.forEach((stop, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px';
+    row.innerHTML = `<input type="color" value="${stop.color}" data-i="${i}" class="grad-stop-color">
+      <input type="range" min="0" max="1" step="0.01" value="${stop.offset}" data-i="${i}" class="grad-stop-offset" style="flex:1">
+      <button class="icon-btn" data-i="${i}" title="Remove stop" ${gradientStops.length <= 2 ? 'disabled' : ''}>${iconSVG('close', 12)}</button>`;
+    gradStopsEl.appendChild(row);
+  });
+  gradStopsEl.querySelectorAll('.grad-stop-color').forEach(paintRangeFill);
+  gradStopsEl.querySelectorAll('input[type=range]').forEach(paintRangeFill);
+}
+gradTypeLinear.onclick = () => ed.setToolOptions({ gradientType: 'linear' });
+gradTypeRadial.onclick = () => ed.setToolOptions({ gradientType: 'radial' });
+gradStopsEl.addEventListener('input', e => {
+  const i = +e.target.dataset.i; if (Number.isNaN(i)) return;
+  const stops = ed.toolOpts.gradientStops.slice();
+  if (e.target.classList.contains('grad-stop-color')) stops[i] = { ...stops[i], color: e.target.value };
+  else if (e.target.classList.contains('grad-stop-offset')) stops[i] = { ...stops[i], offset: +e.target.value };
+  ed.setToolOptions({ gradientStops: stops });
+});
+gradStopsEl.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-i]'); if (!btn) return;
+  const i = +btn.dataset.i;
+  const stops = ed.toolOpts.gradientStops.filter((_, si) => si !== i);
+  ed.setToolOptions({ gradientStops: stops });
+});
+document.getElementById('grad-add-stop').onclick = () => {
+  const stops = ed.toolOpts.gradientStops.slice();
+  const last = stops[stops.length - 1];
+  stops.push({ offset: Math.min(1, (last?.offset ?? 1)), color: last?.color || '#ffffff' });
+  ed.setToolOptions({ gradientStops: stops });
+};
+ed.on('tooloptions', () => { if (ed.tool === 'gradient') renderGradientStops(); });
+renderGradientStops();
 function cropBtn(on) {
   document.getElementById('applycrop')?.remove();
   if (on) {
@@ -556,6 +703,26 @@ ed.on('tooloptions', o => { col.value = /^#([0-9a-f]{6})$/i.test(o.color) ? o.co
 undo.innerHTML = iconSVG('undo'); redo.innerHTML = iconSVG('redo');
 undo.onclick = () => ed.undo(); redo.onclick = () => ed.redo();
 ed.on('history', h => { undo.disabled = h.past < 2; redo.disabled = !h.future; });
+
+/* ── canvas size popover: resizes the artboard boundary (Editor#resizeCanvas), not the content ── */
+const csBtn = document.getElementById('canvas-size-btn'), csPop = document.getElementById('canvas-size-pop');
+const csW = document.getElementById('cs-w'), csH = document.getElementById('cs-h'), csLock = document.getElementById('cs-lock');
+let csRatio = ed.W / ed.H;
+csBtn.onclick = () => {
+  csW.value = ed.W; csH.value = ed.H; csRatio = ed.W / ed.H;
+  csPop.hidden = !csPop.hidden;
+};
+csW.oninput = () => { if (csLock.checked) csH.value = Math.round(+csW.value / csRatio) || ''; };
+csH.oninput = () => { if (csLock.checked) csW.value = Math.round(+csH.value * csRatio) || ''; };
+document.getElementById('cs-cancel').onclick = () => { csPop.hidden = true; };
+document.getElementById('cs-apply').onclick = () => {
+  const w = +csW.value, h = +csH.value;
+  if (w > 0 && h > 0) ed.resizeCanvas(w, h);
+  csPop.hidden = true;
+};
+document.addEventListener('click', e => {
+  if (!csPop.hidden && !csPop.contains(e.target) && e.target !== csBtn) csPop.hidden = true;
+});
 png.onclick = () => { const a = document.createElement('a'); a.href = ed.exportPNG(); a.download = 'canvasmith.png'; a.click(); };
 svg.onclick = () => {
   const blob = new Blob([ed.exportSVG()], { type: 'image/svg+xml' });
@@ -604,6 +771,8 @@ snapBtn.onclick = () => {
   snapBtn.textContent = on ? 'Snap: on' : 'Snap: off';
   ed.setSnapEnabled(on);
 };
+const ALIGN_ICONS = { left: 'align-left', center: 'align-h-center', right: 'align-right', top: 'align-top', middle: 'align-v-center', bottom: 'align-bottom' };
+document.querySelectorAll('.align-grid button').forEach(btn => { btn.innerHTML = iconSVG(ALIGN_ICONS[btn.dataset.edge], 16); });
 document.querySelector('.align-grid').addEventListener('click', e => {
   const edge = e.target.closest('button')?.dataset.edge;
   if (edge && ed.fc.getActiveObject()) ed.alignActiveSelection(edge);
@@ -612,7 +781,10 @@ const dupBtn = document.getElementById('duplicate');
 dupBtn.innerHTML = iconSVG('duplicate') + '<span>Duplicate</span>';
 dupBtn.onclick = () => { const active = ed.layers().find(l => l.active); if (active) ed.duplicateLayer(active.id); };
 
-/* ── selection modify: expand/contract/similar (cv-backed — report status in the note line) ── */
+/* ── selection modify: expand/contract/similar (cv-backed — report status in the note line) ──
+   This whole group acts on a pixel selection (marquee/lasso/wand) — not an object selection —
+   so it's disabled whenever ed.selection is empty, rather than silently no-op'ing after a click.
+   Recolouring a selected text/shape object is a different control: Fill, in the Properties panel. */
 const selMsg = document.getElementById('sel-msg');
 const SEL_REASON_MSG = {
   cv_unavailable: 'Needs the OpenCV worker (no internet / blocked CDN).',
@@ -623,6 +795,28 @@ const SEL_REASON_MSG = {
   need_group: 'Select a group to ungroup.',
 };
 const showSelResult = r => { selMsg.textContent = r.status === 'ok' ? '' : (r.message || SEL_REASON_MSG[r.reason] || r.reason); };
+/* ── auto-detect: cv-only Canny-edge object boxes over the whole flattened scene. Each result is
+   a clickable candidate — clicking one commits it as a real rectangular selection (via
+   selectDetectedBox), so the rest of the Selection group (expand/contract/similar/recolor) then
+   works on it exactly as if it had been marquee-dragged. */
+const detectBtn = document.getElementById('sel-detect'); detectBtn.innerHTML = iconSVG('wand') + '<span>Detect objects</span>';
+const detectResults = document.getElementById('detect-results');
+detectBtn.onclick = async () => {
+  detectResults.innerHTML = '';
+  selMsg.textContent = 'Detecting…';
+  const r = await ed.detectObjects();
+  if (r.status !== 'ok') { showSelResult(r); return; }
+  selMsg.textContent = '';
+  r.result.boxes.forEach((b, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'act'; btn.style.width = '100%';
+    btn.innerHTML = iconSVG('objectselect', 13) + `<span>Object ${i + 1}</span>`;
+    btn.onclick = () => { ed.selectDetectedBox(b); refreshSelButtons(); };
+    detectResults.appendChild(btn);
+  });
+  if (!r.result.boxes.length) selMsg.textContent = 'No objects detected.';
+};
+
 const expBtn = document.getElementById('sel-expand'); expBtn.innerHTML = iconSVG('expand') + '<span>Expand</span>';
 const conBtn = document.getElementById('sel-contract'); conBtn.innerHTML = iconSVG('contract') + '<span>Contract</span>';
 expBtn.onclick = async () => showSelResult(await ed.expandSelection(6));
@@ -636,6 +830,13 @@ recolorBtn.innerHTML = iconSVG('eyedropper') + '<span>Recolor selection…</span
 recolorBtn.onclick = () => recolorInput.click();
 recolorInput.oninput = () => { recolorInput.style.display = ''; };
 recolorInput.onchange = e => { const id = ed.recolorSelection(e.target.value); if (!id) selMsg.textContent = 'Make a selection first.'; else selMsg.textContent = ''; recolorInput.style.display = 'none'; };
+const refreshSelButtons = () => {
+  const has = !!ed.selection;
+  [expBtn, conBtn, simBtn, recolorBtn].forEach(b => b.disabled = !has);
+  selMsg.textContent = has ? '' : 'Draw a marquee/lasso selection first — for a text or shape layer’s colour, use Fill in Properties instead.';
+};
+ed.on('selection', refreshSelButtons);
+refreshSelButtons();
 
 /* ── layer shadow ───────────────────────────────────────────────────────────────────────── */
 const shadowColor = document.getElementById('shadow-color'), shadowBlur = document.getElementById('shadow-blur');
@@ -692,17 +893,99 @@ ungroupBtn.onclick = () => showSelResult(ed.ungroupSelection());
 
 const adjBrightness = document.getElementById('adj-brightness'), adjContrast = document.getElementById('adj-contrast');
 const adjSaturate = document.getElementById('adj-saturate'), adjBlur = document.getElementById('adj-blur');
-adjBrightness.oninput = () => ed.setImageFilters({ brightness: +adjBrightness.value });
-adjContrast.oninput = () => ed.setImageFilters({ contrast: +adjContrast.value });
-adjSaturate.oninput = () => ed.setImageFilters({ saturate: +adjSaturate.value });
-adjBlur.oninput = () => ed.setImageFilters({ blur: +adjBlur.value });
+/* Same four sliders serve two different targets: an image layer's own (destructive-to-that-layer-
+   only) filters via setImageFilters, or an adjustment layer's (affects-everything-below) params
+   via setAdjustmentParams — whichever kind of layer is currently active. */
+const applyAdjust = (patch) => {
+  const a = ed.fc.getActiveObject();
+  if (a && a.role === 'adjustment') ed.setAdjustmentParams(ed.layers().find(l => l.active)?.id, patch);
+  else ed.setImageFilters(patch);
+};
+adjBrightness.oninput = () => applyAdjust({ brightness: +adjBrightness.value });
+adjContrast.oninput = () => applyAdjust({ contrast: +adjContrast.value });
+adjSaturate.oninput = () => applyAdjust({ saturate: +adjSaturate.value });
+adjBlur.oninput = () => applyAdjust({ blur: +adjBlur.value });
 
 blendSel.onchange = () => { const a = ed.layers().find(l => l.active); if (a) ed.setLayer(a.id, { blend: blendSel.value }); };
 const layerOpacity = document.getElementById('layer-opacity');
 layerOpacity.oninput = () => { const a = ed.layers().find(l => l.active); if (a) ed.setLayer(a.id, { opacity: +layerOpacity.value }); };
 
+/* ── typography ───────────────────────────────────────────────────────────────────────────── */
+const txFont = document.getElementById('tx-font');
+txFont.innerHTML = FONT_GROUPS.map(g => `<optgroup label="${g.label}">${
+  g.fonts.map(([label, value]) => `<option value="${value.replace(/"/g, '&quot;')}">${label}</option>`).join('')
+}</optgroup>`).join('');
+const txSize = document.getElementById('tx-size'), txWeight = document.getElementById('tx-weight');
+const txItalic = document.getElementById('tx-italic'), txUnderline = document.getElementById('tx-underline'), txStrike = document.getElementById('tx-strike');
+const txAlignLeft = document.getElementById('tx-align-left'), txAlignCenter = document.getElementById('tx-align-center'), txAlignRight = document.getElementById('tx-align-right');
+txAlignLeft.innerHTML = iconSVG('align-left', 14); txAlignCenter.innerHTML = iconSVG('align-h-center', 14); txAlignRight.innerHTML = iconSVG('align-right', 14);
+const txLineHeight = document.getElementById('tx-lineheight'), txSpacing = document.getElementById('tx-spacing');
+txFont.onchange = () => ed.setTextProps({ fontFamily: txFont.value });
+txSize.onchange = () => ed.setTextProps({ fontSize: Math.max(1, +txSize.value) });
+txWeight.onchange = () => ed.setTextProps({ fontWeight: +txWeight.value });
+txItalic.onclick = () => ed.setTextProps({ fontStyle: (ed.getTextProps() || {}).fontStyle === 'italic' ? 'normal' : 'italic' });
+txUnderline.onclick = () => ed.setTextProps({ underline: !(ed.getTextProps() || {}).underline });
+txStrike.onclick = () => ed.setTextProps({ linethrough: !(ed.getTextProps() || {}).linethrough });
+txAlignLeft.onclick = () => ed.setTextProps({ textAlign: 'left' });
+txAlignCenter.onclick = () => ed.setTextProps({ textAlign: 'center' });
+txAlignRight.onclick = () => ed.setTextProps({ textAlign: 'right' });
+txLineHeight.oninput = () => ed.setTextProps({ lineHeight: +txLineHeight.value });
+txSpacing.oninput = () => ed.setTextProps({ charSpacing: +txSpacing.value });
+
 const xfAngle = document.getElementById('xf-angle'), xfX = document.getElementById('xf-x'), xfY = document.getElementById('xf-y');
 const xfW = document.getElementById('xf-w'), xfH = document.getElementById('xf-h'), xfSkewX = document.getElementById('xf-skewx'), xfSkewY = document.getElementById('xf-skewy');
+const xfFill = document.getElementById('xf-fill');
+xfFill.oninput = () => ed.setFill(xfFill.value);
+
+/* ── Fill: Solid/Gradient toggle + gradient-fill stop editor ─────────────────────────────────
+   Reuses the same {offset,color} stop shape as the paint-tool gradient, applied via
+   ed.setShapeGradient() instead of paintGradient() — the shape keeps its own gradient (read back
+   via getShapeGradient()) independent of the paint tool's toolOpts.gradientStops. */
+const fillModeSolid = document.getElementById('fill-mode-solid'), fillModeGradient = document.getElementById('fill-mode-gradient');
+const fillSolidEl = document.getElementById('fill-solid'), fillGradientEl = document.getElementById('fill-gradient');
+const fgTypeLinear = document.getElementById('fg-type-linear'), fgTypeRadial = document.getElementById('fg-type-radial');
+const fgAngleRow = document.getElementById('fg-angle-row'), fgAngle = document.getElementById('fg-angle');
+const fgStopsEl = document.getElementById('fg-stops');
+let fgState = { type: 'linear', angle: 0, stops: [{ offset: 0, color: '#d4ff45' }, { offset: 1, color: '#7c3aed' }] };
+function applyFgState() { ed.setShapeGradient(fgState.stops, fgState.type, fgState.angle); }
+function renderFgStops() {
+  fgTypeLinear.dataset.on = String(fgState.type === 'linear');
+  fgTypeRadial.dataset.on = String(fgState.type === 'radial');
+  fgAngleRow.style.display = fgState.type === 'linear' ? '' : 'none';
+  fgAngle.value = fgState.angle;
+  fgStopsEl.innerHTML = '';
+  fgState.stops.forEach((stop, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px';
+    row.innerHTML = `<input type="color" value="${stop.color}" data-i="${i}" class="fg-stop-color">
+      <input type="range" min="0" max="1" step="0.01" value="${stop.offset}" data-i="${i}" class="fg-stop-offset" style="flex:1">
+      <button class="icon-btn" data-i="${i}" title="Remove stop" ${fgState.stops.length <= 2 ? 'disabled' : ''}>${iconSVG('close', 12)}</button>`;
+    fgStopsEl.appendChild(row);
+  });
+  fgStopsEl.querySelectorAll('input[type=range]').forEach(paintRangeFill);
+  paintRangeFill(fgAngle);
+}
+fillModeSolid.onclick = () => { fillSolidEl.style.display = ''; fillGradientEl.style.display = 'none'; ed.setFill(xfFill.value); };
+fillModeGradient.onclick = () => { fillSolidEl.style.display = 'none'; fillGradientEl.style.display = ''; renderFgStops(); applyFgState(); };
+fgTypeLinear.onclick = () => { fgState.type = 'linear'; renderFgStops(); applyFgState(); };
+fgTypeRadial.onclick = () => { fgState.type = 'radial'; renderFgStops(); applyFgState(); };
+fgAngle.oninput = () => { fgState.angle = +fgAngle.value; paintRangeFill(fgAngle); applyFgState(); };
+fgStopsEl.addEventListener('input', e => {
+  const i = +e.target.dataset.i; if (Number.isNaN(i)) return;
+  if (e.target.classList.contains('fg-stop-color')) fgState.stops[i] = { ...fgState.stops[i], color: e.target.value };
+  else if (e.target.classList.contains('fg-stop-offset')) fgState.stops[i] = { ...fgState.stops[i], offset: +e.target.value };
+  applyFgState();
+});
+fgStopsEl.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-i]'); if (!btn) return;
+  fgState.stops = fgState.stops.filter((_, si) => si !== +btn.dataset.i);
+  renderFgStops(); applyFgState();
+});
+document.getElementById('fg-add-stop').onclick = () => {
+  const last = fgState.stops[fgState.stops.length - 1];
+  fgState.stops.push({ offset: Math.min(1, last?.offset ?? 1), color: last?.color || '#ffffff' });
+  renderFgStops(); applyFgState();
+};
 xfAngle.oninput = () => ed.setNumeric({ angle: +xfAngle.value });
 xfX.onchange = () => ed.setNumeric({ x: +xfX.value });
 xfY.onchange = () => ed.setNumeric({ y: +xfY.value });
@@ -724,11 +1007,49 @@ function refreshPropsPanel() {
     ? (o.type === 'activeSelection' ? (o._objects ? o._objects.length + ' layers' : 'Selection') : (ed.layers().find(l => l.active)?.name || o.type || 'Layer'))
     : 'Properties';
   const isImage = !!o && o.type === 'image';
-  document.getElementById('adjust-section').style.display = isImage ? '' : 'none';
-  if (isImage) {
+  const isAdjustment = !!o && o.role === 'adjustment';
+  document.getElementById('adjust-section').style.display = (isImage || isAdjustment) ? '' : 'none';
+  document.getElementById('adjust-section-label').textContent = isAdjustment ? 'Adjustment layer' : 'Adjust';
+  document.getElementById('adjust-section-note').style.display = isAdjustment ? '' : 'none';
+  if (isAdjustment) {
+    const adj = ed.getAdjustmentParams(ed.layers().find(l => l.active)?.id) || {};
+    adjBrightness.value = adj.brightness; adjContrast.value = adj.contrast;
+    adjSaturate.value = adj.saturate; adjBlur.value = adj.blur;
+  } else if (isImage) {
     const fx = ed.getImageFilters();
     adjBrightness.value = fx.brightness; adjContrast.value = fx.contrast;
     adjSaturate.value = fx.saturate; adjBlur.value = fx.blur;
+  }
+  const tx = ed.getTextProps();
+  document.getElementById('typography-section').style.display = tx ? '' : 'none';
+  if (tx) {
+    txFont.value = tx.fontFamily; txSize.value = tx.fontSize; txWeight.value = tx.fontWeight;
+    txItalic.dataset.active = String(tx.fontStyle === 'italic');
+    txUnderline.dataset.active = String(tx.underline);
+    txStrike.dataset.active = String(tx.linethrough);
+    [txAlignLeft, txAlignCenter, txAlignRight].forEach(b => b.dataset.active = 'false');
+    ({ left: txAlignLeft, center: txAlignCenter, right: txAlignRight }[tx.textAlign] || txAlignLeft).dataset.active = 'true';
+    txLineHeight.value = tx.lineHeight; txSpacing.value = tx.charSpacing;
+  }
+  [txFont, txSize, txWeight, txItalic, txUnderline, txStrike, txAlignLeft, txAlignCenter, txAlignRight, txLineHeight, txSpacing].forEach(el => el.disabled = !tx);
+  // Fill only applies to fillable vector shapes/text — hide it for images, paint strokes, lines
+  // (coloured via stroke, not fill) and anything with no fill to show at all (flat colour OR a
+  // Fabric gradient object both count as "has a fill").
+  const fillTarget = o && o.type === 'activeSelection' ? o.getObjects()[0] : o;
+  const solidFill = !!fillTarget && typeof fillTarget.fill === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(fillTarget.fill);
+  const shapeGrad = ed.getShapeGradient();
+  const hasFill = !!fillTarget && !isImage && fillTarget.type !== 'line' && fillTarget.role !== 'paint' && (solidFill || !!shapeGrad);
+  document.getElementById('fill-section-label').style.display = hasFill ? '' : 'none';
+  document.getElementById('fill-section').style.display = hasFill ? '' : 'none';
+  if (hasFill) {
+    const isGradientNow = !!shapeGrad;
+    fillModeSolid.dataset.on = String(!isGradientNow);
+    fillModeGradient.dataset.on = String(isGradientNow);
+    fillSolidEl.style.display = isGradientNow ? 'none' : '';
+    fillGradientEl.style.display = isGradientNow ? '' : 'none';
+    if (isGradientNow) { fgState = { type: shapeGrad.type, angle: fgState.angle, stops: shapeGrad.stops }; renderFgStops(); }
+    else if (solidFill) xfFill.value = fillTarget.fill.length === 4
+      ? '#' + [...fillTarget.fill.slice(1)].map(c => c + c).join('') : fillTarget.fill;
   }
   blendSel.value = o ? (o.globalCompositeOperation || 'source-over') : 'source-over';
   layerOpacity.value = o && o.opacity != null ? o.opacity : 1;
@@ -749,7 +1070,7 @@ function refreshPropsPanel() {
   groupBtn.disabled = !(o && o.type === 'activeSelection');
   ungroupBtn.disabled = !(o && o.type === 'group');
   [document.getElementById('stack-top'), document.getElementById('stack-up'), document.getElementById('stack-down'), document.getElementById('stack-bottom')].forEach(el => el.disabled = !o);
-  [layerOpacity, xfAngle, shadowBlur, adjBrightness, adjContrast, adjSaturate, adjBlur].forEach(paintRangeFill);
+  [layerOpacity, xfAngle, shadowBlur, adjBrightness, adjContrast, adjSaturate, adjBlur, txLineHeight, txSpacing].forEach(paintRangeFill);
 }
 ed.on('change', refreshPropsPanel);
 ed.fc.on('selection:created', refreshPropsPanel);
@@ -800,6 +1121,10 @@ const renderLayers = () => {
          <button data-act="up" title="Move up">${iconSVG('up', 12)}</button>
          <button data-act="lock" title="${l.locked ? 'Unlock' : 'Lock'}" data-active="${l.locked}">${iconSVG('lock', 12)}</button>
          <button data-act="vis" title="${l.visible ? 'Hide' : 'Show'}" data-active="${!l.visible}">${iconSVG(l.visible ? 'eyeOpen' : 'eyeOff', 12)}</button>
+         ${l.maskable ? (l.hasMask
+           ? `<button data-act="editmask" title="${l.editingMask ? 'Stop editing mask' : 'Edit mask'}" data-active="${l.editingMask || !l.maskEnabled}">${iconSVG('mask', 12)}</button>
+              <button data-act="delmask" title="Delete mask">${iconSVG('close', 12)}</button>`
+           : `<button data-act="addmask" title="Add layer mask">${iconSVG('mask', 12)}</button>`) : ''}
          ${l.role !== 'bg' ? `<button data-act="del" title="Delete">${iconSVG('close', 12)}</button>` : ''}
        </div></div>`;
   }).join('');
@@ -812,9 +1137,23 @@ panel.addEventListener('click', e => {
   else if (act === 'lock') ed.setLayer(id, { locked: !l.locked });
   else if (act === 'up') ed.moveLayer(id, 'up');
   else if (act === 'del') ed.removeLayer(id);
+  else if (act === 'addmask') { ed.addMask(id); ed.enterMaskEdit(id); }
+  else if (act === 'delmask') ed.removeMask(id);
+  else if (act === 'editmask') {
+    if (l.editingMask) ed.exitMaskEdit();
+    else { ed.activate(id); ed.enterMaskEdit(id); }
+  }
   else if (!act) ed.activate(id);
 });
-ed.on('change', renderLayers); renderLayers();
+ed.on('change', renderLayers);
+ed.on('maskedit', renderLayers);
+renderLayers();
+
+/* ── mask-edit banner: reminds the user they're painting a mask, not the layer itself, and gives
+   an explicit way out besides picking a different (non-paint) tool. ─────────────────────────── */
+const maskEditBanner = document.getElementById('maskedit-banner');
+ed.on('maskedit', state => { maskEditBanner.style.display = state ? '' : 'none'; });
+document.getElementById('maskedit-done').onclick = () => ed.exitMaskEdit();
 
 /* ── add element: quick-insert chips, centered on the artboard (ditto's own addElement) ────── */
 document.getElementById('add-text').innerHTML = iconSVG('type', 12) + '<span>Text</span>';
@@ -822,6 +1161,7 @@ document.getElementById('add-box').innerHTML = iconSVG('rect', 12) + '<span>Box<
 document.getElementById('add-circle').innerHTML = iconSVG('hoverselect', 12) + '<span>Circle</span>';
 document.getElementById('add-image').innerHTML = iconSVG('image', 12) + '<span>Image</span>';
 document.getElementById('add-paint').innerHTML = iconSVG('layerstab', 12) + '<span>Paint Layer</span>';
+document.getElementById('add-adjustment').innerHTML = iconSVG('contrast', 12) + '<span>Adjustment</span>';
 const centerPt = () => ({ x: ed.W / 2, y: ed.H / 2 });
 document.getElementById('add-text').onclick = () => {
   const t = makeText(ed.fabric, centerPt(), { fontSize: 48 });
@@ -837,6 +1177,7 @@ document.getElementById('add-circle').onclick = () => {
 };
 document.getElementById('add-image').onclick = () => file.click();
 document.getElementById('add-paint').onclick = () => ed.setTool('brush');
+document.getElementById('add-adjustment').onclick = () => { ed.addAdjustmentLayer(); };
 
 /* ── open: file picker, drag/drop+paste, and the cross-platform bridge ── */
 openfile.onclick = () => file.click();

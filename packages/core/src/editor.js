@@ -7,7 +7,7 @@
    Everything a UI needs is events + methods — no DOM of its own, no framework, no globals.
    The React package and the vanilla demo are both thin shells over exactly this class. */
 
-import { PaintEngine, PAINT_TOOLS } from './engine.js';
+import { PaintEngine, PAINT_TOOLS, renderObjectsFlat } from './engine.js';
 import { History } from './history.js';
 import {
   startSelection, updateSelection, finalizeSelection, selectionToPath2D, selectionFillRule, wandSelect,
@@ -20,9 +20,10 @@ import { getCropHandle, dragCropRect, applyCrop } from './crop.js';
 import { alignDelta, snapDelta } from './layout.js';
 import { EXTRA, serialize, restore, exportImage, addImageLayer, artboardForImage, loadImageEl } from './io.js';
 import { selectionClipObject, renderSelectedPixels } from './pixels.js';
-import { recolorPixels, fxToFilterSpecs, FX_DEFAULTS } from './color.js';
+import { recolorPixels, fxToFilterSpecs, FX_DEFAULTS, normalizeGradientStops } from './color.js';
 import { AIRegistry } from './ai/registry.js';
 import { CvEngine, prepImageData } from './cv/client.js';
+import { makeMaskFilterClass, createMaskCanvas, maskStamp, maskLine, serializeMask, deserializeMask } from './mask.js';
 
 export const SEL_TOOLS = ['marquee', 'marquee-ellipse', 'lasso', 'lasso-poly', 'lasso-mag', 'wand', 'objectselect', 'hoverselect'];
 export const SHAPE_TOOLS = ['rect', 'ellipse', 'line', 'triangle', 'polygon', 'star'];
@@ -31,21 +32,50 @@ const CLICK_LASSOS = ['lasso-poly', 'lasso-mag'];
 const SEL_EPS = 0.0022;   // contour fidelity passed to the cv wand — smaller hugs the edge harder
 
 export class Editor {
-  constructor({ fabric, canvasEl, width = 1080, height = 1080, background = '#ffffff' } = {}) {
+  constructor({ fabric, canvasEl, width = 1080, height = 1080, background = '#ffffff', openCvUrl } = {}) {
     if (!fabric) throw new Error('Pass fabric (v5) into the Editor — it is a peer dependency.');
     this.fabric = fabric;
+    // MaskFilter (see mask.js) only implements Fabric's Canvas2D filter path (applyTo2d), not a
+    // WebGL shader — Fabric defaults to WebGL filtering whenever the browser supports it, which
+    // would silently no-op a mask (and any other future custom filter) with no error. Forcing
+    // Canvas2D keeps every filter (including the built-in brightness/contrast/saturation/blur,
+    // which have real GLSL shaders and would otherwise run on the GPU) on one predictable,
+    // correctness-first path — images here are already capped to 1600px on import, so the perf
+    // cost of Canvas2D over WebGL is small in practice.
+    fabric.enableGLFiltering = false;
     this.W = width; this.H = height;
     this._listeners = {};
     this.fc = new fabric.Canvas(canvasEl, {
       width, height, preserveObjectStacking: true, selection: true,
       backgroundColor: background, stopContextMenu: true, fireRightClick: true,
+      // Figma-style marquee: a thin solid border over a barely-there fill, instead of Fabric's
+      // default heavy blue wash — kept independent of the app's lime accent, since a selection
+      // indicator needs to read clearly over content of any colour.
+      selectionColor: 'rgba(13,153,255,0.08)',
+      selectionBorderColor: '#0d99ff',
+      selectionLineWidth: 1,
+      // Fabric's own default binds Shift+drag on a side handle (ml/mr/mt/mb) to skew — the
+      // classic Illustrator/Photoshop convention puts skew on Alt/Option instead, freeing Shift
+      // for the proportional-resize behaviour _bindProportionalSideScale implements below.
+      altActionKey: 'altKey',
     });
     this.engine = new PaintEngine(fabric, this.fc, width, height);
+    // Registers fabric.Image.filters.MaskFilter (see mask.js) — must happen before any scene
+    // JSON containing a mask filter is ever restored (undo/redo, loadJSON), since Fabric's own
+    // enlivenObjects() resolves a filter's class by its serialized `type` string against exactly
+    // that registry.
+    makeMaskFilterClass(fabric);
     this.history = new History(60);
     this.ai = new AIRegistry();
-    this.cv = new CvEngine();       // OpenCV worker RPC — boots lazily on first cv-backed call
+    // OpenCV worker RPC — boots lazily on first cv-backed call. openCvUrl overrides
+    // DEFAULT_OPENCV_URL (a root-relative path — see cv/worker.js) for hosts that serve the
+    // vendored opencv.js from somewhere else, or want to point at a CDN mirror instead.
+    this.cv = new CvEngine(openCvUrl ? { openCvUrl } : undefined);
     this.tool = 'select';
-    this.toolOpts = { size: 30, opacity: 1, hardness: 0.7, color: '#d4ff45', color2: '#7c3aed', fill: '#d4ff45', tolerance: 32, fontSize: 48, aligned: true };
+    this.toolOpts = {
+      size: 30, opacity: 1, hardness: 0.7, color: '#d4ff45', fill: '#d4ff45', tolerance: 32, fontSize: 48, aligned: true,
+      gradientType: 'linear', gradientStops: [{ offset: 0, color: '#d4ff45' }, { offset: 1, color: '#7c3aed' }],
+    };
     this.selection = null;
     this.crop = null;               // {x,y,w,h} while the crop tool is live
     this._drag = null;
@@ -55,8 +85,11 @@ export class Editor {
     this._lastWandSeed = null;      // last object-select click, scene px — feeds selectSimilar()
     this._hoverSeq = 0;             // monotonic token so a stale async hover preview can't land late
     this._destroyed = false;        // set by destroy() — async continuations check this before touching this.fc
+    this._maskEdit = null;           // {layerId} while a mask is being painted — see enterMaskEdit()
+    this._maskDrag = null;
     this._bindPointer();
     this._bindModified();
+    this._bindProportionalSideScale();
     this.setSnapEnabled(true);
     this.commit('init');
   }
@@ -115,7 +148,27 @@ export class Editor {
   _down(opt) {
     const t = this.tool, pt = this._pt(opt), e = opt.e || {};
     const o = { ...this.toolOpts, alt: e.altKey, shift: e.shiftKey };
+    if (this._maskEdit && (t === 'brush' || t === 'pencil' || t === 'eraser')) {
+      const layer = this._byId(this._maskEdit.layerId);
+      if (layer && layer.maskCanvas) {
+        maskStamp(layer.maskCanvas.getContext('2d'), pt.x, pt.y, o, t === 'eraser');
+        this._refreshMaskFilter(layer);
+        this._maskDrag = pt;
+        this.fc.requestRenderAll();
+      }
+      return;
+    }
     if (t === 'hand' || e.spaceKey) { this._drag = { kind: 'pan', x: e.clientX, y: e.clientY }; return; }
+    if (t === 'select' && e.altKey) {
+      const target = this.fc.findTarget(e);
+      if (target && target.selectable && !target.locked) {
+        // Left behind at the drag's start position once the drag actually completes — see
+        // object:modified below. We don't clone up front: Fabric has already latched its own
+        // transform onto `target` by the time this handler runs, so the object visibly dragged
+        // is always the original; the copy is inserted where it started, once movement is real.
+        this._altDup = { id: target.id, left: target.left, top: target.top };
+      }
+    }
     if (PAINT_TOOLS.includes(t)) {
       this._applySelClip();
       const r = this.engine.down(t, pt, o);
@@ -159,8 +212,15 @@ export class Editor {
     }
     if (t === 'type') {
       const txt = makeText(this.fabric, pt, this.toolOpts);
-      this.fc.add(txt); this.fc.setActiveObject(txt); txt.enterEditing && txt.enterEditing();
+      this.fc.add(txt); this.fc.setActiveObject(txt);
+      if (txt.enterEditing) {
+        txt.enterEditing();
+        txt.selectAll();   // placeholder text starts selected, so typing replaces it immediately
+      }
       this.commit('text');
+      // Back to select: like every other creation tool (see SHAPE_TOOLS' _up), so the next click
+      // hits the canvas normally — Fabric's own double-click-to-edit, not "place another text".
+      this.setTool('select');
       return;
     }
     if (t === 'bucket') {
@@ -169,7 +229,7 @@ export class Editor {
       this.commit('bucket');
       return;
     }
-    if (t === 'gradient') { this._drag = { kind: 'gradient', from: pt }; return; }
+    if (t === 'gradient') { this._applySelClip(); this._drag = { kind: 'gradient', from: pt }; return; }
     if (t === 'eyedropper') {
       const hex = this.engine.sample(pt);
       if (hex) { this.setToolOptions({ color: hex }); this._emit('eyedropper', hex); }
@@ -184,6 +244,16 @@ export class Editor {
 
   _move(opt) {
     const pt = this._pt(opt), e = opt.e || {};
+    if (this._maskEdit && this._maskDrag && (this.tool === 'brush' || this.tool === 'pencil' || this.tool === 'eraser')) {
+      const layer = this._byId(this._maskEdit.layerId);
+      if (layer && layer.maskCanvas) {
+        maskLine(layer.maskCanvas.getContext('2d'), this._maskDrag, pt, { ...this.toolOpts }, this.tool === 'eraser');
+        this._refreshMaskFilter(layer);
+        this.fc.requestRenderAll();
+      }
+      this._maskDrag = pt;
+      return;
+    }
     if (CLICK_LASSOS.includes(this.tool) && this._polyBuild) {
       const p = this.tool === 'lasso-mag' ? snapToEdge(this._edgeMap, pt) : pt;
       this.selection = polyBuildPreview(this._polyBuild, p);
@@ -202,7 +272,11 @@ export class Editor {
     }
     if (d.kind === 'paint') { this.engine.move(this.tool, pt, { ...this.toolOpts }); return; }
     if (d.kind === 'sel') { updateSelection(this.selection, pt, { square: e.shiftKey }); this.fc.renderAll(); this._emit('selection', this.selection); return; }
-    if (d.kind === 'shape') { resizeShapeTo(d.obj, d.tool, d.from, pt); this.fc.renderAll(); return; }
+    if (d.kind === 'shape') { resizeShapeTo(d.obj, d.tool, d.from, pt, { square: e.shiftKey }); this.fc.renderAll(); return; }
+    if (d.kind === 'gradient') {
+      this.engine.paintGradient(d.from.x, d.from.y, pt.x, pt.y, this.toolOpts.gradientStops, this.toolOpts.gradientType);
+      return;
+    }
     if (d.kind === 'crop') {
       this.crop = dragCropRect(this.crop, d.handle, pt.x - d.last.x, pt.y - d.last.y, this.toolOpts.cropRatio || 0);
       d.last = pt;
@@ -213,20 +287,13 @@ export class Editor {
   }
 
   _up() {
+    if (this._maskEdit && this._maskDrag) { this._maskDrag = null; this.commit('mask-paint'); return; }
     const d = this._drag; this._drag = null;
     if (!d) return;
     if (d.kind === 'paint') { this.engine.up(); this.engine.setClip(null); this.commit('stroke'); }
     if (d.kind === 'sel') { this.selection = finalizeSelection(this.selection); this._emit('selection', this.selection); }
-    if (d.kind === 'gradient' && this.engine._curPt !== null) { /* released without move: ignore */ }
+    if (d.kind === 'gradient') { this.engine.setClip(null); this.commit('gradient'); }
     if (d.kind === 'shape') { this.commit('shape'); this.setTool('select'); this.fc.setActiveObject(d.obj); }
-  }
-
-  /* Gradient is click-drag-release across two points. */
-  dragGradient(from, to) {
-    this._applySelClip();
-    this.engine.paintGradient(from.x, from.y, to.x, to.y, this.toolOpts.color, this.toolOpts.color2);
-    this.engine.setClip(null);
-    this.commit('gradient');
   }
 
   clearSelection() { this.selection = null; this._polyBuild = null; this._emit('selection', null); this.fc.renderAll(); }
@@ -399,6 +466,40 @@ export class Editor {
     } catch (e) { return { status: 'error', reason: 'cv_failed', message: String(e && e.message || e) }; }
   }
 
+  /* Auto-detect: Canny-edge object boxes (and, with {text:true}, a separate text-region pass)
+     over the whole flattened scene — cv-only, coarser than the wand's precise contour (a
+     rectangle per candidate, not a traced outline), meant for "here's what's in this image"
+     at a glance rather than a one-click final selection. Returns scene-space boxes for a host UI
+     to render as clickable candidates; selectDetectedBox() turns one into a real selection. */
+  async detectObjects({ text = false } = {}) {
+    this.engine.captureFlat();
+    const flat = this.engine._flat;
+    if (!flat) return { status: 'error', reason: 'no_image' };
+    try {
+      const imgd = prepImageData(flat, 900);
+      const kx = imgd.width / this.W, ky = imgd.height / this.H;
+      const r = await this.cv.detect({ data: imgd.data, width: imgd.width, height: imgd.height }, { text });
+      if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+      if (r == null) return { status: 'error', reason: 'cv_unavailable' };
+      const toScene = (b) => ({ x: b.x / kx, y: b.y / ky, w: b.w / kx, h: b.h / ky });
+      const boxes = (r.boxes || []).map(toScene);
+      const textBoxes = r.textBoxes ? r.textBoxes.map(toScene) : null;
+      if (!boxes.length && !(textBoxes && textBoxes.length)) return { status: 'error', reason: 'no_match' };
+      return { status: 'ok', result: { boxes, textBoxes } };
+    } catch (e) { return { status: 'error', reason: 'cv_failed', message: String(e && e.message || e) }; }
+  }
+
+  /* Commits one detectObjects() box as a real rectangular pixel selection — the same selection
+     marquee/lasso/wand all populate, so expand/contract/select-similar/recolor etc. all work on
+     it unchanged. */
+  selectDetectedBox(box) {
+    const sel = startSelection('marquee', { x: box.x, y: box.y });
+    updateSelection(sel, { x: box.x + box.w, y: box.y + box.h });
+    this.selection = finalizeSelection(sel);
+    this._emit('selection', this.selection);
+    this.fc.renderAll();
+  }
+
   /* ── hover-preview object select: debounced, cancellable, grid-cell cached ───────────────
      Shows, on hover, the polygon that a click WOULD select — same hybrid wand the click uses —
      so the user can confirm before committing. Single-flight: a fast-moving cursor replaces the
@@ -445,12 +546,35 @@ export class Editor {
 
   /* ── history ──────────────────────────────────────────────────────────────────────────── */
   _bindModified() {
-    this.fc.on('object:modified', () => this.commit('transform'));
+    this.fc.on('object:modified', (opt) => this._onModified(opt));
     this.fc.on('text:changed', () => this._soon());
+  }
+
+  /* Option/Alt+drag duplicate: mirrors the delta the object actually moved onto a fresh clone
+     left at the drag's start position, so the object under the cursor stays "the one you grabbed"
+     while a copy is dropped where it began — the usual Figma/design-tool convention. Only fires
+     for a genuine drag (not a resize/rotate) on the same single object that was armed in _down. */
+  _onModified(opt) {
+    const armed = this._altDup; this._altDup = null;
+    const target = opt && opt.target;
+    if (armed && target && target.id === armed.id && opt.transform && opt.transform.action === 'drag'
+        && (target.left !== armed.left || target.top !== armed.top)) {
+      target.clone(clone => {
+        clone.set({ id: uid(), name: (target.renamed ? target.name : layerLabel(target)) + ' copy', renamed: true,
+          left: armed.left, top: armed.top });
+        this.fc.add(clone);
+        this.fc.moveTo(clone, this.fc.getObjects().indexOf(target));
+        this.fc.renderAll();
+        this.commit('duplicate-drag');
+      }, EXTRA);
+      return;
+    }
+    this.commit('transform');
   }
   _soon() { clearTimeout(this._st); this._st = setTimeout(() => this.commit('text-edit'), 350); }
 
   commit(label) {
+    this._recomputeAdjustmentLayers();
     if (this.history.push(serialize(this.fc))) {
       this._emit('history', this.history.depth());
       this._emit('change', { label });
@@ -458,11 +582,16 @@ export class Editor {
   }
   undo() {
     const s = this.history.undo();
-    if (s) restore(this.fc, s, { engine: this.engine, history: this.history, onDone: () => { this._emit('history', this.history.depth()); this._emit('change', { label: 'undo' }); } });
+    if (s) restore(this.fc, s, { engine: this.engine, history: this.history, onDone: (w, h) => { this._afterRestore(w, h); this._recomputeAdjustmentLayers(); this.fc.renderAll(); this._emit('history', this.history.depth()); this._emit('change', { label: 'undo' }); } });
   }
   redo() {
     const s = this.history.redo();
-    if (s) restore(this.fc, s, { engine: this.engine, history: this.history, onDone: () => { this._emit('history', this.history.depth()); this._emit('change', { label: 'redo' }); } });
+    if (s) restore(this.fc, s, { engine: this.engine, history: this.history, onDone: (w, h) => { this._afterRestore(w, h); this._recomputeAdjustmentLayers(); this.fc.renderAll(); this._emit('history', this.history.depth()); this._emit('change', { label: 'redo' }); } });
+  }
+  _afterRestore(w, h) {
+    if (w === this.W && h === this.H) return;
+    this.W = w; this.H = h;
+    this._emit('resize', { width: w, height: h });
   }
 
   /* ── layers ───────────────────────────────────────────────────────────────────────────── */
@@ -472,6 +601,9 @@ export class Editor {
       visible: o.visible !== false, locked: !!o.locked, opacity: o.opacity != null ? o.opacity : 1,
       blend: o.globalCompositeOperation || 'source-over',
       active: this.fc.getActiveObject() === o,
+      maskable: this._maskable(o), hasMask: !!o.maskCanvas, maskEnabled: o.maskEnabled !== false,
+      editingMask: !!this._maskEdit && this._maskEdit.layerId === o.id,
+      isAdjustment: o.role === 'adjustment', adj: o.role === 'adjustment' ? { ...FX_DEFAULTS, ...o.adj } : null,
     })).reverse();   // panel order: topmost first
   }
   _byId(id) { return this.fc.getObjects().find(o => o.id === id); }
@@ -510,6 +642,49 @@ export class Editor {
         this.fc.add(clone);
         this.fc.setActiveObject(clone);
         this.commit('duplicate');
+        resolve(clone.id);
+      }, EXTRA);
+    });
+  }
+
+  /* Copy/paste — clipboard lives in memory on the Editor (not the OS clipboard), so it works the
+     same across the vanilla demo and the React shell without a Clipboard API permission dance.
+     copySelection() clones the active object/activeSelection now, so later edits to the source
+     don't leak into what gets pasted. Each paste offsets a little further, so repeated Cmd/Ctrl+V
+     fans copies out instead of stacking them exactly on top of each other. */
+  copySelection() {
+    const a = this.fc.getActiveObject();
+    if (!a) return false;
+    return new Promise(resolve => {
+      a.clone(clone => { this._clipboard = clone; this._pasteCount = 0; resolve(true); }, EXTRA);
+    });
+  }
+
+  pasteClipboard(offset = 12) {
+    const src = this._clipboard;
+    if (!src) return;
+    this._pasteCount = (this._pasteCount || 0) + 1;
+    const d = offset * this._pasteCount;
+    return new Promise(resolve => {
+      src.clone(clone => {
+        this.fc.discardActiveObject();
+        if (clone.type === 'activeSelection') {
+          clone.canvas = this.fc;
+          clone.forEachObject(o => {
+            o.set({ id: uid(), name: (o.renamed ? o.name : layerLabel(o)) + ' copy', renamed: true,
+              left: (o.left || 0) + d, top: (o.top || 0) + d });
+            this.fc.add(o);
+          });
+          clone.setCoords();
+          this.fc.setActiveObject(clone);
+        } else {
+          clone.set({ id: uid(), name: (clone.renamed ? clone.name : layerLabel(clone)) + ' copy', renamed: true,
+            left: (clone.left || 0) + d, top: (clone.top || 0) + d });
+          this.fc.add(clone);
+          this.fc.setActiveObject(clone);
+        }
+        this.fc.renderAll();
+        this.commit('paste');
         resolve(clone.id);
       }, EXTRA);
     });
@@ -557,24 +732,49 @@ export class Editor {
     this.commit('align');
   }
 
-  /* ── snap-while-dragging: object edges/centers snap to the artboard and to other layers ──── */
+  /* ── snap-while-dragging: object edges/centers snap to the artboard and to other layers, and
+     emit "smart guide" lines (Figma's dragged-alignment indicators) for a host UI to draw ──── */
   setSnapEnabled(on) {
     this._snap = !!on;
     if (on && !this._snapBound) {
       this._snapBound = true;
       this.fc.on('object:moving', (opt) => this._snapMove(opt.target));
+      this.fc.on('object:modified', () => this._emit('guides', null));
+      this.fc.on('mouse:up', () => this._emit('guides', null));
     }
   }
   _snapMove(o) {
-    if (!this._snap) return;
+    if (!this._snap) { this._emit('guides', null); return; }
     o.setCoords();
     const b = o.getBoundingRect(true);
     const others = this.fc.getObjects().filter(x => x !== o).map(x => x.getBoundingRect(true));
-    const { dx, dy, snappedX, snappedY } = snapDelta(b, this.W, this.H, others);
+    const { dx, dy, snappedX, snappedY, guideX, guideY } = snapDelta(b, this.W, this.H, others);
     if (snappedX) o.left += dx;
     if (snappedY) o.top += dy;
     if (snappedX || snappedY) o.setCoords();
     this._emit('snap', { x: snappedX, y: snappedY });
+    this._emit('guides', (guideX || guideY) ? { x: guideX, y: guideY } : null);
+  }
+
+  /* Shift+drag a side handle (mr/ml/mt/mb — normally single-axis) keeps the object's aspect
+     ratio, mirroring the corner handles' own uniform-scale-on-Shift behaviour. Fabric only wires
+     that convention to the corners natively, so side handles need it applied by hand here: on
+     every scaling tick, if a side handle is active and Shift is currently held, the axis that
+     handle doesn't drive is recomputed from the one it does, using the ratio the object had when
+     the drag started (not a hardcoded 1:1), so a non-square shape keeps its own proportions. */
+  _bindProportionalSideScale() {
+    this.fc.on('object:scaling', (opt) => {
+      const corner = opt.transform && opt.transform.corner;
+      const sideX = corner === 'ml' || corner === 'mr';   // drives scaleX only
+      const sideY = corner === 'mt' || corner === 'mb';   // drives scaleY only
+      if (!opt.e || !opt.e.shiftKey || (!sideX && !sideY)) return;
+      const t = opt.transform.target;
+      const orig = opt.transform.original;
+      const ratio = (orig.scaleY || 1) / (orig.scaleX || 1);
+      if (sideX) t.scaleY = t.scaleX * ratio;
+      else t.scaleX = t.scaleY / ratio;
+      t.setCoords();
+    });
   }
 
   /* Active layer, or null — the shared "what does a selection-pixel op act on" resolver. Prefers
@@ -679,13 +879,20 @@ export class Editor {
   /* ── image adjustment: non-destructive brightness/contrast/saturation/blur ─────────────────
      Mirrors the reference editor's setFx: human values live on a custom `o.fx`, the real Fabric
      `filters` array is rebuilt from it every call via the pure fxToFilterSpecs() mapping, then
-     applyFilters() bakes them into the image's cached render. No-op on anything but an image. */
+     applyFilters() bakes them into the image's cached render. No-op on anything but an image.
+     Preserves a mask filter (see addMask) at the front of the array if one is present — the two
+     filter families are independent (fx patches shouldn't drop a mask, and mask edits shouldn't
+     drop fx) but both ultimately live on the one `o.filters` array Fabric's applyFilters() reads. */
   setImageFilters(patch) {
     const o = this.fc.getActiveObject();
     if (!o || o.type !== 'image') return;
     const fx = { ...FX_DEFAULTS, ...(o.fx || {}), ...patch };
     o.fx = fx;
-    o.filters = fxToFilterSpecs(fx).map(({ type, params }) => new this.fabric.Image.filters[type](params));
+    const maskFilter = (o.filters || []).find(f => f.type === 'MaskFilter');
+    o.filters = [
+      ...(maskFilter ? [maskFilter] : []),
+      ...fxToFilterSpecs(fx).map(({ type, params }) => new this.fabric.Image.filters[type](params)),
+    ];
     o.applyFilters();
     this.fc.renderAll();
     this.commit('filters');
@@ -693,6 +900,137 @@ export class Editor {
   getImageFilters() {
     const o = this.fc.getActiveObject();
     return { ...FX_DEFAULTS, ...((o && o.fx) || {}) };
+  }
+
+  /* ── adjustment layers: non-destructive, affect everything BELOW them in the stack ────────
+     Unlike setImageFilters (which bakes onto one image object's own pixels), an adjustment layer
+     is a real, reorderable, deletable Fabric object of its own (role: 'adjustment') whose
+     displayed bitmap is a captured-and-filtered composite of every layer below its z-index —
+     recomputed via _recomputeAdjustmentLayers() on every commit(), so moving it, editing a layer
+     below it, or adding a new layer underneath all keep it live without any special-casing at the
+     call site. params is the same partial-fx shape setImageFilters takes (brightness/contrast/
+     saturate/blur), so one adjustment layer can combine several effects like Photoshop's own
+     "Brightness/Contrast" dialog, rather than needing a separate layer per effect. */
+  addAdjustmentLayer(params = {}) {
+    const img = new this.fabric.Image(document.createElement('canvas'), {
+      left: 0, top: 0, originX: 'left', originY: 'top', selectable: true, evented: true,
+    });
+    img.set({ id: uid(), role: 'adjustment', name: 'Adjustments', adj: { ...FX_DEFAULTS, ...params } });
+    const active = this.fc.getActiveObject();
+    const idx = (active && active.type !== 'activeSelection') ? this.fc.getObjects().indexOf(active) : -1;
+    this.fc.add(img);
+    if (idx !== -1) { this.fc.remove(img); this.fc.insertAt(img, idx + 1, false); }
+    this._recomputeAdjustmentLayers();
+    this.fc.setActiveObject(img);
+    this.fc.renderAll();
+    this.commit('add-adjustment');
+    return img.id;
+  }
+  setAdjustmentParams(id, patch) {
+    const o = this._byId(id); if (!o || o.role !== 'adjustment') return;
+    o.adj = { ...FX_DEFAULTS, ...o.adj, ...patch };
+    this._recomputeAdjustmentLayers();
+    this.fc.renderAll();
+    this.commit('adjustment');
+  }
+  getAdjustmentParams(id) {
+    const o = this._byId(id);
+    return (o && o.role === 'adjustment') ? { ...FX_DEFAULTS, ...o.adj } : null;
+  }
+
+  /* Rebuilds every adjustment layer's displayed bitmap from the layers currently below it,
+     bottom-up (so a stack of adjustment layers composes: the second one sees the first one's
+     effect already baked into what it captures). Called from commit() itself — mutates each
+     adjustment layer's own image element directly rather than going through applyFilters()'s
+     fx/filters bookkeeping (that pipeline is for a single image's OWN pixels; here the "source
+     pixels" are a fresh capture of other objects entirely, so there's no persistent
+     _originalElement to re-filter from — each recompute captures fresh below-layers pixels and
+     filters those). Guarded re-entrantly: recomputing must never itself call commit() (that would
+     recurse through here again) — it only mutates bitmaps and calls fc.renderAll(). */
+  _recomputeAdjustmentLayers() {
+    const objs = this.fc.getObjects();
+    objs.forEach((o, i) => {
+      if (o.role !== 'adjustment') return;
+      const below = objs.slice(0, i);
+      const flat = renderObjectsFlat(this.fc, this.W, this.H, below);
+      const filters = fxToFilterSpecs(o.adj || FX_DEFAULTS).map(({ type, params }) => new this.fabric.Image.filters[type](params));
+      const filtered = document.createElement('canvas');
+      filtered.width = this.W; filtered.height = this.H;
+      const fctx = filtered.getContext('2d');
+      fctx.drawImage(flat, 0, 0);
+      const nonNeutral = filters.filter(f => !f.isNeutralState());
+      if (nonNeutral.length) {
+        const imgd = fctx.getImageData(0, 0, this.W, this.H);
+        nonNeutral.forEach(f => f.applyTo2d({ imageData: imgd }));
+        fctx.putImageData(imgd, 0, 0);
+      }
+      // setElement (not a raw o._element assignment) — it also sets _originalElement, so a later
+      // scale/resize-filter pass (applyResizeFilters, which reads _filteredEl || _originalElement)
+      // can't silently revert the layer back to its blank construction-time canvas. o.filters is
+      // deliberately left empty: the fx chain was already applied by hand above (against a fresh
+      // per-recompute capture, not a persistent original this object owns), so letting Fabric's
+      // own applyFilters() run too would double-apply it.
+      o.setElement(filtered);
+      o.dirty = true;
+    });
+  }
+
+  /* ── layer masks: paintable, non-destructive, image/paint-role layers only (see mask.js's
+     header comment for why vector shapes/text aren't supported) ───────────────────────────────
+     addMask() creates a blank (fully-visible) mask and pushes a MaskFilter onto the layer's own
+     `o.filters`, ahead of any brightness/contrast/etc. filters (see setImageFilters above) so a
+     disabled/deleted mask never disturbs those. enterMaskEdit() redirects brush/pencil/eraser
+     strokes (via _down/_move/_up) into painting the mask canvas instead of the pixel layer
+     itself — exitMaskEdit() (or picking any other tool) ends that redirect. */
+  _maskable(o) { return !!o && (o.type === 'image' || o.role === 'paint'); }
+  addMask(id) {
+    const o = this._byId(id); if (!this._maskable(o) || o.maskCanvas) return;
+    o.maskCanvas = createMaskCanvas(this.W, this.H);
+    o.maskEnabled = true;
+    const MaskFilter = makeMaskFilterClass(this.fabric);
+    o.filters = [new MaskFilter({ maskCanvas: o.maskCanvas }), ...(o.filters || [])];
+    o.applyFilters();
+    this.fc.renderAll();
+    this.commit('add-mask');
+  }
+  removeMask(id) {
+    const o = this._byId(id); if (!o || !o.maskCanvas) return;
+    if (this._maskEdit && this._maskEdit.layerId === id) this.exitMaskEdit();
+    o.maskCanvas = null; o.maskEnabled = false;
+    o.filters = (o.filters || []).filter(f => f.type !== 'MaskFilter');
+    o.applyFilters();
+    this.fc.renderAll();
+    this.commit('remove-mask');
+  }
+  /* Enabled/disabled toggle (Photoshop's shift-click-the-mask-thumbnail) — the mask canvas and
+     paint strokes on it are kept either way, only its visual effect is switched on/off. */
+  setMaskEnabled(id, enabled) {
+    const o = this._byId(id); if (!o || !o.maskCanvas) return;
+    o.maskEnabled = !!enabled;
+    const f = (o.filters || []).find(x => x.type === 'MaskFilter');
+    if (f) f.maskCanvas = enabled ? o.maskCanvas : null;
+    o.applyFilters();
+    this.fc.renderAll();
+    this.commit('mask-enabled');
+  }
+  enterMaskEdit(id) {
+    const o = this._byId(id); if (!this._maskable(o) || !o.maskCanvas) return;
+    this._maskEdit = { layerId: id };
+    // Mask strokes only ever come from brush/pencil/eraser (see _down/_move) — auto-switching to
+    // brush means a host UI's "Add mask" / "Edit mask" action can paint immediately, rather than
+    // silently doing nothing until the caller separately remembers to also pick a paint tool.
+    if (!['brush', 'pencil', 'eraser'].includes(this.tool)) this.setTool('brush');
+    this._emit('maskedit', this._maskEdit);
+  }
+  exitMaskEdit() {
+    if (!this._maskEdit) return;
+    this._maskEdit = null;
+    this._maskDrag = null;
+    this._emit('maskedit', null);
+  }
+  _refreshMaskFilter(o) {
+    const f = (o.filters || []).find(x => x.type === 'MaskFilter');
+    if (f) { f.maskCanvas = o.maskEnabled !== false ? o.maskCanvas : null; o.applyFilters(); }
   }
 
   /* ── group / ungroup active multi-selection ──────────────────────────────────────────────
@@ -739,6 +1077,91 @@ export class Editor {
     o.setCoords();
     this.fc.renderAll();
     this.commit('transform');
+  }
+
+  /* Recolors the active object (shape fill or text colour) — an activeSelection applies the same
+     colour to every member, matching how alignActiveSelection/setLayer treat a multi-selection. */
+  setFill(color) {
+    const o = this.fc.getActiveObject(); if (!o) return;
+    if (o.type === 'activeSelection') o.forEachObject(m => m.set('fill', color));
+    else o.set('fill', color);
+    o.dirty = true;
+    this.fc.renderAll();
+    this.commit('fill');
+  }
+
+  /* Gradient fill for a vector shape (rect/ellipse/triangle/polygon/star/text) — Fabric's own
+     fabric.Gradient, so it scales/rotates with the object for free (coords are in the OBJECT's own
+     bounding-box space, not scene space, per Fabric's convention: 0,0 is the object's top-left).
+     `type`: 'linear' (angle in degrees, 0 = left-to-right) or 'radial' (centered, edge-to-edge).
+     No-op on anything without a fill (images, lines, paint layers) — same contract as setFill. */
+  setShapeGradient(stops, type = 'linear', angle = 0) {
+    const o = this.fc.getActiveObject(); if (!o) return;
+    const apply = (obj) => {
+      const w = obj.width || 1, h = obj.height || 1;
+      const norm = normalizeGradientStops(stops);
+      const colorStops = norm.map(s => ({ offset: s.offset, color: s.color }));
+      let coords;
+      if (type === 'radial') {
+        coords = { x1: w / 2, y1: h / 2, r1: 0, x2: w / 2, y2: h / 2, r2: Math.max(w, h) / 2 };
+      } else {
+        const rad = (angle * Math.PI) / 180;
+        const dx = Math.cos(rad) * w / 2, dy = Math.sin(rad) * h / 2;
+        coords = { x1: w / 2 - dx, y1: h / 2 - dy, x2: w / 2 + dx, y2: h / 2 + dy };
+      }
+      obj.set('fill', new this.fabric.Gradient({ type, coords, colorStops }));
+    };
+    if (o.type === 'activeSelection') o.forEachObject(apply); else apply(o);
+    o.dirty = true;
+    this.fc.renderAll();
+    this.commit('gradient-fill');
+  }
+  /* Null if the active object has no gradient fill (flat color, or non-fillable like an image). */
+  getShapeGradient() {
+    const o = this.fc.getActiveObject();
+    const t = o && o.type === 'activeSelection' ? o.getObjects()[0] : o;
+    const g = t && t.fill && typeof t.fill === 'object' && t.fill.type ? t.fill : null;
+    if (!g) return null;
+    return { type: g.type, stops: (g.colorStops || []).map(s => ({ offset: s.offset, color: s.color })) };
+  }
+
+  /* Typography — patch keys: any of fontFamily, fontSize, fontWeight, fontStyle ('normal'|'italic'),
+     textAlign ('left'|'center'|'right'|'justify'), lineHeight, charSpacing (Fabric's letter-spacing,
+     in 1/1000-em units), underline, linethrough. No-op on anything but a text object (or an
+     activeSelection whose every member is text) — same silent-no-op contract as setFill/setNumeric. */
+  setTextProps(patch) {
+    const o = this.fc.getActiveObject(); if (!o) return;
+    const isText = (t) => t.type === 'i-text' || t.type === 'text' || t.type === 'textbox';
+    if (o.type === 'activeSelection') { if (!o.getObjects().every(isText)) return; o.forEachObject(m => m.set(patch)); }
+    else { if (!isText(o)) return; o.set(patch); }
+    o.dirty = true;
+    this.fc.renderAll();
+    this.commit('text-props');
+  }
+  getTextProps() {
+    const o = this.fc.getActiveObject();
+    const t = o && o.type === 'activeSelection' ? o.getObjects()[0] : o;
+    if (!t || (t.type !== 'i-text' && t.type !== 'text' && t.type !== 'textbox')) return null;
+    return {
+      fontFamily: t.fontFamily || 'system-ui, sans-serif', fontSize: t.fontSize || 48,
+      fontWeight: t.fontWeight || 400, fontStyle: t.fontStyle || 'normal',
+      textAlign: t.textAlign || 'left', lineHeight: t.lineHeight != null ? t.lineHeight : 1.16,
+      charSpacing: t.charSpacing || 0, underline: !!t.underline, linethrough: !!t.linethrough,
+    };
+  }
+
+  /* Resizes the artboard boundary itself (Photoshop's "Canvas Size", not "Image Size") — existing
+     layers keep their absolute position and scale, so growing the canvas adds blank space and
+     shrinking it can clip content rather than rescaling everything to fit. */
+  resizeCanvas(width, height) {
+    const w = Math.max(1, Math.round(width)), h = Math.max(1, Math.round(height));
+    if (w === this.W && h === this.H) return;
+    this.W = w; this.H = h;
+    this.fc.setDimensions({ width: w, height: h });
+    this.engine.W = w; this.engine.H = h;
+    this.fc.renderAll();
+    this.commit('resize-canvas');
+    this._emit('resize', { width: w, height: h });
   }
 
   /* ── crop ─────────────────────────────────────────────────────────────────────────────── */

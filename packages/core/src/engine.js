@@ -7,9 +7,43 @@
 
    Headless: `fabric` is injected — nothing here reads globals. */
 
-import { hexRgb, rgba, toHex } from './color.js';
+import { hexRgb, rgba, toHex, normalizeGradientStops } from './color.js';
 
 export const PAINT_TOOLS = ['brush', 'pencil', 'eraser', 'clone', 'heal', 'dodge', 'burn', 'sponge', 'redeye'];
+
+/* Renders exactly `objects` (an arbitrary subset/order of the canvas's own objects — NOT
+   necessarily fc.getObjects()) to a fresh artboard-resolution offscreen canvas, at scene scale
+   (viewport transform reset to identity, cropped to 0,0,W,H) — the same "flatten to a plain
+   canvas" primitive captureFlat() already used for the whole scene, generalized so
+   Editor#_recomputeAdjustmentLayers can flatten just "everything below this adjustment layer's
+   z-index" instead. Uses fc.renderCanvas(ctx, objects) directly (Fabric's own object-list-scoped
+   render, which fc.toCanvasElement() itself calls internally with the full list) rather than
+   toggling every other object's `visible` off and back on around a toCanvasElement() call — no
+   risk of a re-entrant render or a stray event firing off half-hidden state. Doesn't touch fc's
+   own live width/height/viewportTransform at all, so no save/restore dance is needed around it. */
+export function renderObjectsFlat(fc, W, H, objects) {
+  const canvasEl = document.createElement('canvas');
+  canvasEl.width = W; canvasEl.height = H;
+  const ctx = canvasEl.getContext('2d');
+  const savedVpt = fc.viewportTransform;
+  fc.viewportTransform = [1, 0, 0, 1, 0, 0];
+  fc.calcViewportBoundaries();
+  try { fc.renderCanvas(ctx, objects); }
+  finally { fc.viewportTransform = savedVpt; fc.calcViewportBoundaries(); }
+  return canvasEl;
+}
+
+/* Builds a real CanvasGradient from the shared {offset,color} stop shape — 'radial' treats
+   (x1,y1) as the center and the distance to (x2,y2) as the radius (Canvas2D's own radial
+   gradient convention: an inner radius of 0 at the center, growing out to that distance). */
+export function buildCanvasGradient(ctx, x1, y1, x2, y2, stops, type = 'linear') {
+  const norm = normalizeGradientStops(stops);
+  const g = type === 'radial'
+    ? ctx.createRadialGradient(x1, y1, 0, x1, y1, Math.max(1, Math.hypot(x2 - x1, y2 - y1)))
+    : ctx.createLinearGradient(x1, y1, x2, y2);
+  norm.forEach(s => g.addColorStop(s.offset, s.color));
+  return g;
+}
 
 export class PaintEngine {
   constructor(fabric, fc, W, H) {
@@ -44,14 +78,15 @@ export class PaintEngine {
   /* Flatten the whole scene at artboard resolution — clone/heal sample from this, and the
      eyedropper reads it, so both see COMPOSITED pixels, not just the paint layer. */
   captureFlat() {
-    const fc = this.fc; const vpt = fc.viewportTransform.slice(); const w = fc.getWidth(), h = fc.getHeight();
-    fc.setViewportTransform([1, 0, 0, 1, 0, 0]); fc.setDimensions({ width: this.W, height: this.H });
-    this._flat = fc.toCanvasElement(1, { left: 0, top: 0, width: this.W, height: this.H });
-    fc.setDimensions({ width: w, height: h }); fc.setViewportTransform(vpt); fc.renderAll();
+    this._flat = renderObjectsFlat(this.fc, this.W, this.H, this.fc.getObjects());
   }
 
   _softStamp(x, y, o, color, comp, alphaMul) {
-    const ctx = this.ctx, r = Math.max(1, o.size / 2), hard = o.hardness != null ? o.hardness : 0.7;
+    const ctx = this.ctx, r = Math.max(1, o.size / 2);
+    // Clamped shy of 1: Canvas2D's radial gradient degenerates to fully transparent everywhere
+    // when the inner/outer radii are exactly equal, so a hardness-1 (fully hard) brush would
+    // otherwise paint nothing instead of a crisp hard edge. See mask.js's maskStamp for the same fix.
+    const hard = Math.min(o.hardness != null ? o.hardness : 0.7, 0.995);
     ctx.save(); if (this._clip) ctx.clip(this._clip, this._clipRule || 'nonzero');
     ctx.globalCompositeOperation = comp || 'source-over';
     ctx.globalAlpha = (o.opacity != null ? o.opacity : 1) * (alphaMul || 1);
@@ -73,7 +108,7 @@ export class PaintEngine {
   _cloneStamp(x, y, o, blur) {
     if (!this._flat || !this._off) return;
     const ctx = this.ctx, r = Math.max(1, o.size / 2);
-    const hard = o.hardness != null ? o.hardness : 0.7;
+    const hard = Math.min(o.hardness != null ? o.hardness : 0.7, 0.995);   // see _softStamp's comment
     const tempCanvas = document.createElement('canvas');
     const size = Math.ceil(r * 2);
     tempCanvas.width = size;
@@ -233,13 +268,19 @@ export class PaintEngine {
     ctx.fillRect(0, 0, this.W, this.H); ctx.restore(); this.commit();
   }
 
-  paintGradient(x1, y1, x2, y2, color1, color2) {
+  /* Fills the (clipped) paint layer with a gradient from (x1,y1) to (x2,y2) — Photoshop's
+     Gradient tool. `stops` is [{offset: 0..1, color}, ...] (2+ stops; unsorted input is sorted by
+     offset). `type` is 'linear' (the two points are the axis) or 'radial' (x1,y1 is the center,
+     the distance to x2,y2 is the radius — Fabric/Canvas2D's radial gradient convention).
+     Called on every mousemove while dragging for a live preview, and once more on mouseup to
+     commit — repeated calls simply overwrite the same rect, so no extra bookkeeping is needed for
+     "redo this preview frame" the way stroke-based tools require. */
+  paintGradient(x1, y1, x2, y2, stops, type = 'linear') {
     this.ensure();
     const ctx = this.ctx; ctx.save(); if (this._clip) ctx.clip(this._clip, this._clipRule || 'nonzero');
     ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
-    const g = ctx.createLinearGradient(x1, y1, x2, y2);
-    g.addColorStop(0, color1); g.addColorStop(1, color2);
-    ctx.fillStyle = g; ctx.fillRect(0, 0, this.W, this.H); ctx.restore(); this.commit();
+    ctx.fillStyle = buildCanvasGradient(ctx, x1, y1, x2, y2, stops, type);
+    ctx.fillRect(0, 0, this.W, this.H); ctx.restore(); this.commit();
   }
 
   /* Eyedropper: composited colour at a point, as hex. */
@@ -265,6 +306,14 @@ export class PaintEngine {
         o._element = cv;
         o.dirty = true;
       }
+    });
+    // Layer masks: only the MaskFilter instance itself gets its maskCanvas rehydrated by Fabric's
+    // own filter fromObject (see mask.js) — o.maskCanvas is this engine/editor's own bookkeeping
+    // pointer to that same canvas (so addMask/removeMask/_refreshMaskFilter don't have to search
+    // o.filters every time), and needs re-linking here after every restore.
+    this.fc.getObjects().forEach(o => {
+      const f = (o.filters || []).find(x => x.type === 'MaskFilter');
+      o.maskCanvas = f ? f.maskCanvas : null;
     });
     let activePaint = this.fc.getActiveObject();
     if (!activePaint || activePaint.role !== 'paint') activePaint = paintLayers[0];

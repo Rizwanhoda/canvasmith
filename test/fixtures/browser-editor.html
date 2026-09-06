@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Editor browser-test fixture</title>
+<!-- Minimal harness for editor.browser.test.mjs — no UI chrome, just an Editor instance exposed
+     on window for Playwright to drive directly via page.evaluate(). Mirrors how the demo boots
+     one (same fabric build, same Editor constructor call) without any of its DOM/CSS. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<script type="module">
+  import { Editor, installKeybindings } from '/packages/core/src/index.js';
+  window.__Editor = Editor;
+  window.__ed = new Editor({ fabric: window.fabric, canvasEl: document.getElementById('cv'), width: 400, height: 300 });
+  window.__stopKeys = installKeybindings(window.__ed);
+  window.__ready = true;
+</script>
+</body>
+</html>

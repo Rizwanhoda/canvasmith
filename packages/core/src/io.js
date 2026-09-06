@@ -3,19 +3,25 @@
    EXTRA lists the library's own layer metadata that must survive fabric.toJSON round-trips —
    drop one of these and undo/redo silently strips it from every layer. */
 
-export const EXTRA = ['id', 'role', 'name', 'locked', 'spec', 'fx', 'regionType', 'rcontent', 'rstyle', 'renamed', 'isFreehand'];
+export const EXTRA = ['id', 'role', 'name', 'locked', 'spec', 'fx', 'regionType', 'rcontent', 'rstyle', 'renamed', 'isFreehand', 'maskEnabled', 'adj'];
 
+/* fc.toJSON() doesn't carry the canvas's own width/height (only its objects/background), so a
+   canvas-size change (Editor#resizeCanvas) would otherwise be invisible to undo/redo — every
+   snapshot embeds the artboard dimensions alongside the fabric JSON to round-trip that too. */
 export function serialize(fc) {
-  return JSON.stringify(fc.toJSON(EXTRA));
+  return JSON.stringify({ w: fc.getWidth(), h: fc.getHeight(), scene: fc.toJSON(EXTRA) });
 }
 
 export function restore(fc, json, { engine, history, onDone } = {}) {
   if (history) history.lock = true;
-  fc.loadFromJSON(json, () => {
+  const { w, h, scene } = JSON.parse(json);
+  fc.setDimensions({ width: w, height: h });
+  if (engine) { engine.W = w; engine.H = h; }
+  fc.loadFromJSON(scene, () => {
     if (engine) engine.adopt();
     fc.renderAll();
     if (history) history.lock = false;
-    if (onDone) onDone();
+    if (onDone) onDone(w, h);
   });
 }
 
