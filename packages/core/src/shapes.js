@@ -42,7 +42,7 @@ const BASE = { originX: 'left', originY: 'top' };
 
 export function makeShape(fabric, tool, pt, o = {}) {
   const size = o.size || 160;
-  const fill = o.fill || '#d4ff45';
+  const fill = o.fill || '#ef6a2d';
   const stroke = o.stroke || null;
   const strokeWidth = o.strokeWidth || 0;
   const common = { ...BASE, left: pt.x - size / 2, top: pt.y - size / 2, fill, stroke, strokeWidth };

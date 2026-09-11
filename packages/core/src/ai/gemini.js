@@ -54,18 +54,27 @@ const firstText = (res) => {
   return '';
 };
 
+/* Some browser contexts (blocked third-party storage, certain privacy/incognito modes, sandboxed
+   iframes) throw on ANY access to `localStorage`, not just typeof — `typeof localStorage` alone
+   still throws in those cases, so every read/write here goes through a try/catch that treats a
+   throw the same as "storage unavailable" instead of letting it crash the caller (module init, a
+   key paste, ...). */
+function safeStorageGet(k) { try { return typeof localStorage !== 'undefined' ? localStorage.getItem(k) : null; } catch (e) { return null; } }
+function safeStorageSet(k, v) { try { if (typeof localStorage !== 'undefined') localStorage.setItem(k, v); } catch (e) { /* storage unavailable — key just won't persist */ } }
+function safeStorageRemove(k) { try { if (typeof localStorage !== 'undefined') localStorage.removeItem(k); } catch (e) { /* storage unavailable */ } }
+
 export class GeminiProvider {
   /* key: pass explicitly, or omit to read/persist from localStorage (personal use). */
   constructor({ key, persist = true } = {}) {
     this._persist = persist;
-    this._key = key || (persist && typeof localStorage !== 'undefined' ? localStorage.getItem(STORE_KEY) : null) || null;
+    this._key = key || (persist ? safeStorageGet(STORE_KEY) : null) || null;
   }
 
   setKey(key) {
     this._key = key || null;
-    if (this._persist && typeof localStorage !== 'undefined') {
-      if (key) localStorage.setItem(STORE_KEY, key);
-      else localStorage.removeItem(STORE_KEY);
+    if (this._persist) {
+      if (key) safeStorageSet(STORE_KEY, key);
+      else safeStorageRemove(STORE_KEY);
     }
   }
 

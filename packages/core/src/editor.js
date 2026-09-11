@@ -14,6 +14,7 @@ import {
   startPolyBuild, polyBuildAdd, polyBuildPreview, finishPolyBuild,
   buildEdgeMapFromImageData, snapToEdge,
   selectionPolys, polysToSelection, addPolyToSelection, selectionBounds, HoverCache,
+  getSelectionHandle, dragSelectionRect,
 } from './selection.js';
 import { makeShape, resizeShapeTo, makeText, layerLabel, uid } from './shapes.js';
 import { getCropHandle, dragCropRect, applyCrop } from './crop.js';
@@ -24,10 +25,11 @@ import { recolorPixels, fxToFilterSpecs, FX_DEFAULTS, normalizeGradientStops, sp
 import { AIRegistry } from './ai/registry.js';
 import { CvEngine, prepImageData } from './cv/client.js';
 import { makeMaskFilterClass, createMaskCanvas, maskStamp, maskLine, serializeMask, deserializeMask, invertMaskCanvas } from './mask.js';
+import { stickerSpec, STICKER_PALETTE } from './stickers.js';
 
 export const SEL_TOOLS = ['marquee', 'marquee-ellipse', 'lasso', 'lasso-poly', 'lasso-mag', 'wand', 'objectselect', 'hoverselect'];
 export const SHAPE_TOOLS = ['rect', 'ellipse', 'line', 'triangle', 'polygon', 'star'];
-export const ALL_TOOLS = ['select', 'hand', ...PAINT_TOOLS, ...SEL_TOOLS, ...SHAPE_TOOLS, 'type', 'bucket', 'gradient', 'eyedropper', 'crop'];
+export const ALL_TOOLS = ['select', 'hand', ...PAINT_TOOLS, ...SEL_TOOLS, ...SHAPE_TOOLS, 'type', 'bucket', 'gradient', 'eyedropper', 'crop', 'pen', 'aiinsert'];
 const CLICK_LASSOS = ['lasso-poly', 'lasso-mag'];
 const SEL_EPS = 0.0022;   // contour fidelity passed to the cv wand — smaller hugs the edge harder
 
@@ -59,6 +61,19 @@ export class Editor {
       // for the proportional-resize behaviour _bindProportionalSideScale implements below.
       altActionKey: 'altKey',
     });
+    // Themed selection handles: circular accent-colored corners instead of Fabric's stock plain
+    // white squares + light-blue border — applied per-object on 'object:added' rather than
+    // mutating the shared fabric.Object.prototype globally, so multiple Editor instances on one
+    // page (or other Fabric usage outside this library) never fight over one theme. `accent`
+    // defaults to the toolOpts fill color set below (this.toolOpts isn't assigned yet at this
+    // point in the constructor, so the literal is duplicated here rather than referenced).
+    const handleAccent = '#ef6a2d';
+    this.fc.on('object:added', (opt) => {
+      if (opt.target) opt.target.set({
+        transparentCorners: false, cornerColor: handleAccent, cornerStrokeColor: '#0c0c0e',
+        borderColor: handleAccent, cornerSize: 11, cornerStyle: 'circle', borderScaleFactor: 1.5, padding: 2,
+      });
+    });
     this.engine = new PaintEngine(fabric, this.fc, width, height);
     // Registers fabric.Image.filters.MaskFilter (see mask.js) — must happen before any scene
     // JSON containing a mask filter is ever restored (undo/redo, loadJSON), since Fabric's own
@@ -73,8 +88,9 @@ export class Editor {
     this.cv = new CvEngine(openCvUrl ? { openCvUrl } : undefined);
     this.tool = 'select';
     this.toolOpts = {
-      size: 30, opacity: 1, hardness: 0.7, color: '#d4ff45', fill: '#d4ff45', tolerance: 32, fontSize: 48, aligned: true,
-      gradientType: 'linear', gradientStops: [{ offset: 0, color: '#d4ff45' }, { offset: 1, color: '#7c3aed' }],
+      size: 30, opacity: 1, hardness: 0.7, color: '#ef6a2d', fill: '#ef6a2d', tolerance: 32, fontSize: 48, aligned: true,
+      gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }],
+      addMode: false,   // sticky "keep adding every click to the selection" toggle for wand/objectselect/hoverselect
     };
     this.selection = null;
     this.crop = null;               // {x,y,w,h} while the crop tool is live
@@ -107,10 +123,20 @@ export class Editor {
     if (!ALL_TOOLS.includes(t)) throw new Error('Unknown tool "' + t + '". Tools: ' + ALL_TOOLS.join(', '));
     const prev = this.tool;
     if (CLICK_LASSOS.includes(prev) && prev !== t) this._polyBuild = null;
+    // Switching away from Pen mid-path must tell listeners the in-progress path is gone too —
+    // _down/_move emit 'pen' on every point placed, so a host overlay (see the demo's `penBuild`)
+    // that only updates from that event would otherwise keep drawing the abandoned path forever.
+    if (prev === 'pen' && t !== 'pen' && this._penBuild) { this._penBuild = null; this._emit('pen', null); }
+    // Switching TO the Select/Move tool with a live pixel selection lifts it into a movable layer
+    // first — Select is move-only (drawing a marquee is what the marquee/lasso/wand tools are for),
+    // so without this a selection made with any other tool would be stranded: nothing to drag it
+    // with. Runs before the rest of this method's own state changes so liftSelectionToLayer sees
+    // the pre-switch tool/selection and leaves its own setActiveObject as the final word.
+    if (t === 'select' && prev !== 'select' && this.selection) this.liftSelectionToLayer();
     this.tool = t;
     const drawing = t !== 'select';
     this.fc.selection = !drawing;
-    this.fc.defaultCursor = t === 'hand' ? 'grab' : drawing ? 'crosshair' : 'default';
+    this.fc.defaultCursor = t === 'hand' ? 'grab' : t === 'type' ? 'text' : drawing ? 'crosshair' : 'default';
     this.fc.getObjects().forEach(o => { o.selectable = !drawing && !o.locked; o.evented = !drawing && !o.locked; });
     if (t === 'crop') this.crop = { x: this.W * 0.1, y: this.H * 0.1, w: this.W * 0.8, h: this.H * 0.8 };
     else this.crop = null;
@@ -160,7 +186,11 @@ export class Editor {
       }
       return;
     }
-    if (t === 'hand' || e.spaceKey) { this._drag = { kind: 'pan', x: e.clientX, y: e.clientY }; return; }
+    if (t === 'hand' || e.spaceKey) {
+      this._drag = { kind: 'pan', x: e.clientX, y: e.clientY };
+      this.fc.setCursor('grabbing');
+      return;
+    }
     if (t === 'select' && e.altKey) {
       const target = this.fc.findTarget(e);
       if (target && target.selectable && !target.locked) {
@@ -179,6 +209,14 @@ export class Editor {
       return;
     }
     if (t === 'marquee' || t === 'marquee-ellipse' || t === 'lasso') {
+      // A rect/ellipse marquee's own selection is grabbable, crop-style: clicking one of its 8
+      // handles (or its interior) resizes/moves it instead of starting a brand-new selection —
+      // otherwise every click-drag on top of an existing marquee would just replace it, and the
+      // only way to nudge a selection's edge would be to redraw the whole thing from scratch.
+      if (t !== 'lasso' && this.selection && (this.selection.kind === 'rect' || this.selection.kind === 'ellipse')) {
+        const handle = getSelectionHandle(this.selection, pt, this.fc.getZoom());
+        if (handle) { this._drag = { kind: 'resize-sel', handle, last: pt }; return; }
+      }
       this.selection = startSelection(t, pt);
       this._drag = { kind: 'sel' };
       return;
@@ -186,22 +224,36 @@ export class Editor {
     if (CLICK_LASSOS.includes(t)) {
       const p = t === 'lasso-mag' ? snapToEdge(this._edgeMap, pt) : pt;
       if (!this._polyBuild) this._polyBuild = startPolyBuild();
-      const next = polyBuildAdd(this._polyBuild, p);
-      if (next.closed) { this.finishPolyLasso(); return; }
+      // closeDist (how near the first vertex a click must land to close the loop) is scene px, so
+      // without dividing by zoom it's a fixed on-CANVAS distance that becomes a tiny, easy-to-miss
+      // target on screen once zoomed out (or an oversized hair-trigger zone once zoomed in) — same
+      // zoom-independence bug getCropHandle/getSelectionHandle's own `12 / z` tolerance avoids.
+      const next = polyBuildAdd(this._polyBuild, p, 12 / (this.fc.getZoom() || 1));
       this._polyBuild = next;
+      if (next.closed) { this.finishPolyLasso(); return; }
       this.selection = { kind: 'poly', pts: next.pts.slice(), building: true };
       this._emit('selection', this.selection);
       this.fc.renderAll();
       return;
     }
     if (t === 'wand') {
-      this.wandPick(pt, { add: e.shiftKey, subtract: e.altKey });
+      this.wandPick(pt, { add: e.shiftKey || this.toolOpts.addMode, subtract: e.altKey });
+      return;
+    }
+    if (t === 'aiinsert') {
+      // Clicking INSIDE an active selection opens region mode: the AI result fills exactly that
+      // shape (see aiInsertAt). Otherwise it's a plain insert-at-point. No drag/up handling — the
+      // host UI owns the prompt popover and calls aiInsertAt() itself once the user submits.
+      const box = this.selection ? selectionBounds(this.selection, this.W, this.H) : null;
+      const region = !!(box && pt.x >= box.x && pt.x <= box.x + box.w && pt.y >= box.y && pt.y <= box.y + box.h);
+      this._emit('aiinsert', { pt, region });
       return;
     }
     if (t === 'objectselect' || t === 'hoverselect') {
+      const add = e.shiftKey || this.toolOpts.addMode;
       const cached = this._hoverCache && this._hoverCache.get(this._hoverCellKey(pt));
-      if (cached) this._commitPoly(cached, { add: e.shiftKey, subtract: e.altKey });
-      else this.wandPick(pt, { add: e.shiftKey, subtract: e.altKey });
+      if (cached) this._commitPoly(cached, { add, subtract: e.altKey });
+      else this.wandPick(pt, { add, subtract: e.altKey });
       return;
     }
     if (SHAPE_TOOLS.includes(t)) {
@@ -242,6 +294,15 @@ export class Editor {
       if (handle) this._drag = { kind: 'crop', handle, last: pt };
       return;
     }
+    if (t === 'pen') {
+      if (!this._penBuild) this._penBuild = startPolyBuild();
+      const next = polyBuildAdd(this._penBuild, pt, 12 / (this.fc.getZoom() || 1));
+      this._penBuild = next;
+      if (next.closed) { this.finishPen(); return; }
+      this._emit('pen', { pts: next.pts.slice() });
+      this.fc.renderAll();
+      return;
+    }
   }
 
   _move(opt) {
@@ -262,6 +323,11 @@ export class Editor {
       this.fc.renderAll();
       return;
     }
+    if (this.tool === 'pen' && this._penBuild) {
+      this._emit('pen', polyBuildPreview(this._penBuild, pt));
+      this.fc.renderAll();
+      return;
+    }
     if (this.tool === 'hoverselect' || this.tool === 'objectselect') { this._hoverMove(pt); return; }
     const d = this._drag;
     if (!d) return;
@@ -274,6 +340,13 @@ export class Editor {
     }
     if (d.kind === 'paint') { this.engine.move(this.tool, pt, { ...this.toolOpts }); return; }
     if (d.kind === 'sel') { updateSelection(this.selection, pt, { square: e.shiftKey }); this.fc.renderAll(); this._emit('selection', this.selection); return; }
+    if (d.kind === 'resize-sel') {
+      this.selection = dragSelectionRect(this.selection, d.handle, pt.x - d.last.x, pt.y - d.last.y);
+      d.last = pt;
+      this._emit('selection', this.selection);
+      this.fc.renderAll();
+      return;
+    }
     if (d.kind === 'shape') { resizeShapeTo(d.obj, d.tool, d.from, pt, { square: e.shiftKey }); this.fc.renderAll(); return; }
     if (d.kind === 'gradient') {
       this.engine.paintGradient(d.from.x, d.from.y, pt.x, pt.y, this.toolOpts.gradientStops, this.toolOpts.gradientType);
@@ -293,12 +366,21 @@ export class Editor {
     const d = this._drag; this._drag = null;
     if (!d) return;
     if (d.kind === 'paint') { this.engine.up(); this.engine.setClip(null); this.commit('stroke'); }
-    if (d.kind === 'sel') { this.selection = finalizeSelection(this.selection); this._emit('selection', this.selection); }
+    if (d.kind === 'sel' || d.kind === 'resize-sel') { this.selection = finalizeSelection(this.selection); this._emit('selection', this.selection); }
     if (d.kind === 'gradient') { this.engine.setClip(null); this.commit('gradient'); }
     if (d.kind === 'shape') { this.commit('shape'); this.setTool('select'); this.fc.setActiveObject(d.obj); }
+    if (d.kind === 'pan' && this.tool === 'hand') this.fc.setCursor('grab');
   }
 
   clearSelection() { this.selection = null; this._polyBuild = null; this._emit('selection', null); this.fc.renderAll(); }
+  /* Whole-artboard pixel selection (⌘A) — the same full-canvas rect invertSelection() falls back
+     to when nothing is selected yet, but as its own explicit entry point rather than a side effect
+     of inverting. */
+  selectAll() {
+    this.selection = { kind: 'rect', x: 0, y: 0, w: this.W, h: this.H };
+    this._emit('selection', this.selection);
+    this.fc.renderAll();
+  }
   invertSelection() {
     if (!this.selection) { this.selection = { kind: 'rect', x: 0, y: 0, w: this.W, h: this.H }; }
     else this.selection.invert = !this.selection.invert;
@@ -318,6 +400,35 @@ export class Editor {
     this._polyBuild = null;
     this.selection = null;
     this._emit('selection', null);
+    this.fc.renderAll();
+  }
+
+  /* ── pen tool: click-to-place vertices into a real filled fabric.Polygon layer (not a
+     selection) — Enter/double-click-near-start finishes, Escape cancels. Reuses the same
+     poly-build accumulator as the polygonal lasso (startPolyBuild/polyBuildAdd), since "click to
+     place points, snap-close near the start" is identical geometry either way. */
+  finishPen() {
+    const build = finishPolyBuild(this._penBuild, false);
+    this._penBuild = null;
+    this._emit('pen', null);
+    if (!build) { this.fc.renderAll(); return null; }
+    const pts = build.pts;
+    const minX = Math.min(...pts.map(p => p.x)), minY = Math.min(...pts.map(p => p.y));
+    const obj = new this.fabric.Polygon(pts.map(p => ({ x: p.x - minX, y: p.y - minY })), {
+      left: minX, top: minY, originX: 'left', originY: 'top',
+      fill: this.toolOpts.fill || this.toolOpts.color || '#ef6a2d',
+      stroke: this.toolOpts.stroke || null, strokeWidth: this.toolOpts.strokeWidth || 0,
+    });
+    obj.set({ id: uid(), role: 'shape', name: 'Path' });
+    this.fc.add(obj);
+    this.fc.setActiveObject(obj);
+    this.commit('pen');
+    this.setTool('select');
+    return obj.id;
+  }
+  cancelPen() {
+    this._penBuild = null;
+    this._emit('pen', null);
     this.fc.renderAll();
   }
 
@@ -636,6 +747,22 @@ export class Editor {
     else if (dir === 'top') this.fc.bringToFront(o); else if (dir === 'bottom') this.fc.sendToBack(o);
     this.fc.renderAll(); this.commit('reorder');
   }
+  /* Drag-to-reorder: move layer `id` to sit directly in front of (default) or behind layer
+     `targetId` in stacking order — "in front of" is the natural drop semantic for a layers panel
+     that lists topmost-first (fc.getObjects() index order is bottom-to-top, the OPPOSITE of the
+     panel's display order, so "in front of target" means one PAST target's fc index, not before
+     it). No-op if either id is missing or they're the same object. */
+  reorderLayerTo(id, targetId, { after = false } = {}) {
+    if (id === targetId) return;
+    const o = this._byId(id), target = this._byId(targetId); if (!o || !target) return;
+    const objs = this.fc.getObjects();
+    let idx = objs.indexOf(target);
+    if (idx < 0) return;
+    if (!after) idx += 1;   // "in front of" target = just past it in fc's bottom-to-top order
+    if (objs.indexOf(o) < idx) idx -= 1;   // account for o's own removal shifting later indices down
+    this.fc.moveTo(o, Math.max(0, idx));
+    this.fc.renderAll(); this.commit('reorder');
+  }
   removeLayer(id) {
     const o = this._byId(id); if (!o) return;
     // Deleting the layer currently being mask-painted must drop the in-flight mask-edit state and
@@ -909,6 +1036,33 @@ export class Editor {
     this.commit('cut-selection');
   }
 
+  /* Non-destructive "crop to selection": hides the active layer's pixels OUTSIDE the current
+     marquee/lasso/wand selection by setting a clipPath, same mechanism as cutSelectionFromLayer
+     (its exact mirror — inverted there, not-inverted here) but without touching the layer's own
+     pixel data, position, or size — clearLayerClip() (or drawing a new selection and re-clipping)
+     fully reverses it. Unlike the Crop tool, this doesn't resize the artboard or re-origin every
+     other layer; it only affects the one layer currently selected. */
+  clipLayerToSelection() {
+    const o = this.fc.getActiveObject();
+    if (!o || !this.selection) return;
+    const clip = selectionClipObject(this.fabric, this.selection);
+    if (!clip) return;
+    clip.absolutePositioned = true; clip.inverted = !!this.selection.invert;
+    o.clipPath = clip; o.dirty = true;
+    this.fc.renderAll();
+    this.commit('clip-to-selection');
+  }
+
+  /* Removes whatever clipPath is on the active layer — undoes clipLayerToSelection (or any other
+     clip) without needing to remember what the clip shape was. */
+  clearLayerClip() {
+    const o = this.fc.getActiveObject();
+    if (!o || !o.clipPath) return;
+    o.clipPath = null; o.dirty = true;
+    this.fc.renderAll();
+    this.commit('clear-clip');
+  }
+
   /* Token-free recolour: copies the selected pixels to a new layer and swaps hue/saturation
      toward `hex` while KEEPING each pixel's lightness, so shadows/folds/texture survive. Non-
      destructive — deleting the new layer reverts it. */
@@ -994,6 +1148,27 @@ export class Editor {
     this.fc.renderAll();
     this.commit('add-adjustment');
     return img.id;
+  }
+  /* Decorative sticker: a recolorable vector shape from the built-in library (stickers.js), added
+     centered at `pt` (default: artboard center) at a fixed 160px nominal size — same size/role
+     convention as makeShape(), so it behaves exactly like any other vector shape layer (Fill
+     colour swatch recolors it, Transform resizes/rotates it, etc.) once placed. */
+  addSticker(key, pt, size = 160) {
+    const spec = stickerSpec(key); if (!spec) return null;
+    const center = pt || { x: this.W / 2, y: this.H / 2 };
+    const fill = STICKER_PALETTE[0];
+    const common = { originX: 'center', originY: 'center', left: center.x, top: center.y, scaleX: size / 100, scaleY: size / 100 };
+    let obj = null;
+    if (spec.kind === 'circle') obj = new this.fabric.Circle({ ...common, radius: spec.r, fill });
+    else if (spec.kind === 'rect') obj = new this.fabric.Rect({ ...common, width: spec.w, height: spec.h, rx: spec.rx, ry: spec.rx, fill });
+    else if (spec.kind === 'polygon') obj = new this.fabric.Polygon(spec.points.split(' ').map(p => { const [x, y] = p.split(',').map(Number); return { x, y }; }), { ...common, fill });
+    else if (spec.kind === 'path') obj = new this.fabric.Path(spec.d, { ...common, fill: spec.stroke ? null : fill, stroke: spec.stroke ? fill : null, strokeWidth: spec.stroke ? 10 : 0, fillRule: spec.fillRule || 'nonzero' });
+    if (!obj) return null;
+    obj.set({ id: uid(), role: 'shape', name: 'Sticker' });
+    this.fc.add(obj);
+    this.fc.setActiveObject(obj);
+    this.commit('sticker');
+    return obj.id;
   }
   setAdjustmentParams(id, patch) {
     const o = this._byId(id); if (!o || o.role !== 'adjustment') return;
@@ -1199,6 +1374,23 @@ export class Editor {
     this.commit('fill');
   }
 
+  /* Border/stroke — patch keys: color, width. Setting a width with no color yet defaults to black
+     (mirrors the reference: picking up the width slider from 0 should show a visible border right
+     away, not an invisible one). No-op with nothing selected, same silent-no-op contract as
+     setFill/setNumeric for a property that may not apply to every member of a multi-selection —
+     Fabric ignores stroke/strokeWidth on object types that don't render one (e.g. images). */
+  setStroke(patch) {
+    const o = this.fc.getActiveObject(); if (!o) return;
+    const apply = (m) => {
+      if ('width' in patch) { if (patch.width > 0 && !m.stroke) m.set('stroke', '#000000'); m.set('strokeWidth', Math.max(0, patch.width)); }
+      if ('color' in patch) m.set('stroke', patch.color);
+    };
+    if (o.type === 'activeSelection') o.forEachObject(apply); else apply(o);
+    o.dirty = true;
+    this.fc.renderAll();
+    this.commit('stroke-style');
+  }
+
   /* Gradient fill for a vector shape (rect/ellipse/triangle/polygon/star/text) — Fabric's own
      fabric.Gradient, so it scales/rotates with the object for free (coords are in the OBJECT's own
      bounding-box space, not scene space, per Fabric's convention: 0,0 is the object's top-left).
@@ -1362,6 +1554,88 @@ export class Editor {
     return r;
   }
 
+  /* Fraction (0..1) of the artboard that is still fully transparent once everything is flattened —
+     used to decide whether an "extend background" affordance is worth showing. Samples on a coarse
+     grid rather than every pixel; good enough for a UI nudge, not meant to be exact. */
+  backgroundGapFraction() {
+    const flat = this.exportPNG();
+    return loadImageEl(flat).then(img => {
+      if (this._destroyed) return 0;
+      const c = document.createElement('canvas');
+      const gw = 48, gh = Math.max(1, Math.round(gw * (this.H / this.W)));
+      c.width = gw; c.height = gh;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0, gw, gh);
+      const data = ctx.getImageData(0, 0, gw, gh).data;
+      let transparent = 0;
+      for (let i = 3; i < data.length; i += 4) if (data[i] < 8) transparent++;
+      return transparent / (gw * gh);
+    }).catch(() => 0);
+  }
+
+  /* AI outpaint: fills whatever part of the canvas is still empty by describing the gap to
+     magicEdit and asking it to continue the existing image into that space — the registry's
+     magicEdit contract is text-instruction + single image in/out with no separate mask channel
+     (see ai/registry.js), so "outpaint" here is framed as an instruction rather than a true
+     inpainting mask call; a host with a mask-capable backend can call ai.run('magicEdit', ...)
+     directly for pixel-precise control. Same replace-the-composition contract as aiEdit. */
+  async aiExtendBackground() {
+    const flat = this.exportPNG();
+    const r = await this.ai.run('magicEdit', flat,
+      'Extend and continue this image to fill the entire canvas — fill in any transparent or empty areas by naturally continuing the existing background, lighting, and style. Do not add new subjects.');
+    if (r.status === 'ok') await this.openImageResult(r.result);
+    return r;
+  }
+
+  /* Pure-geometry background fill (no AI call): scales the background image up to cover the whole
+     artboard, same "cover" convention addImageLayer uses elsewhere. Prefers an explicit
+     role:'bg' image; falls back to the bottom-most image layer (an opened photo with no separate
+     bg layer). Returns false if there's no image to extend. */
+  extendBackgroundToCanvas() {
+    const objs = this.fc.getObjects();
+    const bg = objs.find(o => o.role === 'bg' && o.type === 'image') || objs.find(o => o.type === 'image');
+    if (!bg) return false;
+    const w = bg.width * (bg.scaleX || 1), h = bg.height * (bg.scaleY || 1);
+    if (w <= 0 || h <= 0) return false;
+    const sc = Math.max(this.W / bg.width, this.H / bg.height);
+    bg.clipPath = null;
+    bg.set({ originX: 'center', originY: 'center', left: this.W / 2, top: this.H / 2, scaleX: sc, scaleY: sc, angle: 0 });
+    bg.setCoords();
+    this.fc.renderAll();
+    this.commit('extend-bg');
+    return true;
+  }
+
+  /* Fill the active selection (or the whole canvas, with none) with a flat colour — the Bucket
+     tool's own fill, exposed as a direct call so a UI button can trigger it without a canvas
+     click. Paints into the shared paint-engine layer, same as the bucket tool. */
+  fillWithColor(color) {
+    this._applySelClip();
+    this.engine.fill(color);
+    this.commit('bucket');
+  }
+
+  /* Fill the active selection (or the whole canvas) with an image, cropped/scaled to cover the
+     fill region — same clip mechanism as fillWithColor, but stamps a bitmap instead of a flat
+     colour into the paint-engine layer. */
+  async fillWithImage(src) {
+    const img = await loadImageEl(src);
+    if (this._destroyed) return;
+    this.engine.ensure();
+    this._applySelClip();
+    const ctx = this.engine.ctx;
+    const box = this.selection ? selectionBounds(this.selection, this.W, this.H) : { x: 0, y: 0, w: this.W, h: this.H };
+    const sc = Math.max(box.w / img.width, box.h / img.height);
+    const dw = img.width * sc, dh = img.height * sc;
+    const dx = box.x + (box.w - dw) / 2, dy = box.y + (box.h - dh) / 2;
+    ctx.save();
+    if (this.engine._clip) ctx.clip(this.engine._clip, this.engine._clipRule || 'nonzero');
+    ctx.drawImage(img, dx, dy, dw, dh);
+    ctx.restore();
+    this.engine.commit();
+    this.commit('fill-image');
+  }
+
   /* AI-generate-an-image-at-a-point: inserts centered at `pt`, or — with an active selection —
      fills the selection's bounds, clipped to its shape so it reads as "filled the selection". */
   async aiInsertAt(prompt, pt) {
@@ -1400,18 +1674,29 @@ export class Editor {
     return r;
   }
 
-  /* Flatten -> AI detectRegions -> explode into real editable layers. The one net-new AI-consuming
-     feature here: canvasmith otherwise has no "take a flat photo apart into layers" flow. Each
-     region ({type, bbox:{x,y,width,height in %}, content?}) becomes either a text layer (type
-     'text', using `content` as the string) or an image layer cropped from the source at that bbox.
-     Replaces the current composition, same history contract as openImageResult. */
-  async detectRegionsToLayers() {
+  /* Flatten -> AI detectRegions, WITHOUT committing anything — returns the raw region list
+     ({type, bbox:{x,y,width,height in %}, content?}) plus the flattened source image a host UI can
+     show as a review step (adjust/delete/add boxes, retype a region) before calling
+     commitRegions() with the (possibly edited) array. detectRegionsToLayers() below is the
+     one-shot convenience that skips review entirely. */
+  async detectRegions() {
     const flat = this.exportPNG();
     const r = await this.ai.run('detectRegions', flat);
     if (this._destroyed) return r;
     if (r.status !== 'ok') return r;
     const regions = Array.isArray(r.result) ? r.result : [];
     if (!regions.length) return { status: 'error', reason: 'no_regions', message: 'No regions detected.' };
+    return { status: 'ok', result: { flat, regions } };
+  }
+
+  /* Explode `regions` (same shape as detectRegions()' result.regions, in percent-of-canvas bbox
+     coordinates) into real editable layers over a background image built from `flat` — a text
+     region becomes a text layer (using `content` as the string), everything else an image layer
+     cropped from `flat` at that bbox. Replaces the current composition, same history contract as
+     openImageResult. Pure layer-building — no AI call of its own, so a review UI can call this
+     however many times the user wants after adjusting boxes returned by detectRegions(). */
+  async commitRegions(flat, regions) {
+    if (!Array.isArray(regions) || !regions.length) return { status: 'error', reason: 'no_regions', message: 'No regions to commit.' };
     const src = await loadImageEl(flat);
     if (this._destroyed) return { status: 'error', reason: 'destroyed' };
     this.fc.getObjects().slice().forEach(o => this.fc.remove(o));
@@ -1441,6 +1726,14 @@ export class Editor {
     this.fc.renderAll();
     this.commit('regions-to-layers');
     return { status: 'ok', result: regions.length };
+  }
+
+  /* One-shot convenience: detect + commit immediately with no review step (what the AI panel's
+     original "Detect regions → layers" button already did before commitRegions() existed). */
+  async detectRegionsToLayers() {
+    const r = await this.detectRegions();
+    if (r.status !== 'ok') return r;
+    return this.commitRegions(r.result.flat, r.result.regions);
   }
 
   destroy() {

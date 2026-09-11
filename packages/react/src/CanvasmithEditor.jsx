@@ -4,7 +4,7 @@
    top of the built-in light/dark palettes, which the toolbar toggle switches between. */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Editor, ALL_TOOLS, PAINT_TOOLS, SEL_TOOLS, SHAPE_TOOLS, GeminiProvider, installBridge, installDropImport, installKeybindings, FONT_GROUPS, FONT_STYLESHEET_URL } from '@canvasmith/core';
+import { Editor, ALL_TOOLS, PAINT_TOOLS, SEL_TOOLS, SHAPE_TOOLS, GeminiProvider, installBridge, installDropImport, installKeybindings, selectionPolys, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, STICKER_PALETTE, stickerSpec } from '@canvasmith/core';
 
 // Compact SVG glyphs for the tool rail — avoids pulling in an icon-font/library dependency.
 const ICONS = {
@@ -26,6 +26,8 @@ const ICONS = {
   'lasso-poly': <path d="M12 3l8 6-3 9H7L4 9z" />,
   'lasso-mag': <path d="M6 18L16 8M14 4l1.5 1.5M19 7l1.5-1.5M18 12l2 .5M9 3l.5 2M20 17l-1.5 1.5" />,
   wand: <path d="m15 4 1.5 3L20 8.5 16.5 10 15 13l-1.5-3L10 8.5 13.5 7Z M5 21l8-8" />,
+  spark: <path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8Z" />,
+  palette: <><path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.2c2.4 0 4.3-1.9 4.3-4.3C21.5 6.1 17.2 3 12 3Z" /><circle cx="7.5" cy="10.5" r="1.3" fill="currentColor" stroke="none" /><circle cx="11" cy="7" r="1.3" fill="currentColor" stroke="none" /><circle cx="15.5" cy="8" r="1.3" fill="currentColor" stroke="none" /></>,
   objectselect: <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" />,
   hoverselect: <><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></>,
   rect: <rect x="3" y="5" width="18" height="14" rx="2" />,
@@ -83,10 +85,26 @@ function Icon({ name, size = 15, style }) {
   );
 }
 
+/* Renders a stickers.js shape spec (same 0-100 coordinate space addSticker() builds from) as a
+   small preview SVG for the Stickers grid — one rendering path shared with the real Fabric object
+   addSticker() places, so the preview always matches what clicking it actually adds. */
+function StickerPreview({ shapeKey, size = 28 }) {
+  const spec = stickerSpec(shapeKey);
+  if (!spec) return null;
+  const fill = STICKER_PALETTE[0];
+  let shape = null;
+  if (spec.kind === 'circle') shape = <circle cx={spec.cx} cy={spec.cy} r={spec.r} fill={fill} />;
+  else if (spec.kind === 'rect') shape = <rect x={spec.x} y={spec.y} width={spec.w} height={spec.h} rx={spec.rx} fill={fill} />;
+  else if (spec.kind === 'polygon') shape = <polygon points={spec.points} fill={fill} />;
+  else if (spec.kind === 'path') shape = <path d={spec.d} fill={spec.stroke ? 'none' : fill} stroke={spec.stroke ? fill : 'none'} strokeWidth={spec.stroke ? 10 : 0} fillRule={spec.fillRule || 'nonzero'} />;
+  return <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true">{shape}</svg>;
+}
+
 const GROUPS = [
   { label: 'Move', tools: [['select', 'Select'], ['hand', 'Pan'], ['crop', 'Crop']] },
   { label: 'Paint', tools: [['brush', 'Brush'], ['pencil', 'Pencil'], ['eraser', 'Eraser'], ['clone', 'Clone'], ['heal', 'Heal'], ['dodge', 'Dodge'], ['burn', 'Burn'], ['sponge', 'Sponge'], ['redeye', 'Red-eye']] },
   { label: 'Select', tools: [['marquee', 'Marquee'], ['marquee-ellipse', 'Ellipse'], ['lasso', 'Lasso'], ['lasso-poly', 'Polygon lasso'], ['lasso-mag', 'Magnetic lasso'], ['wand', 'Wand'], ['objectselect', 'Object select'], ['hoverselect', 'Hover select']] },
+  { label: 'AI', tools: [['aiinsert', 'AI insert']] },
   { label: 'Draw', tools: [['rect', 'Rect'], ['ellipse', 'Ellipse'], ['line', 'Line'], ['triangle', 'Triangle'], ['polygon', 'Polygon'], ['star', 'Star'], ['type', 'Text'], ['bucket', 'Fill'], ['gradient', 'Gradient'], ['eyedropper', 'Pick']] },
 ];
 
@@ -109,7 +127,7 @@ const SEL_REASON_MSG = {
 const EMPTY_PROPS = {
   active: false, title: 'Properties', isImage: false, isAdjustment: false, fx: { brightness: 100, contrast: 100, saturate: 100, blur: 0, hue: 0, vibrance: 0, invert: false },
   text: null,
-  hasFill: false, fill: '#d4ff45', shapeGradient: null, blend: 'source-over', opacity: 1,
+  hasFill: false, fill: '#ef6a2d', shapeGradient: null, blend: 'source-over', opacity: 1,
   angle: 0, x: '', y: '', w: '', h: '', skewX: 0, skewY: 0, isRect: false, rx: 0,
   shadow: { color: '#000000', blur: 0, offsetX: 0, offsetY: 0 },
   canGroup: false, canUngroup: false, hasSelectionPixels: false,
@@ -131,7 +149,7 @@ function readProps(ed) {
   const solidFill = !!fillTarget && typeof fillTarget.fill === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(fillTarget.fill);
   const shapeGradient = ed.getShapeGradient();
   const hasFill = !!fillTarget && !isImage && fillTarget.type !== 'line' && fillTarget.role !== 'paint' && (solidFill || !!shapeGradient);
-  const fill = solidFill ? (fillTarget.fill.length === 4 ? '#' + [...fillTarget.fill.slice(1)].map(c => c + c).join('') : fillTarget.fill) : '#d4ff45';
+  const fill = solidFill ? (fillTarget.fill.length === 4 ? '#' + [...fillTarget.fill.slice(1)].map(c => c + c).join('') : fillTarget.fill) : '#ef6a2d';
   return {
     active: true,
     title: o.type === 'activeSelection' ? (o._objects ? o._objects.length + ' layers' : 'Selection') : (ed.layers().find(l => l.active)?.name || o.type || 'Layer'),
@@ -160,30 +178,39 @@ function readProps(ed) {
 }
 
 const THEMES = {
-  dark: { bg: '#141417', panel: '#1b1b20', line: '#2a2a31', ink: '#eceae4', dim: '#9a978f', accent: '#d4ff45', accentInk: '#111', stage: '#0e0e11' },
-  light: { bg: '#f4f3ef', panel: '#ffffff', line: '#dedbd2', ink: '#1c1b18', dim: '#726f66', accent: '#6f6a00', accentInk: '#fff', stage: '#e4e2da' },
+  dark: { bg: '#0b0b0d', panel: '#141417', line: 'rgba(255,255,255,.07)', ink: '#f5f3ee', dim: '#aeaca4', accent: '#ef6a2d', accentInk: '#fff', stage: '#0a0a0c' },
+  light: { bg: '#f3efe7', panel: '#ffffff', line: 'rgba(30,26,18,.09)', ink: '#1c1913', dim: '#5e594f', accent: '#c85a24', accentInk: '#fff', stage: '#ece7dd' },
 };
 
 const CSS = `
-.cm-root{--cm-bg:#141417;--cm-panel:#1b1b20;--cm-line:#2a2a31;--cm-ink:#eceae4;--cm-dim:#9a978f;--cm-accent:#d4ff45;--cm-accent-ink:#111;--cm-stage:#0e0e11;
-  display:grid;grid-template-columns:52px 1fr 230px;grid-template-rows:44px 1fr;height:100%;min-height:480px;
-  background:var(--cm-bg);color:var(--cm-ink);font:13px/1.45 system-ui,sans-serif;position:relative}
-.cm-root[data-side-collapsed=true]{grid-template-columns:52px 1fr 0px}
-.cm-top{grid-column:1/4;display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid var(--cm-line);background:var(--cm-panel)}
+.cm-root{--cm-bg:#0b0b0d;--cm-panel:#141417;--cm-line:rgba(255,255,255,.07);--cm-ink:#f5f3ee;--cm-dim:#aeaca4;--cm-accent:#ef6a2d;--cm-accent-ink:#fff;--cm-stage:#0a0a0c;
+  display:grid;grid-template-columns:52px 220px 1fr 290px;grid-template-rows:44px 1fr;height:100%;min-height:480px;
+  background:var(--cm-bg);color:var(--cm-ink);font:13px/1.45 "Hanken Grotesk",system-ui,sans-serif;position:relative}
+.cm-root[data-left-collapsed=true]{grid-template-columns:52px 0px 1fr 290px}
+.cm-root[data-side-collapsed=true]{grid-template-columns:52px 220px 1fr 0px}
+.cm-root[data-left-collapsed=true][data-side-collapsed=true]{grid-template-columns:52px 0px 1fr 0px}
+.cm-top{grid-column:1/5;display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid var(--cm-line);background:var(--cm-panel)}
 .cm-rail{display:flex;flex-direction:column;gap:2px;padding:6px 4px;border-right:1px solid var(--cm-line);background:var(--cm-panel);overflow-y:auto}
 .cm-rail button{all:unset;cursor:pointer;text-align:center;display:flex;align-items:center;justify-content:center;padding:9px 0;border-radius:7px;color:var(--cm-dim)}
 .cm-rail button:hover{background:var(--cm-bg);color:var(--cm-ink)}
 .cm-rail button[data-on=true]{background:var(--cm-accent);color:var(--cm-accent-ink)}
 .cm-rail .cm-grp{font-size:8px;letter-spacing:.1em;text-transform:uppercase;color:var(--cm-dim);text-align:center;margin-top:8px}
 .cm-stage{position:relative;overflow:hidden;display:grid;place-items:center;background:var(--cm-stage)}
-.cm-side{border-left:1px solid var(--cm-line);background:var(--cm-panel);overflow-y:auto;overflow-x:hidden;padding:10px;transition:padding .15s}
+.cm-left{border-right:1px solid var(--cm-line);background:var(--cm-panel);overflow-y:auto;overflow-x:hidden;padding:18px;transition:padding .15s}
+.cm-root[data-left-collapsed=true] .cm-left{padding:0;width:0}
+.cm-side{border-left:1px solid var(--cm-line);background:var(--cm-panel);overflow-y:auto;overflow-x:hidden;padding:18px;transition:padding .15s}
 .cm-root[data-side-collapsed=true] .cm-side{padding:0;width:0}
-.cm-side h4{margin:8px 0 6px;font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--cm-dim)}
-.cm-tabs{display:flex;gap:4px;margin-bottom:10px}
-.cm-tabs button{all:unset;cursor:pointer;display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:8px;font-size:12.5px;font-weight:600;color:var(--cm-dim)}
+.cm-left h4, .cm-side h4{margin:8px 0 6px;font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--cm-dim)}
+.cm-tabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:16px}
+.cm-tabs button{all:unset;cursor:pointer;display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:8px;font-size:12px;font-weight:600;color:var(--cm-dim);white-space:nowrap}
 .cm-tabs button:hover{background:var(--cm-bg)}
 .cm-tabs button[data-on=true]{background:var(--cm-bg);color:var(--cm-ink)}
-.cm-collapse{position:absolute;top:50%;right:229px;transform:translateY(-50%);width:22px;height:36px;border-radius:8px;
+.cm-collapse-left{position:absolute;top:50%;left:272px;transform:translateY(-50%);width:22px;height:36px;border-radius:8px;
+  border:1px solid var(--cm-line);background:var(--cm-panel);color:var(--cm-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;transition:left .15s}
+.cm-root[data-left-collapsed=true] .cm-collapse-left{left:52px}
+.cm-collapse-left:hover{color:var(--cm-ink);border-color:var(--cm-accent)}
+.cm-collapse-left[data-flip=true] svg{transform:rotate(180deg)}
+.cm-collapse{position:absolute;top:50%;right:289px;transform:translateY(-50%);width:22px;height:36px;border-radius:8px;
   border:1px solid var(--cm-line);background:var(--cm-panel);color:var(--cm-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;transition:right .15s}
 .cm-root[data-side-collapsed=true] .cm-collapse{right:0}
 .cm-collapse:hover{color:var(--cm-ink);border-color:var(--cm-accent)}
@@ -196,7 +223,7 @@ const CSS = `
 .cm-layer{display:flex;align-items:center;gap:6px;padding:5px 7px;border-radius:7px;cursor:pointer;font-size:12px}
 .cm-layer:hover{background:var(--cm-bg)}.cm-layer[data-on=true]{outline:1px solid var(--cm-accent)}
 .cm-layer .cm-eye{cursor:pointer;opacity:.7;display:flex}
-.cm-btn{all:unset;cursor:pointer;padding:5px 11px;border-radius:7px;border:1px solid var(--cm-line);font-size:12px;display:inline-flex;align-items:center;gap:6px}
+.cm-btn{all:unset;cursor:pointer;padding:8px 12px;border-radius:9px;border:1px solid var(--cm-line);font-size:13px;display:inline-flex;align-items:center;gap:7px}
 .cm-btn:hover{border-color:var(--cm-accent)}.cm-btn:disabled{opacity:.4;cursor:default}
 .cm-icon-btn{all:unset;cursor:pointer;display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:7px;border:1px solid var(--cm-line);color:var(--cm-ink)}
 .cm-icon-btn:hover{border-color:var(--cm-accent)}
@@ -204,6 +231,26 @@ const CSS = `
 .cm-top input[type=range]{width:90px}.cm-top input[type=color]{width:26px;height:26px;border:none;background:none;cursor:pointer}
 .cm-ai{display:flex;gap:6px;margin-top:6px}.cm-ai input{flex:1;background:var(--cm-bg);border:1px solid var(--cm-line);border-radius:7px;color:var(--cm-ink);padding:5px 8px;font-size:12px}
 .cm-note{font-size:11px;color:var(--cm-dim);margin-top:6px;line-height:1.5}
+.cm-ai-card{padding:14px;border-radius:16px;border:1px solid var(--cm-line);background:linear-gradient(160deg,color-mix(in srgb,var(--cm-accent) 16%,transparent),var(--cm-bg));margin-bottom:14px}
+.cm-ai-card-title{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:700;margin-bottom:8px}
+.cm-ai-card p{margin:0;font-size:11.5px;color:var(--cm-dim);line-height:1.5}
+.cm-ai-textarea{width:100%;box-sizing:border-box;background:var(--cm-bg);border:1px solid var(--cm-line);border-radius:12px;color:var(--cm-ink);padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical}
+.cm-btn-accent{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent)}
+.cm-btn-accent:hover{opacity:.92;border-color:var(--cm-accent)}
+.cm-ai-suggestions{display:flex;flex-direction:column;gap:6px}
+.cm-chip{all:unset;cursor:pointer;display:flex;align-items:center;gap:7px;padding:7px 13px;border-radius:999px;border:1px solid var(--cm-line);font-size:12.5px;font-weight:500;color:var(--cm-ink)}
+.cm-chip:hover{border-color:var(--cm-accent)}
+.cm-review-overlay{position:absolute;inset:0;z-index:5}
+.cm-review-box{position:absolute;border:2px dashed;border-radius:5px;cursor:move;box-sizing:border-box}
+.cm-review-box[data-type=text]{border-color:#ffd166;background:rgba(255,209,102,.12)}
+.cm-review-box[data-type=image]{border-color:var(--cm-accent);background:color-mix(in srgb,var(--cm-accent) 12%,transparent)}
+.cm-review-tag{position:absolute;top:-24px;left:-2px;display:flex;align-items:center;gap:4px;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:6px;padding:2px 4px;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+.cm-review-tag select{all:unset;font-size:10.5px;font-weight:600;color:var(--cm-ink);cursor:pointer;padding:1px 3px}
+.cm-review-tag button{all:unset;box-sizing:border-box;cursor:pointer;width:16px;height:16px;display:flex;align-items:center;justify-content:center;border-radius:4px;color:var(--cm-dim)}
+.cm-review-tag button:hover{background:var(--cm-bg);color:#e0607a}
+.cm-review-handle{position:absolute;width:9px;height:9px;background:var(--cm-accent);border:1.5px solid var(--cm-panel);border-radius:50%;right:-5px;bottom:-5px;cursor:nwse-resize}
+.cm-review-toolbar{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);z-index:6;display:flex;align-items:center;gap:8px;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:12px;padding:8px 10px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.cm-review-sep{width:1px;height:20px;background:var(--cm-line)}
 .cm-grp{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--cm-dim);margin:16px 0 6px;padding-top:12px;border-top:1px solid var(--cm-line)}
 .cm-grp:first-child{margin-top:0;padding-top:0;border-top:none}
 .cm-field-grid{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
@@ -223,7 +270,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const stageRef = useRef(null);
   const edRef = useRef(null);
   const [tool, setTool] = useState('select');
-  const [opts, setOpts] = useState({ size: 30, opacity: 1, color: '#d4ff45', gradientType: 'linear', gradientStops: [{ offset: 0, color: '#d4ff45' }, { offset: 1, color: '#7c3aed' }] });
+  const [opts, setOpts] = useState({ size: 30, opacity: 1, color: '#ef6a2d', tolerance: 32, addMode: false, gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }] });
   const [layers, setLayers] = useState([]);
   const [maskEdit, setMaskEdit] = useState(null);
   const [hist, setHist] = useState({ past: 1, future: 0 });
@@ -232,11 +279,22 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const [aiPrompt, setAiPrompt] = useState('');
   const [needKey, setNeedKey] = useState(false);
   const [mode_, setMode] = useState(mode || 'dark');
-  const [sideTab, setSideTab] = useState('tool');
+  const [sideTab, setSideTab] = useState('layer');
   const [sideCollapsed, setSideCollapsed] = useState(false);
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [leftTab, setLeftTab] = useState('tool');
   const [snapOn, setSnapOn] = useState(true);
   const [props, setProps] = useState(EMPTY_PROPS);
   const [selMsg, setSelMsg] = useState('');
+  // AI insert-at-point: {pt (scene px), region, prompt, busy, msg} | null — opened by the
+  // aiinsert tool's click (see Editor#_down's 'aiinsert' emit), closed on submit/cancel/tool-switch.
+  const [aiInsert, setAiInsert] = useState(null);
+  // Object/hover-select live status: how many polygons are in ed.selection right now (0/1/2+,
+  // matching ditto's multiCount), plus a rough busy flag for the async wand/grabCut round-trip —
+  // wandPick/_hoverMove don't emit their own busy/idle event, so this approximates it the same way
+  // the vanilla demo does: busy from mouse:down until the next selection/hover/error settles it.
+  const [selCount, setSelCount] = useState(0);
+  const [objselectBusy, setObjselectBusy] = useState(false);
 
   useEffect(() => {
     // Google Fonts stylesheet for the typography panel's non-system fonts — added once even if
@@ -290,14 +348,23 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     ed.fc.on('object:scaling', refreshProps);
     ed.fc.on('object:rotating', refreshProps);
     const offs = [
-      ed.on('tool', setTool),
+      ed.on('tool', t => { setTool(t); if (t !== 'aiinsert') setAiInsert(null); }),
       ed.on('history', h => setHist(h)),
       ed.on('change', () => { setLayers(ed.layers()); refreshProps(); }),
-      ed.on('tooloptions', o => setOpts({ size: o.size, opacity: o.opacity, color: o.color, gradientType: o.gradientType, gradientStops: o.gradientStops })),
+      ed.on('tooloptions', o => setOpts({ size: o.size, opacity: o.opacity, color: o.color, tolerance: o.tolerance, addMode: o.addMode, gradientType: o.gradientType, gradientStops: o.gradientStops })),
       ed.on('guides', g => { dragGuides = g; ed.fc.requestRenderAll(); }),
-      ed.on('selection', () => { refreshProps(); setSelMsg(''); }),
+      ed.on('selection', s => { refreshProps(); setSelMsg(''); setObjselectBusy(false); setSelCount(s ? (selectionPolys(s) || []).length : 0); }),
       ed.on('maskedit', m => { setMaskEdit(m); setLayers(ed.layers()); }),
+      ed.on('aiinsert', ({ pt, region }) => setAiInsert({ pt, region, prompt: '', busy: false, msg: '' })),
+      ed.on('hover', () => setObjselectBusy(false)),
+      ed.on('error', () => setObjselectBusy(false)),
     ];
+    const onObjselectDown = () => {
+      if (ed.tool !== 'objectselect' && ed.tool !== 'hoverselect') return;
+      setObjselectBusy(true);
+      setTimeout(() => setObjselectBusy(b => (ed.tool === 'objectselect' || ed.tool === 'hoverselect') ? false : b), 4000);
+    };
+    ed.fc.on('mouse:down', onObjselectDown);
     if (ai === 'gemini') {
       const p = new GeminiProvider();
       ed.ai.register(p);
@@ -342,7 +409,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   // stop/type edits on the same shape, reset only implicitly (a freshly-selected shape's own
   // angle is unknown, so this just starts back at 0 for it).
   const [fgAngle, setFgAngle] = useState(0);
-  const DEFAULT_GRADIENT_STOPS = [{ offset: 0, color: '#d4ff45' }, { offset: 1, color: '#7c3aed' }];
+  const DEFAULT_GRADIENT_STOPS = [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }];
   const setSolidFillMode = () => setFillColor(props.fill);
   const setGradientFillMode = () => ed().setShapeGradient((props.shapeGradient && props.shapeGradient.stops) || DEFAULT_GRADIENT_STOPS, 'linear', fgAngle);
   const setShapeGradientPatch = (patch) => {
@@ -388,6 +455,138 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     setAiMsg(r.status === 'ok' ? 'Applied ✓ (undo to revert)' : r.message || r.reason);
   };
   const saveKey = (k) => { ed().ai.provider().setKey(k); setNeedKey(!k); };
+
+  // ── Design tab: canvas-level background/fill tools and add-element shortcuts ────────────
+  const [designBusy, setDesignBusy] = useState(false);
+  const [designMsg, setDesignMsg] = useState('');
+  const extendBackground = () => setDesignMsg(ed().extendBackgroundToCanvas() ? '' : 'No background image to extend.');
+  const aiExtendBackground = async () => {
+    setDesignBusy(true); setDesignMsg('');
+    const r = await ed().aiExtendBackground();
+    setDesignBusy(false);
+    setDesignMsg(r.status === 'ok' ? '' : r.message || r.reason);
+  };
+  const fillWithColor = (color) => ed().fillWithColor(color);
+  const pickImage = (onPicked) => {
+    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+    inp.onchange = (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      const rd = new FileReader();
+      rd.onload = (ev) => onPicked(ev.target.result);
+      rd.readAsDataURL(f);
+    };
+    inp.click();
+  };
+  const fillWithImagePick = () => pickImage(src => ed().fillWithImage(src));
+  const addImagePick = () => pickImage(src => ed().addImage(src));
+
+  // ── Convert to layers: guided review-box overlay over the canvas ────────────────────────
+  // review = { flat, boxes: [{id, type, x, y, w, h} in scene px] } | null. Box positions are
+  // stored in scene (artboard) px and converted to screen px at render time via the live
+  // viewportTransform, so panning/zooming while reviewing just re-renders in place — same
+  // contract as the vanilla demo's openReview/sceneToScreen.
+  const [review, setReview] = useState(null);
+  const [convertBusy, setConvertBusy] = useState(false);
+  const sceneToScreen = (pt) => {
+    const v = ed().fc.viewportTransform;
+    const canvasRect = canvasRef.current.getBoundingClientRect();
+    const stageRect = stageRef.current.getBoundingClientRect();
+    return { x: canvasRect.left - stageRect.left + pt.x * v[0] + v[4], y: canvasRect.top - stageRect.top + pt.y * v[3] + v[5] };
+  };
+  const screenDeltaToScene = (dx, dy) => {
+    const v = ed().fc.viewportTransform;
+    return { dx: dx / v[0], dy: dy / v[3] };
+  };
+  const openReview = (flat, regions) => {
+    const boxes = regions.map((rg, i) => {
+      const bbox = rg.bbox || {};
+      return {
+        id: 'rv' + i, type: rg.type === 'text' ? 'text' : 'image',
+        x: (bbox.x || 0) / 100 * ed().W, y: (bbox.y || 0) / 100 * ed().H,
+        w: Math.max(12, (bbox.width || 0) / 100 * ed().W), h: Math.max(12, (bbox.height || 0) / 100 * ed().H),
+      };
+    });
+    setReview({ flat, boxes });
+    ed().setTool('select');
+  };
+  const closeReview = () => setReview(null);
+  const addReviewBox = () => setReview(r => r && ({ ...r, boxes: [...r.boxes, { id: 'rv' + Date.now(), type: 'image', x: ed().W * 0.35, y: ed().H * 0.35, w: ed().W * 0.3, h: ed().H * 0.3 }] }));
+  const removeReviewBox = (id) => setReview(r => r && ({ ...r, boxes: r.boxes.filter(b => b.id !== id) }));
+  const setReviewBoxType = (id, type) => setReview(r => r && ({ ...r, boxes: r.boxes.map(b => b.id === id ? { ...b, type } : b) }));
+  const detectAndConvert = async () => {
+    if (needKey) return;
+    setConvertBusy(true);
+    try {
+      const r = await ed().detectRegions();
+      if (r.status === 'ok') openReview(r.result.flat, r.result.regions);
+    } finally {
+      setConvertBusy(false);
+    }
+  };
+  const selectOneManually = () => { openReview(ed().exportPNG(), []); addReviewBox(); };
+  const commitReview = async () => {
+    if (!review || !review.boxes.length) { closeReview(); return; }
+    const regions = review.boxes.map(b => ({
+      type: b.type,
+      bbox: { x: b.x / ed().W * 100, y: b.y / ed().H * 100, width: b.w / ed().W * 100, height: b.h / ed().H * 100 },
+    }));
+    const flat = review.flat;
+    closeReview();
+    await ed().commitRegions(flat, regions);
+  };
+  const reviewDragRef = useRef(null);
+  const onReviewBoxMouseDown = (e, box, mode) => {
+    e.preventDefault();
+    reviewDragRef.current = { id: box.id, mode, lastX: e.clientX, lastY: e.clientY };
+  };
+  useEffect(() => {
+    const onMove = (e) => {
+      const d = reviewDragRef.current; if (!d) return;
+      const dx = e.clientX - d.lastX, dy = e.clientY - d.lastY;
+      d.lastX = e.clientX; d.lastY = e.clientY;
+      const { dx: sdx, dy: sdy } = screenDeltaToScene(dx, dy);
+      setReview(r => {
+        if (!r) return r;
+        return { ...r, boxes: r.boxes.map(b => {
+          if (b.id !== d.id) return b;
+          return d.mode === 'move' ? { ...b, x: b.x + sdx, y: b.y + sdy } : { ...b, w: Math.max(12, b.w + sdx), h: Math.max(12, b.h + sdy) };
+        }) };
+      });
+    };
+    const onUp = () => { reviewDragRef.current = null; };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Re-render box screen positions on pan/zoom/resize — box state itself (scene px) is unchanged.
+  const [, bumpReview] = useState(0);
+  useEffect(() => {
+    if (!review) return;
+    const off = ed().on('zoom', () => bumpReview(n => n + 1));
+    const onResize = () => bumpReview(n => n + 1);
+    window.addEventListener('resize', onResize);
+    return () => { off(); window.removeEventListener('resize', onResize); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [review]);
+  // Re-render the AI-insert popover's screen position on pan/zoom/resize — same contract as review.
+  const [, bumpAiInsert] = useState(0);
+  useEffect(() => {
+    if (!aiInsert) return;
+    const off = ed().on('zoom', () => bumpAiInsert(n => n + 1));
+    const onResize = () => bumpAiInsert(n => n + 1);
+    window.addEventListener('resize', onResize);
+    return () => { off(); window.removeEventListener('resize', onResize); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiInsert]);
+  const submitAiInsert = async () => {
+    const ai = aiInsert; if (!ai || !ai.prompt.trim() || ai.busy) return;
+    if (needKey) { setAiInsert(null); ed().setTool('select'); setSideTab('ai'); return; }
+    setAiInsert(a => a && ({ ...a, busy: true, msg: '' }));
+    const r = await ed().aiInsertAt(ai.prompt.trim(), ai.pt);
+    if (r.status === 'ok') { setAiInsert(null); ed().setTool('select'); }
+    else setAiInsert(a => a && ({ ...a, busy: false, msg: r.message || r.reason || 'Could not generate that.' }));
+  };
 
   const palette = THEMES[mode_] || THEMES.dark;
   const style = Object.fromEntries(Object.entries({ ...palette, 'accent-ink': palette.accentInk, ...theme })
@@ -455,20 +654,18 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           </React.Fragment>
         ))}
       </div>
-      <div className="cm-stage" ref={stageRef}><canvas ref={canvasRef} /></div>
-      <button className="cm-collapse" data-flip={sideCollapsed} title={sideCollapsed ? 'Show panel' : 'Hide panel'} onClick={() => setSideCollapsed(s => !s)}>
+      <button className="cm-collapse-left" data-flip={leftCollapsed} title={leftCollapsed ? 'Show panel' : 'Hide panel'} onClick={() => setLeftCollapsed(s => !s)}>
         <Icon name="chevron" size={13} />
       </button>
-      <div className="cm-side">
-        {!sideCollapsed && (
+      <div className="cm-left">
+        {!leftCollapsed && (
           <React.Fragment>
             <div className="cm-tabs">
-              <button data-on={sideTab === 'tool'} onClick={() => setSideTab('tool')}><Icon name="tool" size={13} /> Tool</button>
-              <button data-on={sideTab === 'props'} onClick={() => setSideTab('props')}><Icon name="box" size={13} /> Properties</button>
-              <button data-on={sideTab === 'layers'} onClick={() => setSideTab('layers')}><Icon name="layers" size={13} /> Layers {layers.length ? <span style={{ color: 'var(--cm-dim)' }}>{layers.length}</span> : null}</button>
+              <button data-on={leftTab === 'tool'} onClick={() => setLeftTab('tool')}><Icon name="tool" size={13} /> Tool</button>
+              <button data-on={leftTab === 'layers'} onClick={() => setLeftTab('layers')}><Icon name="layers" size={13} /> Layers {layers.length ? <span style={{ color: 'var(--cm-dim)' }}>{layers.length}</span> : null}</button>
             </div>
 
-            {sideTab === 'tool' && (
+            {leftTab === 'tool' && (
               <div>
                 {maskEdit && (
                   <div style={{ background: 'var(--cm-accent)', color: 'var(--cm-accent-ink)', borderRadius: 8, padding: '8px 10px', marginBottom: 10, fontSize: 12, fontWeight: 600 }}>
@@ -490,11 +687,32 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                 <div className="cm-note" style={{ marginTop: 0 }}>
                   {tool === 'select' ? 'Click a layer on the canvas, or drag to move the selected layer.'
                     : tool === 'crop' ? 'Drag the handles, then Apply crop in the top bar.'
+                    : tool === 'aiinsert' ? 'Click a spot to draw there — or make a selection first and click inside it: the AI fills exactly that shape.'
                     : 'Drag on the canvas to use this tool.'}
                 </div>
                 <button className="cm-toggle" data-on={snapOn} onClick={toggleSnap} style={{ marginTop: 10 }}>
                   {snapOn ? 'Snap: on' : 'Snap: off'}
                 </button>
+
+                {(tool === 'objectselect' || tool === 'hoverselect') && (
+                  <React.Fragment>
+                    <div className="cm-note" style={{ marginTop: 8 }}>
+                      {objselectBusy ? 'Finding object…'
+                        : selCount > 1 ? selCount + ' selected · ⇧-click (or Add) to keep combining'
+                        : selCount === 1 ? 'Selected · ⇧-click to add more, ⌥-click to subtract'
+                        : (tool === 'hoverselect' ? 'Hover to preview, click to select' : 'Click an object to select it')}
+                    </div>
+                    <button className="cm-toggle" data-on={opts.addMode} style={{ marginTop: 8 }}
+                      onClick={() => ed().setToolOptions({ addMode: !opts.addMode })}>
+                      Add{opts.addMode ? ' ✓' : ''}
+                    </button>
+                    <label style={{ display: 'block', marginTop: 8, fontSize: 11, color: 'var(--cm-dim)' }}>Tolerance
+                      <input type="range" min="4" max="128" value={opts.tolerance} style={{ width: '100%' }}
+                        onChange={e => ed().setToolOptions({ tolerance: +e.target.value })} />
+                    </label>
+                    <div className="cm-note" style={{ marginTop: 8 }}>⇧ add · ⌥ subtract · [ ] tolerance</div>
+                  </React.Fragment>
+                )}
 
                 {tool === 'gradient' && (
                   <React.Fragment>
@@ -594,13 +812,124 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
               </div>
             )}
 
-            {sideTab === 'props' && (
+            {leftTab === 'layers' && (
+              <div>
+                {layers.map(l => (
+                  <div key={l.id} className="cm-layer" data-on={l.active} onClick={() => ed().activate(l.id)}>
+                    <span className="cm-eye" onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { visible: !l.visible }); }}><Icon name={l.visible ? 'eye' : 'eyeOff'} size={13} /></span>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: l.visible ? 1 : 0.4 }}>{l.name}</span>
+                    {l.maskable && (l.hasMask ? (
+                      <React.Fragment>
+                        <span className="cm-eye" title={l.editingMask ? 'Stop editing mask' : 'Edit mask'}
+                          style={{ opacity: (l.editingMask || !l.maskEnabled) ? 1 : 0.7, color: l.editingMask ? 'var(--cm-accent)' : undefined }}
+                          onClick={e => { e.stopPropagation(); if (l.editingMask) ed().exitMaskEdit(); else { ed().activate(l.id); ed().enterMaskEdit(l.id); } }}>
+                          <Icon name="mask" size={13} />
+                        </span>
+                        <span className="cm-eye" title="Delete mask" onClick={e => { e.stopPropagation(); ed().removeMask(l.id); }}><Icon name="close" size={13} /></span>
+                      </React.Fragment>
+                    ) : (
+                      <span className="cm-eye" title="Add layer mask" onClick={e => { e.stopPropagation(); ed().addMask(l.id); ed().enterMaskEdit(l.id); }}>
+                        <Icon name="mask" size={13} />
+                      </span>
+                    ))}
+                    <span className="cm-eye" title="Up" onClick={e => { e.stopPropagation(); ed().moveLayer(l.id, 'up'); }}><Icon name="up" size={13} /></span>
+                    <span className="cm-eye" title="Delete" onClick={e => { e.stopPropagation(); ed().removeLayer(l.id); }}><Icon name="close" size={13} /></span>
+                  </div>
+                ))}
+                <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} onClick={() => ed().addAdjustmentLayer()}>
+                  <Icon name="contrast" size={13} /> Add adjustment layer
+                </button>
+              </div>
+            )}
+          </React.Fragment>
+        )}
+      </div>
+      <div className="cm-stage" ref={stageRef}>
+        <canvas ref={canvasRef} />
+        {review && (
+          <React.Fragment>
+            <div className="cm-review-overlay">
+              {review.boxes.map(b => {
+                const p = sceneToScreen({ x: b.x, y: b.y });
+                const v = ed().fc.viewportTransform;
+                return (
+                  <div key={b.id} className="cm-review-box" data-type={b.type}
+                    style={{ left: p.x, top: p.y, width: b.w * v[0], height: b.h * v[3] }}
+                    onMouseDown={e => onReviewBoxMouseDown(e, b, 'move')}>
+                    <div className="cm-review-tag" onMouseDown={e => e.stopPropagation()}>
+                      <select value={b.type} onChange={e => setReviewBoxType(b.id, e.target.value)}>
+                        <option value="image">Image</option>
+                        <option value="text">Text</option>
+                      </select>
+                      <button onClick={() => removeReviewBox(b.id)} title="Remove"><Icon name="close" size={10} /></button>
+                    </div>
+                    <div className="cm-review-handle" onMouseDown={e => { e.stopPropagation(); onReviewBoxMouseDown(e, b, 'resize'); }} />
+                  </div>
+                );
+              })}
+            </div>
+            <div className="cm-review-toolbar">
+              <span className="cm-note" style={{ margin: 0 }}>{review.boxes.length} region{review.boxes.length === 1 ? '' : 's'}</span>
+              <span className="cm-review-sep" />
+              <button className="cm-btn" onClick={addReviewBox}>+ Add box</button>
+              <button className="cm-btn" onClick={closeReview}>Cancel</button>
+              <button className="cm-btn cm-btn-accent" disabled={!review.boxes.length} onClick={commitReview}>
+                <Icon name="wand" size={13} />Create {review.boxes.length} layer{review.boxes.length === 1 ? '' : 's'}
+              </button>
+            </div>
+          </React.Fragment>
+        )}
+        {aiInsert && (() => {
+          const p = sceneToScreen(aiInsert.pt);
+          const stageW = stageRef.current ? stageRef.current.clientWidth : 0;
+          const stageH = stageRef.current ? stageRef.current.clientHeight : 0;
+          const left = Math.max(8, Math.min(p.x - 10, stageW - 276));
+          const top = Math.max(8, Math.min(p.y + 12, stageH - 150));
+          return (
+            <React.Fragment>
+              <div style={{ position: 'absolute', left: p.x - 5, top: p.y - 5, width: 10, height: 10, borderRadius: '50%', background: 'var(--cm-accent)', boxShadow: '0 0 0 3px color-mix(in srgb, var(--cm-accent) 35%, transparent)', zIndex: 21, pointerEvents: 'none' }} />
+              <div style={{ position: 'absolute', left, top, zIndex: 22, width: 260, background: 'var(--cm-panel)', border: '1px solid var(--cm-line)', borderRadius: 14, padding: 12, boxShadow: '0 8px 24px rgba(0,0,0,.35)' }}>
+                <div className="cm-row" style={{ gap: 6, fontSize: 12.5, fontWeight: 700 }}>
+                  <Icon name="spark" size={13} style={{ color: 'var(--cm-accent)' }} />
+                  <span style={{ flex: 1 }}>{aiInsert.region ? 'Fill the selection with AI' : 'Draw here with AI'}</span>
+                  <button className="cm-icon-btn" onClick={() => setAiInsert(null)}><Icon name="close" size={12} /></button>
+                </div>
+                {aiInsert.region && <div className="cm-note" style={{ fontSize: 10.5, marginBottom: 6 }}>The result is clipped to your selection — the AI draws only inside that shape.</div>}
+                {aiInsert.msg && <div className="cm-note" style={{ fontSize: 10.5, marginBottom: 6, color: '#e0607a' }}>{aiInsert.msg}</div>}
+                <input autoFocus style={{ width: '100%', marginTop: 8, boxSizing: 'border-box', background: 'var(--cm-bg)', border: '1px solid var(--cm-line)', borderRadius: 8, color: 'var(--cm-ink)', padding: '7px 9px', fontSize: 12, fontFamily: 'inherit' }}
+                  placeholder={aiInsert.region ? 'Describe what fills this shape…' : 'Describe what to draw here…'}
+                  value={aiInsert.prompt} disabled={aiInsert.busy}
+                  onChange={e => setAiInsert(a => a && ({ ...a, prompt: e.target.value }))}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); submitAiInsert(); } else if (e.key === 'Escape') { e.preventDefault(); setAiInsert(null); } }} />
+                <button className="cm-btn cm-btn-accent" style={{ marginTop: 8, width: '100%', justifyContent: 'center' }}
+                  disabled={aiInsert.busy || !aiInsert.prompt.trim()} onClick={submitAiInsert}>
+                  {aiInsert.busy ? 'Generating…' : <React.Fragment><Icon name="spark" size={13} />{aiInsert.region ? 'Generate in selection' : 'Generate here'}</React.Fragment>}
+                </button>
+              </div>
+            </React.Fragment>
+          );
+        })()}
+      </div>
+      <button className="cm-collapse" data-flip={sideCollapsed} title={sideCollapsed ? 'Show panel' : 'Hide panel'} onClick={() => setSideCollapsed(s => !s)}>
+        <Icon name="chevron" size={13} />
+      </button>
+      <div className="cm-side">
+        {!sideCollapsed && (
+          <React.Fragment>
+            <div className="cm-tabs">
+              <button data-on={sideTab === 'layer'} onClick={() => setSideTab('layer')}><Icon name="layers" size={13} /> Layer</button>
+              <button data-on={sideTab === 'design'} onClick={() => setSideTab('design')}><Icon name="palette" size={13} /> Design</button>
+              <button data-on={sideTab === 'stickers'} onClick={() => setSideTab('stickers')}><Icon name="star" size={13} /> Stickers</button>
+              <button data-on={sideTab === 'ai'} onClick={() => setSideTab('ai')}><Icon name="spark" size={13} /> AI</button>
+            </div>
+
+            {sideTab === 'layer' && (
               <div>
                 {!props.active ? (
-                  <div className="cm-note" style={{ marginTop: 0 }}>Select a layer on the canvas or from the Layers panel to see and edit its properties.</div>
+                  <div className="cm-note">Select a layer on the canvas or from the Layers tab to see and edit its properties.</div>
                 ) : (
                   <React.Fragment>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, marginBottom: 4 }}>
                       <strong>{props.title}</strong>
                     </div>
 
@@ -770,34 +1099,60 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
               </div>
             )}
 
-            {sideTab === 'layers' && (
-              <React.Fragment>
-                {layers.map(l => (
-                  <div key={l.id} className="cm-layer" data-on={l.active} onClick={() => ed().activate(l.id)}>
-                    <span className="cm-eye" onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { visible: !l.visible }); }}><Icon name={l.visible ? 'eye' : 'eyeOff'} size={13} /></span>
-                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: l.visible ? 1 : 0.4 }}>{l.name}</span>
-                    {l.maskable && (l.hasMask ? (
-                      <React.Fragment>
-                        <span className="cm-eye" title={l.editingMask ? 'Stop editing mask' : 'Edit mask'}
-                          style={{ opacity: (l.editingMask || !l.maskEnabled) ? 1 : 0.7, color: l.editingMask ? 'var(--cm-accent)' : undefined }}
-                          onClick={e => { e.stopPropagation(); if (l.editingMask) ed().exitMaskEdit(); else { ed().activate(l.id); ed().enterMaskEdit(l.id); } }}>
-                          <Icon name="mask" size={13} />
-                        </span>
-                        <span className="cm-eye" title="Delete mask" onClick={e => { e.stopPropagation(); ed().removeMask(l.id); }}><Icon name="close" size={13} /></span>
-                      </React.Fragment>
-                    ) : (
-                      <span className="cm-eye" title="Add layer mask" onClick={e => { e.stopPropagation(); ed().addMask(l.id); ed().enterMaskEdit(l.id); }}>
-                        <Icon name="mask" size={13} />
-                      </span>
-                    ))}
-                    <span className="cm-eye" title="Up" onClick={e => { e.stopPropagation(); ed().moveLayer(l.id, 'up'); }}><Icon name="up" size={13} /></span>
-                    <span className="cm-eye" title="Delete" onClick={e => { e.stopPropagation(); ed().removeLayer(l.id); }}><Icon name="close" size={13} /></span>
-                  </div>
+            {sideTab === 'design' && (
+              <div className="col" style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+                <div className="cm-grp" style={{ marginTop: 0, paddingTop: 0, borderTop: 'none' }}>Background &amp; fill</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <button className="cm-btn" onClick={extendBackground}><Icon name="expand" size={13} />Extend background to canvas</button>
+                  <button className="cm-btn" disabled={designBusy} onClick={aiExtendBackground}>
+                    <Icon name="spark" size={13} />{designBusy ? 'Extending…' : 'AI extend background'}
+                  </button>
+                  <label className="cm-btn" style={{ position: 'relative' }}>
+                    <Icon name="bucket" size={13} />Fill {props.hasSelectionPixels ? 'selection' : 'canvas'} with colour
+                    <input type="color" style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }} onChange={e => fillWithColor(e.target.value)} />
+                  </label>
+                  <button className="cm-btn" onClick={fillWithImagePick}><Icon name="box" size={13} />Fill {props.hasSelectionPixels ? 'selection' : 'canvas'} with image</button>
+                  <span className="cm-note" style={{ marginTop: 0 }}>Tip: pick the marquee / lasso tool (Tool tab) to target a region first.</span>
+                  {designMsg && <div className="cm-note">{designMsg}</div>}
+                </div>
+
+                <div className="cm-grp">Add element</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <button className="cm-btn" onClick={() => ed().setTool('type')}><Icon name="type" size={13} />Text</button>
+                  <button className="cm-btn" onClick={() => ed().setTool('rect')}><Icon name="box" size={13} />Rectangle</button>
+                  <button className="cm-btn" onClick={() => ed().setTool('ellipse')}><Icon name="eye" size={13} />Ellipse</button>
+                  <button className="cm-btn" onClick={() => ed().setTool('line')}><Icon name="move" size={13} />Line</button>
+                  <button className="cm-btn" onClick={addImagePick}><Icon name="duplicate" size={13} />Image</button>
+                  <button className="cm-btn" onClick={() => ed().setTool('brush')}><Icon name="wand" size={13} />Brush</button>
+                </div>
+                <div className="cm-note">Drag any layer to move · pull the handles to resize · grab the top handle to rotate.</div>
+              </div>
+            )}
+
+            {sideTab === 'stickers' && (
+              <div>
+                <p className="cm-note" style={{ marginTop: 0 }}>Click to add — it's a vector layer you can move, scale, rotate, recolour and (for text) restyle.</p>
+                {STICKER_GROUPS.map(g => (
+                  <React.Fragment key={g.label}>
+                    <div className="cm-grp">{g.label}</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+                      {g.keys.map(key => (
+                        <button key={key} title={key} className="cm-icon-btn" style={{ width: '100%', height: 44 }} onClick={() => ed().addSticker(key)}>
+                          <StickerPreview shapeKey={key} />
+                        </button>
+                      ))}
+                    </div>
+                  </React.Fragment>
                 ))}
-                <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} onClick={() => ed().addAdjustmentLayer()}>
-                  <Icon name="contrast" size={13} /> Add adjustment layer
-                </button>
-                <h4>AI</h4>
+              </div>
+            )}
+
+            {sideTab === 'ai' && (
+              <React.Fragment>
+                <div className="cm-ai-card">
+                  <div className="cm-ai-card-title"><Icon name="spark" size={15} style={{ color: 'var(--cm-accent)' }} />Magic edit</div>
+                  <p>Describe a change in plain words — Canvasmith restyles the layers.</p>
+                </div>
                 {needKey ? (
                   <div className="cm-note">
                     AI runs on your own free Gemini key (Google includes free daily usage — no card).
@@ -806,13 +1161,33 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                   </div>
                 ) : (
                   <React.Fragment>
-                    <div className="cm-ai">
-                      <input placeholder="e.g. make the background sunset" value={aiPrompt} onChange={e => setAiPrompt(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') runAI(); }} />
-                      <button className="cm-btn" disabled={aiBusy} onClick={runAI}>{aiBusy ? '…' : '✦'}</button>
-                    </div>
+                    <textarea className="cm-ai-textarea" rows={3} placeholder={'e.g. "warmer accent, bigger headline" or set a headline in "quotes"'}
+                      value={aiPrompt} onChange={e => setAiPrompt(e.target.value)} />
+                    <button className="cm-btn cm-btn-accent" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} disabled={aiBusy || !aiPrompt.trim()} onClick={runAI}>
+                      {aiBusy ? 'Working…' : <React.Fragment><Icon name="wand" size={14} />Apply magic edit</React.Fragment>}
+                    </button>
                     {aiMsg && <div className="cm-note">{aiMsg}</div>}
+                    <h4>Try</h4>
+                    <div className="cm-ai-suggestions">
+                      {['Warmer accent colour', 'Make the headline bigger', 'Set headline to "Big sale"'].map(s => (
+                        <button key={s} className="cm-chip" onClick={() => setAiPrompt(s)}><Icon name="spark" size={11} />{s}</button>
+                      ))}
+                    </div>
                   </React.Fragment>
                 )}
+
+                <h4>Convert to layers</h4>
+                <div className="cm-ai-card">
+                  <div className="cm-ai-card-title"><Icon name="layers" size={15} style={{ color: 'var(--cm-accent)' }} />Convert to layers<span className="cm-chip" style={{ padding: '1px 7px', fontSize: 9.5 }}>guided</span></div>
+                  <p>Detects objects and shows them as boxes — adjust, add or remove any, then create editable layers.</p>
+                </div>
+                <button className="cm-btn cm-btn-accent" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} disabled={convertBusy || !!review} onClick={detectAndConvert}>
+                  {convertBusy ? 'Detecting…' : <React.Fragment><Icon name="layers" size={14} />Detect &amp; convert to layers</React.Fragment>}
+                </button>
+                <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} disabled={convertBusy || !!review} onClick={selectOneManually}>
+                  <Icon name="lasso" size={13} />Select one object manually
+                </button>
+                <div className="cm-note">Auto-detect everything, or draw one box yourself — adjust, add or remove boxes, then create layers.</div>
               </React.Fragment>
             )}
           </React.Fragment>

@@ -230,6 +230,63 @@ export function selectionBounds(sel, W, H) {
   return { x: sel.x, y: sel.y, w: sel.w, h: sel.h };
 }
 
+/* Hit-test a rect/ellipse selection's 8 resize handles (corners + edge midpoints) plus its
+   interior, same geometry as crop.js's getCropHandle — a marquee selection is grabbable exactly
+   like a crop rect once it exists, so dragging it can resize or move it instead of only ever
+   starting a fresh drag-to-select. `tol` shrinks with zoom so handles stay a constant screen size. */
+export function getSelectionHandle(sel, pt, z) {
+  if (!sel || (sel.kind !== 'rect' && sel.kind !== 'ellipse')) return null;
+  const tol = 12 / z;
+  const cx = sel.x, cy = sel.y, cw = sel.w, ch = sel.h;
+  const mx = cx + cw / 2, my = cy + ch / 2;
+  const rx = cx + cw, ry = cy + ch;
+  if (Math.hypot(pt.x - cx, pt.y - cy) < tol) return 'tl';
+  if (Math.hypot(pt.x - rx, pt.y - cy) < tol) return 'tr';
+  if (Math.hypot(pt.x - cx, pt.y - ry) < tol) return 'bl';
+  if (Math.hypot(pt.x - rx, pt.y - ry) < tol) return 'br';
+  if (Math.hypot(pt.x - mx, pt.y - cy) < tol) return 't';
+  if (Math.hypot(pt.x - mx, pt.y - ry) < tol) return 'b';
+  if (Math.hypot(pt.x - cx, pt.y - my) < tol) return 'l';
+  if (Math.hypot(pt.x - rx, pt.y - my) < tol) return 'r';
+  if (pt.x >= cx && pt.x <= rx && pt.y >= cy && pt.y <= ry) return 'move';
+  return null;
+}
+
+/* Drag a selection handle: same math as crop.js's dragCropRect, but with no aspect-ratio lock
+   (crop's is a UI toggle; selections don't have one), and a 1px floor instead of crop's 24px so a
+   selection can still shrink down almost to nothing mid-drag — finalizeSelection is what throws
+   away a too-small result once the drag ends.
+
+   Handles that anchor the OPPOSITE edge (tl/tr/bl/l/t move x/y alongside w/h) must flip that
+   anchor once a dimension crosses zero, or the box would freeze pinned to its pre-crossing edge
+   instead of continuing to track the pointer — e.g. dragging 'r' at x=100,w=50 past x=100 (dx=
+   -100) should end with the box's LEFT edge at the pointer, not stuck 1px wide at the old x=100. */
+export function dragSelectionRect(sel, handle, dx, dy) {
+  let { x, y, w, h } = sel;
+  const apply = {
+    move: () => { x += dx; y += dy; },
+    tl: () => { x += dx; y += dy; w -= dx; h -= dy; },
+    tr: () => { y += dy; w += dx; h -= dy; },
+    bl: () => { x += dx; w -= dx; h += dy; },
+    br: () => { w += dx; h += dy; },
+    t: () => { y += dy; h -= dy; },
+    b: () => { h += dy; },
+    l: () => { x += dx; w -= dx; },
+    r: () => { w += dx; },
+  }[handle];
+  if (!apply) return sel;
+  apply();
+  // Normalize a flipped box (w/h gone negative past the opposite edge) back to a positive-size
+  // rect with x/y at the true top-left, rather than just clamping the magnitude — a clamp alone
+  // would leave x/y pinned to the pre-flip edge and freeze the box instead of letting it continue
+  // to track the pointer past the crossover.
+  if (w < 0) { x += w; w = -w; }
+  if (h < 0) { y += h; h = -h; }
+  if (w < 1) w = 1;
+  if (h < 1) h = 1;
+  return { ...sel, x, y, w, h };
+}
+
 /* ── hover-preview cache ──────────────────────────────────────────────────────────────────
    A true LRU keyed by grid cell, backed by a Map's insertion order: get() re-inserts its key so
    it becomes the most-recently-used entry, and put()'s eviction (the map's first/oldest key) then

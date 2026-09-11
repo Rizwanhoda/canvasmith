@@ -152,6 +152,74 @@ test('browser: marquee drag sets ed.selection and finalizeSelection accepts it',
   assert.ok(sel.w > 6 && sel.h > 6);
 });
 
+/* ── addMode: a sticky "keep adding every click" toggle for wand/objectselect/hoverselect, an
+   alternative to holding Shift on every click (matches the reference editor's Add-mode chip).
+   Stubs wandPick to record its {add,subtract} args instead of waiting on a real cv round-trip —
+   this is purely testing Editor#_down's branching, not the wand algorithm itself. ─────────────── */
+test('browser: toolOpts.addMode makes every click add to the selection without holding Shift', async () => {
+  await page.evaluate(() => {
+    window.__wandCalls = [];
+    window.__ed.wandPick = (pt, opts) => { window.__wandCalls.push(opts); return Promise.resolve({ status: 'ok' }); };
+    window.__ed.setTool('wand');
+  });
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.click(canvasBox.x + 50, canvasBox.y + 50);
+  let calls = await page.evaluate(() => window.__wandCalls);
+  assert.equal(calls[0].add, false);   // addMode off, no Shift → plain click
+
+  await page.evaluate(() => window.__ed.setToolOptions({ addMode: true }));
+  await page.mouse.click(canvasBox.x + 80, canvasBox.y + 50);
+  calls = await page.evaluate(() => window.__wandCalls);
+  assert.equal(calls[1].add, true);   // addMode on → add without Shift
+
+  await page.evaluate(() => window.__ed.setToolOptions({ addMode: false }));
+  await page.evaluate(() => window.__ed.setTool('objectselect'));
+  await page.keyboard.down('Shift');
+  await page.mouse.click(canvasBox.x + 110, canvasBox.y + 50);
+  await page.keyboard.up('Shift');
+  calls = await page.evaluate(() => window.__wandCalls);
+  assert.equal(calls[2].add, true);   // Shift still works independent of addMode, on objectselect too
+});
+
+/* ── aiinsert: click opens the host's prompt popover (via the 'aiinsert' event) instead of
+   drawing anything itself — plain click reports region:false, a click inside an active pixel
+   selection reports region:true so the host UI can offer "fill this shape" instead ────────── */
+test('browser: the aiinsert tool emits {pt, region} on click and does not draw', async () => {
+  await page.evaluate(() => {
+    window.__aiInsertEvents = [];
+    window.__ed.on('aiinsert', (e) => window.__aiInsertEvents.push(e));
+    window.__ed.setTool('aiinsert');
+  });
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.click(canvasBox.x + 60, canvasBox.y + 40);
+  const events = await page.evaluate(() => window.__aiInsertEvents);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].region, false);
+  assert.equal(events[0].pt.x, 60); assert.equal(events[0].pt.y, 40);
+  assert.equal(await page.evaluate(() => window.__ed.fc.getObjects().length), 0);   // no drawing side effect
+});
+
+test('browser: aiinsert reports region:true for a click inside an active pixel selection', async () => {
+  await page.evaluate(() => window.__ed.setTool('marquee'));
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.move(canvasBox.x + 40, canvasBox.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 160, canvasBox.y + 160, { steps: 4 });
+  await page.mouse.up();
+  await page.evaluate(() => {
+    window.__aiInsertEvents = [];
+    window.__ed.on('aiinsert', (e) => window.__aiInsertEvents.push(e));
+    window.__ed.setTool('aiinsert');
+  });
+  await page.mouse.click(canvasBox.x + 100, canvasBox.y + 100);   // inside the marquee
+  const inside = await page.evaluate(() => window.__aiInsertEvents.at(-1));
+  assert.equal(inside.region, true);
+
+  await page.mouse.click(canvasBox.x + 350, canvasBox.y + 20);   // outside the marquee, still on-canvas
+  const outside = await page.evaluate(() => window.__aiInsertEvents.at(-1));
+  assert.equal(outside.region, false);
+});
+
 /* ── keybindings: tool-switch, undo/redo, delete, arrow-nudge (installKeybindings) ────── */
 test('browser: installKeybindings wires tool-switch letters and arrow-key nudge', async () => {
   await page.keyboard.press('b');
@@ -586,4 +654,57 @@ test('browser: the OpenCV worker boots from the vendored opencv.js (offline-safe
   assert.equal(ready.booted, true);
   assert.ok(ready.url.includes('/packages/core/vendor/opencv/opencv.js'));
   assert.ok(ready.url.startsWith('http://'));   // resolved to an absolute URL, not left root-relative
+});
+
+/* ── Design-tab fills: fillWithColor / fillWithImage / extendBackgroundToCanvas ──────────── */
+test('browser: fillWithColor paints the whole canvas when there is no selection', async () => {
+  const px = await page.evaluate(() => {
+    window.__ed.fillWithColor('#ff0000');
+    const ctx = window.__ed.engine.ctx;
+    return [...ctx.getImageData(5, 5, 1, 1).data];
+  });
+  assert.deepEqual(px, [255, 0, 0, 255]);
+});
+
+test('browser: fillWithColor is clipped to the active selection', async () => {
+  const px = await page.evaluate(() => {
+    window.__ed.selection = { kind: 'rect', x: 0, y: 0, w: 20, h: 20 };
+    window.__ed.fillWithColor('#00ff00');
+    const ctx = window.__ed.engine.ctx;
+    const inside = [...ctx.getImageData(5, 5, 1, 1).data];
+    const outside = [...ctx.getImageData(150, 150, 1, 1).data];
+    return { inside, outside };
+  });
+  assert.deepEqual(px.inside, [0, 255, 0, 255]);
+  assert.deepEqual(px.outside, [0, 0, 0, 0]);
+});
+
+test('browser: fillWithImage stamps a bitmap into the fill region', async () => {
+  const px = await page.evaluate(async () => {
+    const c = document.createElement('canvas'); c.width = 10; c.height = 10;
+    const cx = c.getContext('2d'); cx.fillStyle = '#0000ff'; cx.fillRect(0, 0, 10, 10);
+    await window.__ed.fillWithImage(c.toDataURL());
+    const ctx = window.__ed.engine.ctx;
+    return [...ctx.getImageData(100, 100, 1, 1).data];
+  });
+  assert.deepEqual(px, [0, 0, 255, 255]);
+});
+
+test('browser: extendBackgroundToCanvas scales the background image to cover the artboard', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const noImage = ed.extendBackgroundToCanvas();
+    const c = document.createElement('canvas'); c.width = 50; c.height = 50;
+    const cx = c.getContext('2d'); cx.fillStyle = '#ff00ff'; cx.fillRect(0, 0, 50, 50);
+    await ed.addImage(c.toDataURL(), { role: 'bg', name: 'Background' });
+    const bg = ed.fc.getObjects().find(o => o.role === 'bg');
+    bg.set({ left: 0, top: 0, scaleX: 1, scaleY: 1, originX: 'left', originY: 'top' });
+    const ok = ed.extendBackgroundToCanvas();
+    const after = ed.fc.getObjects().find(o => o.role === 'bg');
+    return { noImage, ok, scaleX: after.scaleX, scaleY: after.scaleY, left: after.left, top: after.top };
+  });
+  assert.equal(result.noImage, false);
+  assert.equal(result.ok, true);
+  assert.ok(result.scaleX >= 400 / 50 - 0.001);   // covers the 400x300 test artboard from a 50x50 source
+  assert.ok(result.scaleY >= 400 / 50 - 0.001);
 });

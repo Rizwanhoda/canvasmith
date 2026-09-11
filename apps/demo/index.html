@@ -7,121 +7,282 @@
 <!-- fabric is the only runtime dependency, and the ONLY script tag: the editor itself loads as
      native ES modules straight from src/. This page IS the "bring your own UI" story. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;500;600;700;800&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <style>
-  :root[data-mode="dark"], :root { --bg:#141417; --panel:#1b1b20; --line:#2a2a31; --ink:#eceae4; --dim:#9a978f; --accent:#d4ff45; --accent-ink:#111; --stage:#0e0e11; }
-  :root[data-mode="light"] { --bg:#f4f3ef; --panel:#ffffff; --line:#dedbd2; --ink:#1c1b18; --dim:#726f66; --accent:#6f6a00; --accent-ink:#fff; --stage:#e4e2da; }
+  /* Palette matched to the reference editor's real theme.css tokens (warm near-black surfaces,
+     signature warm-orange accent) — mapped onto canvasmith's own (shorter) variable names rather
+     than renamed wholesale, so every rule below keeps working unchanged. */
+  :root[data-mode="dark"], :root {
+    --bg:#0b0b0d; --panel:#141417; --panel-2:#1b1b20; --line:rgba(255,255,255,.07); --line-soft:rgba(255,255,255,.05);
+    --ink:#f5f3ee; --dim:#aeaca4; --dim-2:#76746d; --accent:#ef6a2d; --accent-ink:#ffffff;
+    --stage:#0a0a0c; --danger:#f87171;
+    --shadow-sm:0 1px 0 rgba(255,255,255,.03) inset, 0 4px 12px rgba(0,0,0,.35); --shadow-md:0 8px 24px rgba(0,0,0,.4); --shadow-lg:0 24px 60px rgba(0,0,0,.55), 0 2px 0 rgba(255,255,255,.04) inset;
+    --ring: 0 0 0 1px var(--bg), 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  :root[data-mode="light"] {
+    --bg:#f3efe7; --panel:#ffffff; --panel-2:#f5f1ea; --line:rgba(30,26,18,.09); --line-soft:rgba(30,26,18,.06);
+    --ink:#1c1913; --dim:#5e594f; --dim-2:#8c867a; --accent:#c85a24; --accent-ink:#ffffff;
+    --stage:#ece7dd; --danger:#c73434;
+    --shadow-sm:0 1px 2px rgba(40,34,22,.05); --shadow-md:0 8px 22px rgba(40,34,22,.07); --shadow-lg:0 24px 60px rgba(40,34,22,.18), 0 1px 0 rgba(255,255,255,.6) inset;
+    --ring: 0 0 0 1px var(--panel), 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
   * { box-sizing:border-box } html,body { margin:0; height:100% }
-  body { background:var(--bg); color:var(--ink); font:13px/1.5 system-ui,sans-serif; display:grid;
-         grid-template-rows:46px 1fr; height:100vh }
-  header { display:flex; align-items:center; gap:14px; padding:0 14px; background:var(--panel); border-bottom:1px solid var(--line) }
-  header b { color:var(--accent); font-size:14px; letter-spacing:-.01em } header .sp { flex:1 }
-  header label { display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--dim) }
+  body { background:var(--bg); color:var(--ink); font:13px/1.5 "Hanken Grotesk",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+         -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+         display:grid; grid-template-rows:48px 1fr; height:100vh }
+  header b, .grp, #props-title, .layer-meta .nm { font-family:"Bricolage Grotesque",var(--font-ui,inherit),sans-serif }
+  header { display:flex; align-items:center; gap:14px; padding:0 16px; background:var(--panel); border-bottom:1px solid var(--line); position:relative; z-index:20; height:48px; overflow:hidden }
+  header b { color:var(--ink); font-size:14px; font-weight:700; letter-spacing:-.02em; display:flex; align-items:center; gap:7px }
+  header b::before { content:""; width:8px; height:8px; border-radius:2.5px; background:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent) }
+  header .sp { flex:1 }
+  header label { display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--dim); font-weight:500 }
+  header > .note { color:var(--dim-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex-shrink:1 }
+  header .hdiv, header .act, header label, header b, header .icon-btn { flex-shrink:0 }
   /* rail | Tool/Layers (left, tab-driven) | canvas | Properties (right, selection-driven) — same
      4-column split as the reference editor, with each side panel independently collapsible. */
-  main { display:grid; grid-template-columns:56px 232px 1fr 322px; min-height:0; transition:grid-template-columns .15s; position:relative }
+  main { display:grid; grid-template-columns:56px 290px 1fr 322px; min-height:0; transition:grid-template-columns .18s cubic-bezier(.4,0,.2,1); position:relative }
   main[data-left-collapsed=true] { grid-template-columns:56px 0px 1fr 322px }
-  main[data-right-collapsed=true] { grid-template-columns:56px 232px 1fr 0px }
+  main[data-right-collapsed=true] { grid-template-columns:56px 290px 1fr 0px }
   main[data-left-collapsed=true][data-right-collapsed=true] { grid-template-columns:56px 0px 1fr 0px }
   nav, #right-panel { background:var(--panel); overflow-y:auto; padding:8px }
-  nav { border-right:1px solid var(--line); overflow:visible; display:flex; flex-direction:column; align-items:center; gap:2px; padding:8px 8px; position:relative; z-index:10 }
-  #left-panel { background:var(--panel); border-right:1px solid var(--line); overflow:hidden; padding:8px; display:flex; flex-direction:column; min-height:0 }
-  #tool-panel { overflow-y:auto; min-height:0 }
-  #right-panel { border-left:1px solid var(--line); overflow-x:hidden }
+  nav { border-right:1px solid var(--line); overflow:visible; display:flex; flex-direction:column; align-items:center; gap:3px; padding:10px 8px; position:relative; z-index:10 }
+  #left-panel { background:var(--panel); border-right:1px solid var(--line); overflow:hidden; padding:18px; display:flex; flex-direction:column; min-height:0; transition:padding .18s; position:relative }
+  /* "More below" cue: the left panel's own faint themed scrollbar (nav::-webkit-scrollbar etc.,
+     below) is easy to miss entirely against the dark theme, so a real user can scroll right past
+     content (e.g. the AI panel, sitting below Stickers) without ever noticing more exists — this
+     fade + arrow makes that undiscoverable-scroll problem visible without changing the layout. */
+  #left-scroll-cue { position:absolute; left:0; right:8px; bottom:0; height:36px; cursor:pointer;
+    background:linear-gradient(to bottom, transparent, var(--panel) 75%);
+    display:flex; align-items:flex-end; justify-content:center; padding-bottom:4px;
+    opacity:0; pointer-events:none; transition:opacity .15s }
+  #left-scroll-cue[data-show=true] { opacity:1; pointer-events:auto }
+  #left-scroll-cue svg { color:var(--dim-2); animation:cue-bob 1.4s ease-in-out infinite }
+  @keyframes cue-bob { 0%,100% { transform:translateY(0) } 50% { transform:translateY(3px) } }
+  #tool-panel, #layer-panel { overflow-y:auto; min-height:0 }
+  #right-panel { border-left:1px solid var(--line); overflow:hidden; padding:14px; transition:padding .18s; display:flex; flex-direction:column; min-height:0; position:relative }
+  #right-scroll-cue { position:absolute; left:0; right:8px; bottom:0; height:36px; cursor:pointer;
+    background:linear-gradient(to bottom, transparent, var(--panel) 75%);
+    display:flex; align-items:flex-end; justify-content:center; padding-bottom:4px;
+    opacity:0; pointer-events:none; transition:opacity .15s }
+  #right-scroll-cue[data-show=true] { opacity:1; pointer-events:auto }
+  #right-scroll-cue svg { color:var(--dim-2); animation:cue-bob 1.4s ease-in-out infinite }
   main[data-left-collapsed=true] #left-panel { padding:0; width:0 }
   main[data-right-collapsed=true] #right-panel { padding:0; width:0 }
+  /* scrollbars: thin, themed, unobtrusive — default OS scrollbars clash with a dark flat-panel UI */
+  nav::-webkit-scrollbar, #left-panel *::-webkit-scrollbar, #right-panel *::-webkit-scrollbar { width:8px; height:8px }
+  nav::-webkit-scrollbar-track, #left-panel *::-webkit-scrollbar-track, #right-panel *::-webkit-scrollbar-track { background:transparent }
+  nav::-webkit-scrollbar-thumb, #left-panel *::-webkit-scrollbar-thumb, #right-panel *::-webkit-scrollbar-thumb { background:var(--line); border-radius:99px; border:2px solid transparent; background-clip:padding-box }
+  nav::-webkit-scrollbar-thumb:hover, #left-panel *::-webkit-scrollbar-thumb:hover, #right-panel *::-webkit-scrollbar-thumb:hover { background:var(--dim-2); background-clip:padding-box }
   /* icon rail: one button per tool group, an active-tool accent fill, and a corner caret when the
      group holds 2+ tools — click toggles a flyout popover listing them (ditto's own rail pattern) */
-  .rail-btn { all:unset; box-sizing:border-box; cursor:pointer; width:40px; height:36px; border-radius:8px; display:flex; align-items:center; justify-content:center; position:relative; color:var(--dim); transition:background .1s,color .1s }
-  .rail-btn:hover { background:var(--bg) }
-  .rail-btn[data-on=true] { background:var(--accent); color:var(--accent-ink) }
-  .rail-caret { position:absolute; right:3px; bottom:3px; width:0; height:0; border-left:4px solid transparent; border-bottom:4px solid var(--dim) }
+  .rail-btn { all:unset; box-sizing:border-box; cursor:pointer; width:40px; height:36px; border-radius:9px; display:flex; align-items:center; justify-content:center; position:relative; color:var(--dim); transition:background .12s,color .12s,transform .12s }
+  .rail-btn:hover { background:var(--panel-2); color:var(--ink) }
+  .rail-btn:active { transform:scale(.94) }
+  .rail-btn[data-on=true] { background:var(--accent); color:var(--accent-ink); box-shadow:var(--shadow-sm) }
+  .rail-btn:focus-visible { outline:none; box-shadow:var(--ring) }
+  .rail-caret { position:absolute; right:3px; bottom:3px; width:0; height:0; border-left:4px solid transparent; border-bottom:4px solid var(--dim-2) }
   .rail-btn[data-on=true] .rail-caret { border-bottom-color:var(--accent-ink) }
   .rail-group { position:relative }
-  .rail-flyout { position:absolute; left:46px; top:0; z-index:60; min-width:190px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:6px; box-shadow:0 8px 24px rgba(0,0,0,.35) }
-  .popover { position:absolute; right:0; top:calc(100% + 6px); z-index:60; width:220px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; box-shadow:0 8px 24px rgba(0,0,0,.35) }
-  .popover h4 { margin:0 0 10px; font-size:12px }
+  .rail-flyout { position:absolute; left:48px; top:0; z-index:60; min-width:194px; background:var(--panel-2); border:1px solid var(--line); border-radius:11px; padding:6px; box-shadow:var(--shadow-lg); animation:pop-in .12s cubic-bezier(.2,.8,.3,1) }
+  .popover { position:absolute; right:0; top:calc(100% + 8px); z-index:60; width:220px; background:var(--panel-2); border:1px solid var(--line); border-radius:12px; padding:14px; box-shadow:var(--shadow-lg); animation:pop-in .12s cubic-bezier(.2,.8,.3,1) }
+  @keyframes pop-in { from { opacity:0; transform:translateY(-3px) scale(.98) } to { opacity:1; transform:none } }
+  .popover h4 { margin:0 0 10px; font-size:11.5px; font-weight:700; letter-spacing:.02em; text-transform:uppercase; color:var(--dim) }
+  /* font picker: each row rendered in its OWN font (name + an "Ag" specimen), so choosing a font
+     means seeing it, not reading its name in the browser's default select-list font. */
+  .font-grp-label { font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--dim-2); padding:8px 8px 4px }
+  .font-grp-label:first-child { padding-top:2px }
+  .font-item { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 9px; border-radius:7px; cursor:pointer; font-size:14px; color:var(--ink) }
+  .font-item:hover, .font-item[data-on=true] { background:var(--bg) }
+  .font-item .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .font-item .ag { flex:none; font-size:13px; color:var(--dim-2) }
   .popover-anchor { position:relative }
-  .rail-flyout-item { display:flex; align-items:center; gap:9px; padding:7px 9px; border-radius:7px; cursor:pointer; font-size:12.5px; color:var(--ink) }
+  .rail-flyout-item { display:flex; align-items:center; gap:9px; padding:7px 9px; border-radius:7px; cursor:pointer; font-size:12.5px; color:var(--ink); transition:background .1s }
   .rail-flyout-item:hover, .rail-flyout-item[data-on=true] { background:var(--bg) }
   .rail-flyout-item svg { flex-shrink:0; color:var(--dim) }
   .rail-flyout-item[data-on=true] svg { color:var(--accent) }
-  .rail-flyout-item .sc { margin-left:auto; font-size:10.5px; color:var(--dim); font-family:ui-monospace,monospace }
-  .rail-tip { position:fixed; z-index:70; background:var(--ink); color:var(--panel); font-size:11.5px; font-weight:600; padding:5px 9px; border-radius:6px; pointer-events:none; white-space:nowrap; transform:translateY(-50%) }
-  .rail-bottom { display:flex; flex-direction:column; align-items:center; gap:2px; margin-top:6px; padding-top:6px; border-top:1px solid var(--line) }
-  .tabs { display:flex; gap:4px; margin-bottom:12px; padding:3px; background:var(--bg); border-radius:9px }
-  .tabs button { display:flex; align-items:center; justify-content:center; gap:6px; flex:1; width:auto; padding:6px 10px; border-radius:7px; font-size:12.5px; font-weight:600; color:var(--dim) }
-  .tabs button:hover { color:var(--ink) } .tabs button[data-on=true] { background:var(--panel); color:var(--ink); box-shadow:0 1px 2px rgba(0,0,0,.15) }
-  .collapse-btn { position:absolute; top:50%; width:14px; height:48px; padding:0; transform:translateY(-50%);
-    border:1px solid var(--line); background:var(--panel); color:var(--dim); cursor:pointer; display:flex; align-items:center; justify-content:center; z-index:2; transition:left .15s, right .15s }
-  .collapse-btn:hover { color:var(--ink); border-color:var(--accent) }
-  #collapse-left { border-radius:0 6px 6px 0; border-left:none }
-  #collapse-right { border-radius:6px 0 0 6px; border-right:none }
+  .rail-flyout-item .sc { margin-left:auto; font-size:10.5px; color:var(--dim-2); font-family:"JetBrains Mono",ui-monospace,monospace }
+  .rail-tip { position:fixed; z-index:70; background:var(--ink); color:var(--bg); font-size:11.5px; font-weight:600; padding:5px 9px; border-radius:6px; pointer-events:none; white-space:nowrap; transform:translateY(-50%); box-shadow:var(--shadow-md); animation:tip-in .1s ease-out }
+  @keyframes tip-in { from { opacity:0; transform:translateY(-50%) translateX(-3px) } to { opacity:1; transform:translateY(-50%) } }
+  .rail-bottom { display:flex; flex-direction:column; align-items:center; gap:3px; margin-top:8px; padding-top:8px; border-top:1px solid var(--line) }
+  .tabs { display:flex; flex-wrap:wrap; gap:2px; margin-bottom:16px; padding:3px; background:var(--bg); border-radius:9px; border:1px solid var(--line-soft) }
+  .tabs button { display:flex; align-items:center; justify-content:center; gap:6px; flex:1 1 auto; min-width:calc(33% - 4px); width:auto; padding:7px 8px; border-radius:7px; font-size:12px; font-weight:600; color:var(--dim); white-space:nowrap; transition:background .12s,color .12s,box-shadow .12s }
+  .tabs button:hover { color:var(--ink) } .tabs button[data-on=true] { background:var(--panel-2); color:var(--ink); box-shadow:var(--shadow-sm) }
+  .collapse-btn { position:absolute; top:50%; width:16px; height:52px; padding:0; transform:translateY(-50%);
+    border:1px solid var(--line); background:var(--panel-2); color:var(--dim); cursor:pointer; display:flex; align-items:center; justify-content:center; z-index:2; transition:left .18s cubic-bezier(.4,0,.2,1), right .18s cubic-bezier(.4,0,.2,1), color .12s, border-color .12s; box-shadow:var(--shadow-sm) }
+  .collapse-btn:hover { color:var(--ink); border-color:var(--dim-2) }
+  #collapse-left { border-radius:0 8px 8px 0; border-left:none }
+  #collapse-right { border-radius:8px 0 0 8px; border-right:none }
   .collapse-btn[data-flip=true] svg { transform:rotate(180deg) }
-  #collapse-left { left:287px }
+  #collapse-left { left:345px }
   main[data-left-collapsed=true] #collapse-left { left:55px }
   #collapse-right { right:321px }
   main[data-right-collapsed=true] #collapse-right { right:0 }
-  .align-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:6px; margin:10px 0 }
-  .align-grid button { display:flex; align-items:center; justify-content:center; height:28px; border-radius:7px; border:1px solid var(--line); font-size:11px; color:var(--ink) }
-  .align-grid button:hover { border-color:var(--accent) }
-  .pill-toggle { width:auto; display:inline-flex; padding:6px 12px; border-radius:999px; font-size:12px; font-weight:600; border:1px solid var(--line); color:var(--dim); margin-top:10px }
-  .pill-toggle[data-on=true] { background:var(--ink); color:var(--panel); border-color:var(--ink) }
-  #stage { display:grid; place-items:center; overflow:hidden; background:var(--stage) }
-  button { all:unset; box-sizing:border-box; cursor:pointer; display:flex; align-items:center; gap:7px; width:100%; padding:6px 9px; border-radius:7px; font-size:12.5px; transition:background .1s,border-color .1s,color .1s }
-  button:hover { background:var(--bg) } button[data-on=true] { background:var(--accent); color:var(--accent-ink) }
+  .align-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:10px 0 }
+  .align-grid button { display:flex; align-items:center; justify-content:center; height:30px; border-radius:8px; border:1px solid var(--line); font-size:11px; color:var(--dim) }
+  .align-grid button:hover { border-color:var(--dim-2); color:var(--ink); background:var(--panel-2) }
+  .pill-toggle { width:auto; display:inline-flex; padding:6px 13px; border-radius:999px; font-size:12px; font-weight:600; border:1px solid var(--line); color:var(--dim); margin-top:10px; transition:background .12s,color .12s,border-color .12s }
+  .pill-toggle:hover { border-color:var(--dim-2) }
+  .pill-toggle[data-on=true] { background:var(--ink); color:var(--bg); border-color:var(--ink) }
+  #stage { position:relative; display:grid; place-items:center; overflow:hidden; background:var(--stage);
+    background-image:
+      linear-gradient(color-mix(in srgb, var(--ink) 4%, transparent) 1px, transparent 1px),
+      linear-gradient(90deg, color-mix(in srgb, var(--ink) 4%, transparent) 1px, transparent 1px);
+    background-size:24px 24px }
+  /* floating zoom pill (bottom-right) + canvas-size badge (top-left) — matches the reference
+     editor's overlay chrome, drawn over the canvas rather than living in the header. */
+  #zoom-pill { position:absolute; bottom:16px; right:16px; z-index:15; display:flex; align-items:center; gap:2px;
+    background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:4px; box-shadow:var(--shadow-lg) }
+  #zoom-pill button { all:unset; box-sizing:border-box; cursor:pointer; width:26px; height:26px; border-radius:999px; display:flex; align-items:center; justify-content:center; color:var(--dim); transition:background .1s,color .1s }
+  #zoom-pill button:hover { background:var(--panel-2); color:var(--ink) }
+  #zoom-pct { all:unset; box-sizing:border-box; cursor:pointer; min-width:48px; padding:0 6px; height:26px; border-radius:999px; display:flex; align-items:center; justify-content:center; font-size:11.5px; font-weight:600; color:var(--ink); font-family:"JetBrains Mono",ui-monospace,monospace; transition:background .1s }
+  #zoom-pct:hover { background:var(--panel-2) }
+  #zoom-div { width:1px; height:18px; background:var(--line); margin:0 3px }
+  #dim-badge { position:absolute; top:14px; left:14px; z-index:15; background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:5px 11px; font-size:11px; font-weight:600; font-family:"JetBrains Mono",ui-monospace,monospace; color:var(--dim); box-shadow:var(--shadow-sm) }
+  #extend-banner { position:absolute; top:14px; left:50%; transform:translateX(-50%); z-index:16; display:flex; align-items:center; gap:7px; background:var(--accent); color:var(--accent-ink); border:none; border-radius:999px; padding:8px 14px; font-size:12px; font-weight:700; box-shadow:var(--shadow-lg); animation:pop-in .15s cubic-bezier(.2,.8,.3,1) }
+  #extend-banner[hidden] { display:none }
+  #extend-banner:hover { filter:brightness(1.06) }
+
+  /* ── AI insert-at-point popover: anchored at the click, dot marks the exact spot ─────────── */
+  #aiinsert-dot { position:absolute; z-index:20; width:10px; height:10px; margin:-5px 0 0 -5px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); pointer-events:none }
+  #aiinsert-popover { position:absolute; z-index:21; width:260px; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:12px; box-shadow:var(--shadow-lg); animation:pop-in .12s cubic-bezier(.2,.8,.3,1) }
+  #aiinsert-popover[hidden] { display:none }
+  #aiinsert-popover .aiinsert-title { display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:700; color:var(--ink) }
+  #aiinsert-popover .aiinsert-title span { flex:1 }
+  #aiinsert-popover .aiinsert-close { all:unset; cursor:pointer; color:var(--dim); display:flex }
+  #aiinsert-popover .note { margin-top:6px }
+  #aiinsert-popover input[type=text] { width:100%; margin-top:8px; box-sizing:border-box }
+  #aiinsert-popover .act { width:100%; margin-top:8px; justify-content:center }
+
+  /* ── guided "convert to layers" region review ────────────────────────────────────────────── */
+  #review-overlay { position:absolute; inset:0; z-index:18 }
+  #review-overlay[hidden] { display:none }
+  .review-box { position:absolute; border:2px dashed; border-radius:5px; cursor:move; box-sizing:border-box }
+  .review-box[data-type=text] { border-color:#ffd166; background:rgba(255,209,102,.12) }
+  .review-box[data-type=image] { border-color:#ef6a2d; background:rgba(239,106,45,.12) }
+  .review-tag { position:absolute; top:-24px; left:-2px; display:flex; align-items:center; gap:4px; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:2px 4px; box-shadow:var(--shadow-sm) }
+  .review-tag select { all:unset; font-size:10.5px; font-weight:600; color:var(--ink); cursor:pointer; padding:1px 3px }
+  .review-tag button { all:unset; box-sizing:border-box; cursor:pointer; width:16px; height:16px; display:flex; align-items:center; justify-content:center; border-radius:4px; color:var(--dim) }
+  .review-tag button:hover { background:var(--bg); color:var(--danger) }
+  .review-handle { position:absolute; width:9px; height:9px; background:var(--accent); border:1.5px solid var(--panel); border-radius:50%; right:-5px; bottom:-5px; cursor:nwse-resize }
+  #review-toolbar { position:absolute; bottom:16px; left:50%; transform:translateX(-50%); z-index:19; display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px 10px; box-shadow:var(--shadow-lg) }
+  #review-toolbar[hidden] { display:none }
+  #review-toolbar .sp { width:1px; height:20px; background:var(--line) }
+  #review-count { font-size:11.5px; color:var(--dim); font-weight:600; padding:0 4px; white-space:nowrap }
+
+  /* ── ⌘K command palette ─────────────────────────────────────────────────────────────────── */
+  #cmdk-backdrop { position:fixed; inset:0; z-index:200; background:rgba(8,8,12,.5); display:flex; align-items:flex-start; justify-content:center; padding-top:14vh }
+  #cmdk-backdrop[hidden] { display:none }
+  #cmdk-box { width:min(560px,92vw); max-height:min(60vh,420px); background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow-lg); overflow:hidden; display:flex; flex-direction:column; animation:pop-in .12s cubic-bezier(.2,.8,.3,1) }
+  #cmdk-search-row { display:flex; align-items:center; gap:9px; padding:12px 14px; border-bottom:1px solid var(--line); flex:none }
+  #cmdk-search-row svg { color:var(--dim-2); flex:none }
+  #cmdk-input { all:unset; box-sizing:border-box; flex:1; font-size:14px; color:var(--ink) }
+  .tag { display:inline-flex; align-items:center; padding:2px 7px; border-radius:6px; background:var(--panel-2); color:var(--dim); font-size:10px; font-weight:600 }
+  .tag.mono { font-family:"JetBrains Mono",ui-monospace,monospace }
+  #cmdk-list { overflow-y:auto; padding:6px; flex:1 }
+  .cmdk-item { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; cursor:pointer; font-size:12.5px }
+  .cmdk-item svg { color:var(--dim-2); flex:none }
+  .cmdk-item[data-on=true] { background:var(--panel-2) }
+  .cmdk-item[data-on=true] svg { color:var(--accent) }
+  .cmdk-item .lbl { flex:1; color:var(--ink) }
+  .cmdk-item .grp { font-size:10.5px; color:var(--dim-2) }
+  .cmdk-empty { padding:16px; text-align:center; font-size:12.5px; color:var(--dim) }
+
+  /* ── Compare view ────────────────────────────────────────────────────────────────────────── */
+  #compare-backdrop { position:fixed; inset:0; z-index:200; background:rgba(12,12,14,.95); backdrop-filter:blur(10px); display:flex; flex-direction:column }
+  #compare-backdrop[hidden] { display:none }
+  #compare-header { display:flex; align-items:flex-start; justify-content:space-between; padding:20px 28px; flex:none }
+  #compare-header strong { font-size:16px; font-family:"Bricolage Grotesque",sans-serif }
+  #compare-sub { font-size:13px; color:var(--dim); margin:4px 0 0 }
+  #compare-panes { flex:1; display:grid; grid-template-columns:1fr 1fr; gap:20px; padding:0 28px 28px; min-height:0 }
+  .compare-pane { position:relative; display:grid; place-items:center; background:var(--stage); border:1px solid var(--line); border-radius:12px; overflow:hidden; min-height:0 }
+  .compare-pane img { max-width:100%; max-height:100%; object-fit:contain; border-radius:6px; box-shadow:var(--shadow-lg) }
+  .compare-label { position:absolute; top:14px; left:14px; background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:4px 11px; font-size:11px; font-weight:600; color:var(--dim) }
+  button { all:unset; box-sizing:border-box; cursor:pointer; display:flex; align-items:center; gap:8px; width:100%; padding:8px 11px; border-radius:9px; font-size:13px; font-weight:500; transition:background .1s,border-color .1s,color .1s }
+  button:hover { background:var(--panel-2) } button[data-on=true] { background:var(--accent); color:var(--accent-ink); font-weight:600 }
   button[data-on=true] svg { color:var(--accent-ink) }
-  .act { border:1px solid var(--line); text-align:center; margin-top:6px; width:auto; display:inline-flex; justify-content:center } .act:hover { border-color:var(--accent) }
-  .icon-btn { all:unset; box-sizing:border-box; cursor:pointer; display:flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:7px; border:1px solid var(--line); color:var(--ink); transition:border-color .1s,color .1s,background .1s }
-  .icon-btn:hover { border-color:var(--accent) }
+  button:focus-visible { outline:none; box-shadow:var(--ring) }
+  .act { border:1px solid var(--line); text-align:center; margin-top:6px; width:auto; display:inline-flex; justify-content:center; font-weight:600; color:var(--ink) }
+  .act:hover { border-color:var(--dim-2); background:var(--panel-2) }
+  .act:active { transform:translateY(.5px) }
+  .act-accent { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) }
+  .act-accent:hover { background:var(--accent); border-color:var(--accent); filter:brightness(1.06) }
+  .act-accent svg { color:var(--accent-ink) }
+  .ai-card { margin-top:8px; padding:14px; border-radius:16px; border:1px solid var(--line); background:var(--panel-2) }
+  .ai-card-title { display:flex; align-items:center; gap:8px; font-size:13.5px; font-weight:700; color:var(--ink) }
+  .ai-card-title span:first-of-type { flex:1; white-space:nowrap }
+  .ai-card p { margin:8px 0 0; font-size:12px; color:var(--dim); line-height:1.55 }
+  .ai-card .tag { margin-left:2px; flex-shrink:0 }
+  .icon-btn { all:unset; box-sizing:border-box; cursor:pointer; display:flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:8px; border:1px solid var(--line); color:var(--dim); transition:border-color .1s,color .1s,background .1s }
+  .icon-btn:hover { border-color:var(--dim-2); color:var(--ink); background:var(--panel-2) }
+  .icon-btn:focus-visible, .act:focus-visible { outline:none; box-shadow:var(--ring) }
   .icon-btn[data-active=true] { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) }
   nav button svg, .layer svg { flex-shrink:0; color:inherit }
-  input[type=color] { width:26px; height:24px; border:none; background:none }
+  input[type=color] { width:27px; height:26px; border:none; background:none; border-radius:7px; overflow:hidden; cursor:pointer }
+  input[type=color]::-webkit-color-swatch-wrapper { padding:0 }
+  input[type=color]::-webkit-color-swatch { border:1px solid var(--line); border-radius:7px }
   /* ── range sliders: flat themed track + thumb, cross-browser (native chrome doesn't follow the
      dark palette otherwise — grey track, default-blue thumb, clashing with everything else) ──── */
   input[type=range] { width:110px; min-width:0; -webkit-appearance:none; appearance:none; background:transparent; cursor:pointer }
-  input[type=range]::-webkit-slider-runnable-track { height:4px; border-radius:999px; background:var(--line) }
-  input[type=range]::-moz-range-track { height:4px; border-radius:999px; background:var(--line) }
-  input[type=range]::-moz-range-progress { height:4px; border-radius:999px; background:var(--accent) }
-  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:14px; height:14px; margin-top:-5px; border-radius:50%; background:var(--accent); border:2px solid var(--panel); box-shadow:0 0 0 1px var(--line) }
-  input[type=range]::-moz-range-thumb { width:14px; height:14px; border-radius:50%; background:var(--accent); border:2px solid var(--panel); box-shadow:0 0 0 1px var(--line) }
+  input[type=range]::-webkit-slider-runnable-track { height:5px; border-radius:999px; background:var(--line) }
+  input[type=range]::-moz-range-track { height:5px; border-radius:999px; background:var(--line) }
+  input[type=range]::-moz-range-progress { height:5px; border-radius:999px; background:var(--accent) }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:15px; height:15px; margin-top:-5px; border-radius:50%; background:var(--ink); border:3px solid var(--accent); box-shadow:var(--shadow-sm); transition:transform .1s }
+  input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%; background:var(--ink); border:3px solid var(--accent); box-shadow:var(--shadow-sm); transition:transform .1s }
+  input[type=range]:hover::-webkit-slider-thumb, input[type=range]:active::-webkit-slider-thumb { transform:scale(1.12) }
+  input[type=range]:hover::-moz-range-thumb, input[type=range]:active::-moz-range-thumb { transform:scale(1.12) }
   input[type=range]:focus-visible { outline:none }
-  input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow:0 0 0 1px var(--line), 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent) }
-  input[type=range]:focus-visible::-moz-range-thumb { box-shadow:0 0 0 1px var(--line), 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent) }
-  input[type=range]:disabled::-webkit-slider-thumb { background:var(--dim) }
-  input[type=range]:disabled::-moz-range-thumb { background:var(--dim) }
+  input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent) }
+  input[type=range]:focus-visible::-moz-range-thumb { box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent) }
+  input[type=range]:disabled::-webkit-slider-thumb { background:var(--dim); border-color:var(--line) }
+  input[type=range]:disabled::-moz-range-thumb { background:var(--dim); border-color:var(--line) }
   /* layer row: thumbnail + name/subtitle + hover-reveal action icons — mirrors the reference
      editor's layer list (28px thumb, dimmed-until-hover reorder/lock/eye/delete). */
-  .layer { display:flex; gap:7px; align-items:center; padding:5px 7px; border-radius:8px; font-size:12px; cursor:grab }
-  .layer:hover { background:var(--bg) } .layer[data-on=true] { background:var(--bg); outline:1px solid var(--accent) }
-  .layer[data-visible=false] { opacity:.45 }
-  .layer-thumb { flex:none; width:28px; height:28px; border-radius:6px; overflow:hidden; display:grid; place-items:center; background:var(--stage); border:1px solid var(--line) }
-  .layer[data-on=true] .layer-thumb { border-color:var(--accent) }
+  .layer { display:flex; gap:8px; align-items:center; padding:6px 7px; border-radius:9px; font-size:12px; cursor:grab; transition:background .1s }
+  .layer:hover { background:var(--panel-2) }
+  .layer[data-on=true] { background:color-mix(in srgb, var(--accent) 12%, var(--panel-2)); box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent) }
+  .layer[data-visible=false] { opacity:.4 }
+  .layer[data-dragover=true] { background:color-mix(in srgb, var(--accent) 16%, var(--panel-2)); box-shadow:inset 0 0 0 1px dashed var(--accent), inset 0 0 0 1px var(--accent) }
+  .layer[data-dragging=true] { opacity:.4 }
+  .layer-rename { all:unset; box-sizing:border-box; width:100%; font-size:12px; font-weight:600; padding:2px 5px; border-radius:5px; background:var(--bg); border:1px solid var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); color:var(--ink) }
+  .layer-thumb { flex:none; width:30px; height:30px; border-radius:7px; overflow:hidden; display:grid; place-items:center; background:var(--stage); border:1px solid var(--line) }
+  .layer[data-on=true] .layer-thumb { border-color:color-mix(in srgb, var(--accent) 60%, var(--line)) }
   .layer-thumb img { max-width:100%; max-height:100%; object-fit:contain; display:block; pointer-events:none }
   .layer-thumb svg { color:var(--dim) }
-  .layer-meta { flex:1; min-width:0; line-height:1.25 }
+  .layer-meta { flex:1; min-width:0; line-height:1.3 }
   .layer-meta .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; display:block }
-  .layer-meta .sub { font-size:10px; color:var(--dim); font-family:ui-monospace,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; margin-top:1px }
-  .layer-actions { display:flex; gap:1px; flex:none; margin-left:auto; opacity:0 }
+  .layer-meta .sub { font-size:10px; color:var(--dim-2); font-family:"JetBrains Mono",ui-monospace,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; margin-top:1px }
+  .layer-actions { display:flex; gap:1px; flex:none; margin-left:auto; opacity:0; transition:opacity .1s }
   .layer:hover .layer-actions, .layer[data-on=true] .layer-actions { opacity:1 }
-  .layer-actions button { all:unset; box-sizing:border-box; cursor:pointer; width:20px; height:20px; display:flex; align-items:center; justify-content:center; border-radius:5px; color:var(--dim) }
-  .layer-actions button:hover { background:var(--panel); color:var(--ink) }
+  .layer-actions button { all:unset; box-sizing:border-box; cursor:pointer; width:21px; height:21px; display:flex; align-items:center; justify-content:center; border-radius:6px; color:var(--dim) }
+  .layer-actions button:hover { background:var(--bg); color:var(--ink) }
   .layer-actions button[data-active=true] { opacity:1; color:var(--ink) }
-  .chip { all:unset; box-sizing:border-box; cursor:pointer; display:inline-flex; align-items:center; gap:5px; width:auto; padding:6px 11px; border-radius:999px; font-size:11.5px; font-weight:600; border:1px solid var(--line); color:var(--ink) }
-  .chip:hover { border-color:var(--accent) }
+  .chip { all:unset; box-sizing:border-box; cursor:pointer; display:inline-flex; align-items:center; gap:5px; width:auto; padding:7px 12px; border-radius:999px; font-size:11.5px; font-weight:600; border:1px solid var(--line); color:var(--ink); transition:border-color .1s,background .1s }
+  .chip:hover { border-color:var(--dim-2); background:var(--panel-2) }
+  .chip:focus-visible { outline:none; box-shadow:var(--ring) }
+  .chip[data-on=true] { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) }
   .asset-thumb { flex:none; width:56px; cursor:pointer; text-align:center }
-  .asset-thumb img { width:56px; height:56px; object-fit:cover; border-radius:8px; border:1px solid var(--line); display:block }
-  .asset-thumb span { display:block; font-size:10px; color:var(--dim); margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-  .asset-thumb:hover img { border-color:var(--accent) }
-  #aibox input { width:100%; background:var(--bg); border:1px solid var(--line); border-radius:7px; color:var(--ink); padding:6px 8px; font-size:12px }
-  .note { color:var(--dim); font-size:11px; margin-top:6px; line-height:1.5 }
+  .asset-thumb img { width:56px; height:56px; object-fit:cover; border-radius:9px; border:1px solid var(--line); display:block; transition:border-color .1s }
+  .asset-thumb span { display:block; font-size:10px; color:var(--dim); margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .asset-thumb:hover img { border-color:var(--dim-2) }
+  #sticker-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px }
+  .sticker-thumb { all:unset; box-sizing:border-box; cursor:pointer; aspect-ratio:1; border-radius:9px; border:1px solid var(--line); background:var(--bg); display:flex; align-items:center; justify-content:center; padding:10px; transition:border-color .1s,background .1s }
+  .sticker-thumb:hover { border-color:var(--dim-2); background:var(--panel-2) }
+  .sticker-thumb svg { width:100%; height:100%; color:var(--dim) }
+  #aibox input { width:100%; background:var(--bg); border:1px solid var(--line); border-radius:12px; color:var(--ink); padding:9px 12px; font-size:13px }
+  #aibox input:focus-visible { outline:none; box-shadow:var(--ring) }
+  #aibox button[data-busy=true] { opacity:.75; pointer-events:none }
+  .btn-spin { display:inline-block; width:11px; height:11px; border-radius:50%; border:1.6px solid rgba(255,255,255,.35); border-top-color:#fff; animation:btn-spin .6s linear infinite; flex:none }
+  @keyframes btn-spin { to { transform:rotate(360deg) } }
+  .note { color:var(--dim); font-size:11px; margin-top:6px; line-height:1.55 }
 
   /* ── form fields (Properties panel) ─────────────────────────────────────────────────────── */
-  input[type=number], input[type=text] { background:var(--bg); border:1px solid var(--line); border-radius:7px; color:var(--ink); padding:6px 8px; font-size:12px; font-family:inherit }
-  input[type=number]:focus, input[type=text]:focus, select:focus { outline:none; border-color:var(--accent) }
-  .field-grid { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap }
-  .field { flex:1; min-width:60px; display:flex; flex-direction:column; gap:5px; font-size:10.5px; color:var(--dim); letter-spacing:.02em }
+  input[type=number], input[type=text], select { background:var(--bg); border:1px solid var(--line); border-radius:8px; color:var(--ink); padding:7px 9px; font-size:12px; font-family:inherit; transition:border-color .1s,box-shadow .1s }
+  input[type=number]:hover, input[type=text]:hover, select:hover { border-color:var(--dim-2) }
+  input[type=number]:focus, input[type=text]:focus, select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent) }
+  .field-grid { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap }
+  .field { flex:1; min-width:60px; display:flex; flex-direction:column; gap:6px; font-size:10.5px; color:var(--dim); font-weight:600; letter-spacing:.03em; text-transform:uppercase }
   .field input { width:100% }
-  .slider-row { display:flex; align-items:center; gap:10px; font-size:11.5px; color:var(--dim) }
+  .slider-row { display:flex; align-items:center; gap:10px; font-size:11.5px; color:var(--dim); font-weight:500 }
   .slider-row input[type=range] { flex:1; width:auto }
   input:disabled, select:disabled, button:disabled { opacity:.4; cursor:default; pointer-events:none }
   input[type=range]:disabled { accent-color:var(--dim) }
@@ -129,28 +290,50 @@
 
   /* ── Properties panel: empty state + section rhythm ─────────────────────────────────────── */
   #right-panel[data-empty=true] #props-body { display:none }
-  #props-empty { display:none; flex-direction:column; align-items:center; text-align:center; gap:6px; padding:40px 16px; color:var(--dim) }
+  #props-empty { display:none; flex-direction:column; align-items:center; text-align:center; gap:8px; padding:48px 16px; color:var(--dim) }
   #right-panel[data-empty=true] #props-empty { display:flex }
-  #props-empty svg { color:var(--line); margin-bottom:2px }
-  #props-empty .h { font-size:12.5px; font-weight:600; color:var(--ink) }
-  #props-empty .d { font-size:11.5px; line-height:1.5; max-width:190px }
-  .grp { font-size:9px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim); margin:16px 4px 6px; padding-top:12px; border-top:1px solid var(--line) }
+  #props-empty svg { color:var(--line); margin-bottom:4px }
+  #props-empty .h { font-size:12.5px; font-weight:700; color:var(--ink) }
+  #props-empty .d { font-size:11.5px; line-height:1.6; max-width:190px; color:var(--dim-2) }
+  .grp { font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--dim-2); margin:18px 3px 8px; padding-top:14px; border-top:1px solid var(--line-soft) }
   .grp:first-child { margin-top:0; padding-top:0; border-top:none }
+
+  /* ── focus-visible baseline: keyboard nav gets a visible ring everywhere, mouse users don't ── */
+  a:focus-visible { outline:none; box-shadow:var(--ring); border-radius:4px }
+  ::selection { background:color-mix(in srgb, var(--accent) 55%, transparent); color:var(--ink) }
+
+  /* ── header: vertical dividers between control clusters, primary treatment for export ──────── */
+  header .hdiv { width:1px; height:22px; background:var(--line); flex:none }
+  header .act { margin-top:0; padding:7px 13px; font-size:12.5px; white-space:nowrap; flex:none }
+  header #png, header #svg, header #jpg { border-color:transparent; background:var(--accent); color:var(--accent-ink); font-weight:700 }
+  header #png:hover, header #svg:hover, header #jpg:hover { filter:brightness(1.08); border-color:transparent }
+  header #svg, header #jpg { background:transparent; color:var(--ink); border-color:var(--line) }
+  header #svg:hover, header #jpg:hover { background:var(--panel-2); filter:none; border-color:var(--dim-2) }
 </style>
 </head>
 <body>
 <header>
   <b>Canvasmith</b><span class="note">vanilla shell on the headless core — every control is a public API call</span>
+  <span class="hdiv"></span>
+  <button class="act" id="openfile"><span id="openfile-icon"></span>Open image…</button>
+  <input type="file" id="file" accept="image/*" hidden>
   <span class="sp"></span>
   <label>Size <input type="range" id="size" min="2" max="220" value="30"></label>
   <label>Opacity <input type="range" id="op" min="0.05" max="1" step="0.05" value="1"></label>
-  <input type="color" id="col" value="#d4ff45" title="colour">
+  <input type="color" id="col" value="#ef6a2d" title="colour">
+  <span class="hdiv"></span>
   <button class="icon-btn" id="undo" title="Undo"></button>
   <button class="icon-btn" id="redo" title="Redo"></button>
+  <span class="hdiv"></span>
+  <button class="act" id="cmdk-open" title="Search tools &amp; actions (⌘K)" style="border:1px solid var(--line)"></button>
+  <span class="hdiv"></span>
   <div class="popover-anchor">
-    <button class="act" style="width:auto;padding:6px 12px;margin-top:0" id="canvas-size-btn">Canvas size</button>
+    <button class="act" id="canvas-size-btn">Canvas size</button>
     <div class="popover" id="canvas-size-pop" hidden>
       <h4>Canvas size</h4>
+      <select id="cs-preset" style="width:100%">
+        <option value="">Custom…</option>
+      </select>
       <div class="field-grid">
         <label class="field">W <input type="number" id="cs-w" min="1" max="8000"></label>
         <label class="field">H <input type="number" id="cs-h" min="1" max="8000"></label>
@@ -165,15 +348,19 @@
     </div>
   </div>
   <button class="icon-btn" id="theme-toggle" title="Toggle light/dark theme"></button>
-  <button class="act" style="width:auto;padding:6px 12px;margin-top:0" id="png">⬇ PNG</button>
-  <button class="act" style="width:auto;padding:6px 12px;margin-top:0" id="svg">⬇ SVG</button>
+  <span class="hdiv"></span>
+  <button class="act" id="compare-btn" title="Compare with the first-loaded version" disabled></button>
+  <span class="hdiv"></span>
+  <button class="act" id="svg">⬇ SVG</button>
+  <button class="act" id="jpg">⬇ JPG</button>
+  <button class="act" id="png">⬇ PNG</button>
 </header>
 <main>
   <nav id="tools"></nav>
 
   <!-- LEFT: Tool / Layers tabs — tool-specific hints & actions, or the layer list + open/AI -->
   <div id="left-panel">
-    <div class="tabs">
+    <div class="tabs" id="left-tabs">
       <button data-tab="tool" data-on="true"></button>
       <button data-tab="layers"></button>
     </div>
@@ -187,6 +374,17 @@
       </div>
       <div class="note" id="tool-hint" style="margin-top:0"></div>
       <button class="pill-toggle" id="snap-toggle" data-on="true">Snap: on</button>
+
+      <div id="objselect-section" style="display:none">
+        <div class="note" id="objselect-status" style="margin-top:8px"></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+          <button class="chip" id="objselect-add"></button>
+        </div>
+        <label style="display:block;margin-top:8px;font-size:11px;color:var(--dim)">Tolerance
+          <input type="range" id="objselect-tolerance" min="4" max="128" value="32" style="width:100%">
+        </label>
+        <div class="note" style="margin-top:8px">⇧ add · ⌥ subtract · [ ] tolerance</div>
+      </div>
 
       <div id="gradient-section" style="display:none">
         <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Gradient</div>
@@ -217,36 +415,61 @@
       </div>
       <button class="act" id="sel-similar" style="width:100%;margin-top:6px"></button>
       <button class="act" id="sel-recolor-btn" style="width:100%;margin-top:6px"></button>
-      <input type="color" id="sel-recolor" value="#d4ff45" style="width:100%;margin-top:6px;display:none">
+      <input type="color" id="sel-recolor" value="#ef6a2d" style="width:100%;margin-top:6px;display:none">
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button class="act" id="sel-clip" style="flex:1"></button>
+        <button class="act" id="sel-unclip" style="flex:1"></button>
+      </div>
       <div class="note" id="sel-msg"></div>
     </div>
-    <div id="layers-panel" style="display:none; flex-direction:column; flex:1; min-height:0">
-      <div class="grp">Layers</div>
-      <div id="layers" style="flex:1; overflow-y:auto; min-height:60px"></div>
-      <div class="grp">Add element</div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px">
-        <button class="chip" id="add-text"></button>
-        <button class="chip" id="add-box"></button>
-        <button class="chip" id="add-circle"></button>
-        <button class="chip" id="add-image"></button>
-        <button class="chip" id="add-paint"></button>
-        <button class="chip" id="add-adjustment"></button>
-      </div>
-      <div class="grp">Open</div>
-      <button class="act" id="openfile">📁 Open image…</button>
-      <input type="file" id="file" accept="image/*" hidden>
-      <div class="note">…or just drag &amp; drop / paste an image anywhere on the canvas, or open this page with <code>?image=&lt;url&gt;</code>.</div>
-      <div class="grp">AI (free Gemini key)</div>
-      <div id="aibox"></div>
+    <div id="layers-panel" style="display:none; flex-direction:column; flex:1; min-height:0; overflow-y:auto">
+      <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Layers</div>
+      <div id="layers" style="min-height:60px; max-height:220px; overflow-y:auto"></div>
+      <button class="act" id="add-adjustment" style="width:100%;margin-top:8px"></button>
     </div>
+    <div id="left-scroll-cue"></div>
   </div>
 
-  <div id="stage"><canvas id="cv"></canvas></div>
-  <button class="collapse-btn" id="collapse-left" title="Hide Tool/Layers panel"></button>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <span id="dim-badge"></span>
+    <button id="extend-banner" hidden></button>
+    <span id="aiinsert-dot" hidden></span>
+    <div id="aiinsert-popover" hidden>
+      <div class="aiinsert-title"><span id="aiinsert-title-text"></span><button class="aiinsert-close" id="aiinsert-close"></button></div>
+      <div class="note" id="aiinsert-note" style="display:none"></div>
+      <input type="text" id="aiinsert-prompt" placeholder="Describe what to draw here…">
+      <button class="act act-accent" id="aiinsert-run"></button>
+    </div>
+    <div id="zoom-pill">
+      <button id="zoom-out" title="Zoom out (−)"></button>
+      <button id="zoom-pct" title="Reset to fit"></button>
+      <button id="zoom-in" title="Zoom in (+)"></button>
+      <span id="zoom-div"></span>
+      <button id="zoom-fit" title="Fit to screen (0)"></button>
+    </div>
+    <div id="review-overlay" hidden></div>
+    <div id="review-toolbar" hidden>
+      <span id="review-count"></span>
+      <span class="sp"></span>
+      <button class="act" id="review-add-box" style="width:auto">+ Add box</button>
+      <button class="act" id="review-cancel" style="width:auto">Cancel</button>
+      <button class="act" id="review-commit" style="width:auto"></button>
+    </div>
+  </div>
+  <button class="collapse-btn" id="collapse-left" title="Hide side panel"></button>
   <button class="collapse-btn" id="collapse-right" title="Hide Properties panel"></button>
 
-  <!-- RIGHT: Properties — always reflects the current fabric selection, not the active tool -->
+  <!-- RIGHT: Layer (properties) / Design / Stickers / AI — tabbed, matching the reference editor's
+       right-hand panel (ditto's own rail keeps Tool/Layers on the left and everything else here). -->
   <div id="right-panel">
+    <div class="tabs" id="right-tabs">
+      <button data-tab="layer" data-on="true"></button>
+      <button data-tab="design"></button>
+      <button data-tab="stickers"></button>
+      <button data-tab="ai"></button>
+    </div>
+    <div id="layer-panel">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
       <strong id="props-title" style="font-size:13px">Properties</strong>
     </div>
@@ -281,11 +504,14 @@
 
     <div id="typography-section" style="display:none">
       <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Typography</div>
-      <select id="tx-font" style="width:100%;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:12px"></select>
+      <div class="popover-anchor" id="tx-font-anchor">
+        <button class="act" id="tx-font-btn" style="justify-content:space-between"><span id="tx-font-current">Choose a font…</span><span id="tx-font-caret"></span></button>
+        <div class="popover" id="tx-font-pop" hidden style="width:100%;max-height:280px;overflow-y:auto;left:0;right:auto;padding:6px"></div>
+      </div>
       <div class="field-grid">
         <label class="field">Size <input type="number" id="tx-size" min="1" max="800"></label>
         <label class="field">Weight
-          <select id="tx-weight" style="width:100%;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:12px">
+          <select id="tx-weight" style="width:100%">
             <option value="300">Light</option><option value="400">Regular</option><option value="500">Medium</option>
             <option value="600">Semibold</option><option value="700">Bold</option><option value="800">Extrabold</option>
           </select>
@@ -310,7 +536,7 @@
         <button class="act" id="fill-mode-gradient" style="flex:1">Gradient</button>
       </div>
       <div id="fill-solid" style="display:flex;align-items:center;gap:8px">
-        <input type="color" id="xf-fill" value="#d4ff45" title="Fill colour" style="flex-shrink:0">
+        <input type="color" id="xf-fill" value="#ef6a2d" title="Fill colour" style="flex-shrink:0">
         <span class="note" style="margin:0">Colour of the selected shape or text.</span>
       </div>
       <div id="fill-gradient" style="display:none">
@@ -324,8 +550,22 @@
       </div>
     </div>
 
+    <div id="border-section" style="display:none">
+      <div class="grp">Border</div>
+      <div class="slider-row">Width <input type="range" id="xf-strokewidth" min="0" max="40" value="0"></div>
+      <div id="border-color-row" style="display:none;align-items:center;gap:8px;margin-top:8px">
+        <input type="color" id="xf-stroke" value="#000000" title="Border colour" style="flex-shrink:0">
+        <span class="note" style="margin:0">Colour of the border/outline.</span>
+      </div>
+    </div>
+
+    <div id="radius-section" style="display:none">
+      <div class="grp">Corner radius</div>
+      <div class="slider-row">Radius <input type="range" id="xf-rx" min="0" max="400" value="0"></div>
+    </div>
+
     <div class="grp">Blend &amp; opacity</div>
-    <select id="blend-mode" style="width:100%;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:12px"></select>
+    <select id="blend-mode" style="width:100%"></select>
     <div class="slider-row" style="margin-top:8px">Opacity <input type="range" id="layer-opacity" min="0" max="1" step="0.05" value="1"></div>
 
     <div class="grp">Transform</div>
@@ -362,11 +602,82 @@
     </div>
     <button class="act" id="shadow-clear" style="width:100%;margin-top:8px">Clear shadow</button>
     </div>
+    </div>
+
+    <div id="design-panel" style="display:none; flex-direction:column; flex:1; min-height:0; overflow-y:auto">
+      <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Background &amp; fill</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="act" id="design-extend-bg" style="width:100%"></button>
+        <button class="act" id="design-ai-extend-bg" style="width:100%"></button>
+        <label class="act" id="design-fill-color-label" style="width:100%;position:relative;display:flex;align-items:center;justify-content:center;gap:7px;cursor:pointer">
+          <span id="design-fill-color-label-text" style="display:flex;align-items:center;gap:7px"></span>
+          <input type="color" id="design-fill-color" style="position:absolute;width:1px;height:1px;opacity:0">
+        </label>
+        <button class="act" id="design-fill-image" style="width:100%"></button>
+      </div>
+      <div class="note" id="design-msg"></div>
+      <div class="grp">Add element</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        <button class="chip" id="add-text"></button>
+        <button class="chip" id="add-box"></button>
+        <button class="chip" id="add-circle"></button>
+        <button class="chip" id="add-image"></button>
+        <button class="chip" id="add-paint"></button>
+      </div>
+      <div class="note">Drag &amp; drop / paste an image anywhere on the canvas, or open this page with <code>?image=&lt;url&gt;</code>.</div>
+    </div>
+    <div id="stickers-panel" style="display:none; flex-direction:column; flex:1; min-height:0; overflow-y:auto">
+      <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Stickers</div>
+      <div id="sticker-cats" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+      <div id="sticker-grid"></div>
+    </div>
+    <div id="ai-panel" style="display:none; flex-direction:column; flex:1; min-height:0; overflow-y:auto">
+      <div class="grp" style="margin-top:0;padding-top:0;border-top:none">AI (free Gemini key)</div>
+      <div id="aibox"></div>
+      <div class="grp">Convert to layers</div>
+      <div class="ai-card" id="convert-card">
+        <div class="ai-card-title" id="convert-card-title"></div>
+        <p id="convert-card-body"></p>
+      </div>
+      <button class="act act-accent" id="convert-detect" style="width:100%"></button>
+      <button class="act" id="convert-manual" style="width:100%"></button>
+      <div class="note">Auto-detect everything, or draw one box yourself — adjust, add or remove boxes, then create layers.</div>
+    </div>
+    <div id="right-scroll-cue"></div>
   </div>
 </main>
 
+<!-- ⌘K command palette: searchable tools + common actions, matching the reference editor's own. -->
+<div id="cmdk-backdrop" hidden>
+  <div id="cmdk-box">
+    <div id="cmdk-search-row">
+      <span id="cmdk-search-icon"></span>
+      <input id="cmdk-input" placeholder="Search tools &amp; actions…" autocomplete="off">
+      <span class="tag mono" id="cmdk-esc">esc</span>
+    </div>
+    <div id="cmdk-list"></div>
+  </div>
+</div>
+
+<!-- Compare: side-by-side view of the first-loaded image vs. the current canvas render. -->
+<div id="compare-backdrop" hidden>
+  <div id="compare-box">
+    <div id="compare-header">
+      <div>
+        <strong id="compare-title">Compare</strong>
+        <p id="compare-sub">Compare your edited canvas with the first version you opened</p>
+      </div>
+      <button class="act" id="compare-close"></button>
+    </div>
+    <div id="compare-panes">
+      <div class="compare-pane"><span class="compare-label">Original</span><img id="compare-img-before" alt="Original"></div>
+      <div class="compare-pane"><span class="compare-label">Current</span><img id="compare-img-after" alt="Current"></div>
+    </div>
+  </div>
+</div>
+
 <script type="module">
-import { Editor, GeminiProvider, installBridge, installDropImport, selectionToPath2D, makeShape, makeText, installKeybindings, FONT_GROUPS, FONT_STYLESHEET_URL }
+import { Editor, GeminiProvider, installBridge, installDropImport, selectionToPath2D, selectionPolys, makeShape, makeText, installKeybindings, TOOL_KEYS, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, stickerSpec }
   from '../../packages/core/src/index.js';
 
 const ed = new Editor({ fabric: window.fabric, canvasEl: document.getElementById('cv'), width: 960, height: 640 });
@@ -435,6 +746,8 @@ const ICON_PATHS = {
   chevron: 'M15 6l-6 6 6 6',                                                 // ditto's chevronL
   tool: 'M4 8h10M18 8h2M4 16h2M10 16h10M14 6v4M6 14v4',                      // ditto's sliders, reused as the Tool-tab glyph
   layerstab: 'M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5M3 17l9 5 9-5',              // ditto's layers
+  spark: 'M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8Z',        // AI-tab glyph, matches @canvasmith/react's spark icon
+  palette: 'M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.2c2.4 0 4.3-1.9 4.3-4.3C21.5 6.1 17.2 3 12 3Z|fillcircle:7.5,10.5,1.3|fillcircle:11,7,1.3|fillcircle:15.5,8,1.3',  // Design-tab glyph
   chevronD: 'M6 9l6 6 6-6',                                                  // ditto's chevronD — stacking icons pair two of these, rotated
   box: 'M3 8l9-5 9 5v8l-9 5-9-5V8zM3 8l9 5 9-5M12 13v8',                     // ditto's box, for Group
   grid: 'M4 4h7v7H4zM13 4h7v7h-7zM13 13h7v7h-7zM4 13h7v7H4z',                // ditto's grid, for Ungroup
@@ -444,6 +757,7 @@ const ICON_PATHS = {
   droplet: 'M12 3s6 5.7 6 10a6 6 0 0 1-12 0c0-4.3 6-10 6-10z',               // ditto's droplet, for Saturation
   blurfilter: 'M4 5h16l-6 8v5l-4 2v-7L4 5z',                                 // ditto's filter, for Blur
   lock: 'M6 11V8a6 6 0 0 1 12 0v3M5 11h14v9H5z',                            // ditto's lock, for the per-layer lock toggle
+  folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',  // Open image (header)
   mask: 'circle:12,12,9|M12 3v18',                                          // half-tone circle: layer mask affordance (canvasmith-only, no reference counterpart)
   'align-left': 'M3 2v20|fillrect:6,6,7,4,1|fillrect:6,14,12,4,1',
   'align-h-center': 'M12 2v20|fillrect:8.5,6,7,4,1|fillrect:6,14,12,4,1',
@@ -451,6 +765,11 @@ const ICON_PATHS = {
   'align-top': 'M2 3h20|fillrect:6,6,4,7,1|fillrect:14,6,4,12,1',
   'align-v-center': 'M2 12h20|fillrect:6,8.5,4,7,1|fillrect:14,6,4,12,1',
   'align-bottom': 'M2 21h20|fillrect:6,11,4,7,1|fillrect:14,6,4,12,1',
+  minus: 'M5 12h14',
+  plus: 'M12 5v14M5 12h14',
+  maximize: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+  pen: 'M12 3l7 7-9 9-5 1 1-5 6-6 2 2M11 6l4 4',
+  search: 'circle:11,11,7|M21 21l-4.35-4.35',
 };
 function iconSVG(name, size = 15) {
   const spec = ICON_PATHS[name]; if (!spec) return '';
@@ -458,6 +777,7 @@ function iconSVG(name, size = 15) {
     // a "fillrect:" bar renders solid (fill=currentColor, no stroke) — used for align glyphs'
     // filled bars, kept distinct from "rect:" so every other icon's outlined boxes are untouched.
     if (part.startsWith('fillrect:')) { const [x, y, w, h, rx] = part.slice(9).split(',').map(Number); return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${rx}" fill="currentColor" stroke="none"/>`; }
+    if (part.startsWith('fillcircle:')) { const [cx, cy, r] = part.slice(11).split(',').map(Number); return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="currentColor" stroke="none"/>`; }
     if (part.startsWith('rect:')) { const [x, y, w, h, rx] = part.slice(5).split(',').map(Number); return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${rx}"/>`; }
     if (part.startsWith('circle:')) { const [cx, cy, r] = part.slice(7).split(',').map(Number); return `<circle cx="${cx}" cy="${cy}" r="${r}"/>`; }
     if (part.startsWith('ellipse:')) { const [cx, cy, rx, ry] = part.slice(8).split(',').map(Number); return `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}"/>`; }
@@ -491,15 +811,30 @@ const drawOverlays = () => {
     const p = selectionToPath2D(ed.selection, ed.W, ed.H);
     ctx.lineWidth = 1.6 / v[0];
     ctx.setLineDash([7 / v[0], 5 / v[0]]);
-    ctx.strokeStyle = '#d4ff45'; ctx.stroke(p);
-    ctx.lineDashOffset = 6 / v[0]; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.stroke(p);
+    // Marching ants: both strokes share the same crawling offset (the black stroke stays 6px
+    // ahead so the two dash patterns interleave instead of overlapping) — antsOffset is bumped by
+    // a standalone rAF loop below, independent of whatever triggered this particular render.
+    ctx.lineDashOffset = -antsOffset / v[0];
+    ctx.strokeStyle = '#ef6a2d'; ctx.stroke(p);
+    ctx.lineDashOffset = (6 - antsOffset) / v[0]; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.stroke(p);
     ctx.setLineDash([]);
+    // A rect/ellipse marquee is grabbable after the fact (see Editor#_down's getSelectionHandle
+    // check) — draw the same 8 corner/edge handles as the crop tool so that's discoverable,
+    // only while a marquee tool is active so other tools' selection outline stays uncluttered.
+    const s = ed.selection;
+    if ((s.kind === 'rect' || s.kind === 'ellipse') && (ed.tool === 'marquee' || ed.tool === 'marquee-ellipse')) {
+      const hs = 4.5 / v[0]; ctx.fillStyle = '#ef6a2d'; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.lineWidth = 1 / v[0];
+      for (const [hx, hy] of [[s.x, s.y], [s.x + s.w, s.y], [s.x, s.y + s.h], [s.x + s.w, s.y + s.h],
+                              [s.x + s.w / 2, s.y], [s.x + s.w / 2, s.y + s.h], [s.x, s.y + s.h / 2], [s.x + s.w, s.y + s.h / 2]]) {
+        ctx.beginPath(); ctx.arc(hx, hy, hs, 0, 7); ctx.fill(); ctx.stroke();
+      }
+    }
   }
   if (hoverPreview) {
     const p = selectionToPath2D({ kind: 'poly', pts: hoverPreview.pts }, ed.W, ed.H);
     ctx.lineWidth = 1.2 / v[0];
     ctx.setLineDash([4 / v[0], 3 / v[0]]);
-    ctx.strokeStyle = 'rgba(212,255,69,.65)'; ctx.stroke(p);
+    ctx.strokeStyle = 'rgba(239,106,45,.65)'; ctx.stroke(p);
     ctx.setLineDash([]);
   }
   if (ed.crop) {
@@ -513,10 +848,23 @@ const drawOverlays = () => {
       ctx.beginPath(); ctx.moveTo(c.x + c.w * i / 3, c.y); ctx.lineTo(c.x + c.w * i / 3, c.y + c.h); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(c.x, c.y + c.h * i / 3); ctx.lineTo(c.x + c.w, c.y + c.h * i / 3); ctx.stroke();
     }
-    const hs = 5.5 / v[0]; ctx.fillStyle = '#d4ff45';
+    const hs = 5.5 / v[0]; ctx.fillStyle = '#ef6a2d';
     for (const [hx, hy] of [[c.x, c.y], [c.x + c.w, c.y], [c.x, c.y + c.h], [c.x + c.w, c.y + c.h],
                             [c.x + c.w / 2, c.y], [c.x + c.w / 2, c.y + c.h], [c.x, c.y + c.h / 2], [c.x + c.w, c.y + c.h / 2]])
       ctx.fillRect(hx - hs, hy - hs, hs * 2, hs * 2);
+    // PS-style dimension readout above the box — a constant SCREEN size regardless of zoom, so
+    // the /v[0] inverse-scale trick every other overlay element here uses applies to font size too.
+    const label = Math.round(c.w) + ' × ' + Math.round(c.h);
+    const fs = 12 / v[0], pad = 6 / v[0];
+    ctx.font = fs + 'px "JetBrains Mono", ui-monospace, monospace';
+    const tw = ctx.measureText(label).width;
+    const lx = c.x + c.w / 2, ly = c.y - pad * 2 - fs / 2;
+    ctx.fillStyle = 'rgba(20,20,23,.92)';
+    ctx.beginPath(); ctx.roundRect(lx - tw / 2 - pad, ly - fs / 2 - pad * 0.6, tw + pad * 2, fs + pad * 1.2, pad);
+    ctx.fill();
+    ctx.fillStyle = '#f1efe9'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, lx, ly);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
   }
   if (dragGuides) {
     // Figma-style smart guides — thin magenta lines showing what a dragged layer just aligned to.
@@ -528,15 +876,46 @@ const drawOverlays = () => {
       ctx.beginPath(); ctx.moveTo(dragGuides.y.x0, dragGuides.y.y); ctx.lineTo(dragGuides.y.x1, dragGuides.y.y); ctx.stroke();
     }
   }
+  if (penBuild && penBuild.pts.length) {
+    // Pen tool in-progress path: solid polyline through placed points + a hollow dot on each
+    // vertex, filled dot on the first (the "click here to close" target).
+    ctx.strokeStyle = '#ef6a2d'; ctx.lineWidth = 1.4 / v[0]; ctx.setLineDash([]);
+    ctx.beginPath();
+    penBuild.pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+    ctx.stroke();
+    const r = 3.5 / v[0];
+    penBuild.pts.forEach((p, i) => {
+      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 7);
+      if (i === 0) { ctx.fillStyle = '#ef6a2d'; ctx.fill(); } else { ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.strokeStyle = '#ef6a2d'; ctx.lineWidth = 1.2 / v[0]; ctx.stroke(); }
+    });
+  }
   ctx.restore();
 };
 let hoverPreview = null;
 let dragGuides = null;
+let penBuild = null;
 ed.on('guides', g => { dragGuides = g; ed.fc.requestRenderAll(); });
 ed.fc.on('after:render', drawOverlays);
-ed.on('selection', () => ed.fc.requestRenderAll());
+ed.on('selection', () => { ed.fc.requestRenderAll(); startAntsLoopIfNeeded(); });
 ed.on('crop', () => ed.fc.requestRenderAll());
 ed.on('hover', h => { hoverPreview = h; ed.fc.requestRenderAll(); });
+ed.on('pen', build => { penBuild = build; ed.fc.requestRenderAll(); });
+
+/* ── marching ants: the selection outline's dashes visibly crawl, matching the reference editor's
+   animated marquee — only ticks while a selection actually exists (requestRenderAll is cheap but
+   not free; no point animating an idle canvas nobody's looking at). */
+let antsOffset = 0, _antsRunning = false;
+function startAntsLoopIfNeeded() {
+  if (_antsRunning || !ed.selection) return;
+  _antsRunning = true;
+  const step = () => {
+    if (!ed.selection) { _antsRunning = false; return; }
+    antsOffset = (antsOffset + 0.4) % 12;
+    ed.fc.requestRenderAll();
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
 
 /* Shared shortcut set — undo/redo, copy/paste, delete-active-layer, poly-lasso Enter/Escape,
    single-letter tool switch, arrow-key nudge. Lives in core (keybindings.js) so the demo and the
@@ -555,7 +934,8 @@ const TOOL_LABELS = {
   bucket: 'Paint bucket', gradient: 'Gradient',
   dodge: 'Dodge · lighten', burn: 'Burn · darken', sponge: 'Sponge · saturation',
   rect: 'Rectangle', ellipse: 'Ellipse', line: 'Line', triangle: 'Triangle', polygon: 'Polygon', star: 'Star',
-  type: 'Type', eyedropper: 'Eyedropper',
+  type: 'Type', eyedropper: 'Eyedropper', pen: 'Pen · vector path',
+  aiinsert: 'AI insert',
 };
 const TOOL_HINTS = {
   select: 'Click a layer on the canvas, or drag to move the selected layer.',
@@ -565,21 +945,55 @@ const TOOL_HINTS = {
   wand: 'Click a colour region to select it. Shift-click adds, Alt-click subtracts.',
   objectselect: 'Click an object to select it (OpenCV-assisted). Shift-click adds, Alt-click subtracts.',
   hoverselect: 'Hover to preview what a click would select, then click to commit it.',
+  pen: 'Click to place points; click near the start (or press Enter) to close into a filled shape, Escape to cancel.',
+  aiinsert: 'AI insert · click a spot to draw there — or make a selection first and click inside it: the AI fills exactly that shape',
 };
 const TOOLGROUPS = [
   [{ id: 'select', icon: 'select' }, { id: 'hand', icon: 'hand' }],
   [{ id: 'marquee', icon: 'marquee' }, { id: 'marquee-ellipse', icon: 'marquee-ellipse' }, { id: 'lasso', icon: 'lasso' },
    { id: 'lasso-poly', icon: 'lasso-poly' }, { id: 'lasso-mag', icon: 'lasso-mag' }, { id: 'wand', icon: 'wand' }],
   [{ id: 'objectselect', icon: 'objectselect' }, { id: 'hoverselect', icon: 'hoverselect' }],
+  [{ id: 'aiinsert', icon: 'spark' }],
   [{ id: 'crop', icon: 'crop' }],
   [{ id: 'eyedropper', icon: 'eyedropper' }],
   [{ id: 'heal', icon: 'heal' }, { id: 'clone', icon: 'clone' }, { id: 'redeye', icon: 'redeye' }],
   [{ id: 'brush', icon: 'brush' }, { id: 'pencil', icon: 'pencil' }, { id: 'eraser', icon: 'eraser' }],
   [{ id: 'bucket', icon: 'bucket' }, { id: 'gradient', icon: 'gradient' }],
   [{ id: 'dodge', icon: 'dodge' }, { id: 'burn', icon: 'burn' }, { id: 'sponge', icon: 'sponge' }],
+  [{ id: 'pen', icon: 'pen' }],
   [{ id: 'rect', icon: 'rect' }, { id: 'ellipse', icon: 'ellipse' }, { id: 'line', icon: 'line' }, { id: 'triangle', icon: 'triangle' }, { id: 'polygon', icon: 'polygon' }, { id: 'star', icon: 'star' }],
   [{ id: 'type', icon: 'type' }],
 ];
+// Inverse of TOOL_KEYS (letter -> tool) from keybindings.js, so the rail's tooltip and flyout show
+// the SAME shortcut the keydown handler actually honors — one source of truth, no drift.
+const TOOL_SHORTCUT = {};
+Object.entries(TOOL_KEYS).forEach(([key, id]) => { TOOL_SHORTCUT[id] = key.toUpperCase(); });
+/* Photoshop-style tool-cycling: pressing a group's letter again (while already on a tool in that
+   group) advances to the NEXT sibling instead of doing nothing — the only way multi-tool groups
+   like marquee/marquee-ellipse/lasso/lasso-poly/lasso-mag (all sharing 'M'/'L'/'W' via TOOL_KEYS'
+   primary entry) become keyboard-reachable at all beyond their first member. installKeybindings()
+   in core only knows the flat letter->primary-tool map (TOOL_KEYS), not sibling grouping — that
+   grouping is UI-owned data (TOOLGROUPS, just above), so cycling lives here rather than in core.
+   Registered on the CAPTURE phase so it runs before installKeybindings' own (bubble-phase, added
+   earlier) listener — otherwise that handler would already have reset ed.tool to the group's
+   primary tool by the time this ran, making the "which sibling comes next" lookup always see index
+   0 and cycling would never advance past the second tool. stopImmediatePropagation() on a
+   successful cycle stops that later handler from then re-jumping back to primary. */
+document.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (ed.fc.getActiveObject()?.isEditing) return;
+  const key = e.key.toLowerCase();
+  const primary = TOOL_KEYS[key]; if (!primary) return;
+  const group = TOOLGROUPS.find(g => g.some(t => t.id === primary));
+  if (!group || group.length < 2) return;
+  const idx = group.findIndex(t => t.id === ed.tool);
+  if (idx < 0) return;   // current tool isn't in this group — let installKeybindings's plain jump-to-primary handle it
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  ed.setTool(group[(idx + 1) % group.length].id);
+}, true);
 const nav = document.getElementById('tools');
 let flyoutGroup = -1;
 function renderRail() {
@@ -592,7 +1006,8 @@ function renderRail() {
     wrap.className = 'rail-group';
     wrap.innerHTML = `<button class="rail-btn" data-on="${on}" data-gi="${gi}">${iconSVG(shown.icon, 18)}${tools.length > 1 ? '<span class="rail-caret"></span>' : ''}</button>`;
     const btn = wrap.querySelector('.rail-btn');
-    btn.addEventListener('mouseenter', () => showTip(btn, TOOL_LABELS[shown.id] || shown.id));
+    const shownLabel = (TOOL_LABELS[shown.id] || shown.id) + (TOOL_SHORTCUT[shown.id] ? '  (' + TOOL_SHORTCUT[shown.id] + ')' : '');
+    btn.addEventListener('mouseenter', () => showTip(btn, shownLabel));
     btn.addEventListener('mouseleave', hideTip);
     btn.addEventListener('click', () => {
       hideTip();
@@ -602,7 +1017,7 @@ function renderRail() {
     if (flyoutGroup === gi) {
       const fly = document.createElement('div');
       fly.className = 'rail-flyout';
-      fly.innerHTML = tools.map(t => `<div class="rail-flyout-item" data-on="${t.id === ed.tool}" data-tool="${t.id}">${iconSVG(t.icon, 15)}<span style="flex:1">${TOOL_LABELS[t.id] || t.id}</span></div>`).join('');
+      fly.innerHTML = tools.map(t => `<div class="rail-flyout-item" data-on="${t.id === ed.tool}" data-tool="${t.id}">${iconSVG(t.icon, 15)}<span style="flex:1">${TOOL_LABELS[t.id] || t.id}</span>${TOOL_SHORTCUT[t.id] ? `<span class="sc">${TOOL_SHORTCUT[t.id]}</span>` : ''}</div>`).join('');
       fly.addEventListener('mouseleave', () => { flyoutGroup = -1; renderRail(); });
       fly.addEventListener('click', e => { const t = e.target.closest('[data-tool]')?.dataset.tool; if (t) { ed.setTool(t); flyoutGroup = -1; renderRail(); } });
       wrap.appendChild(fly);
@@ -630,15 +1045,65 @@ function showTip(btn, text) {
 }
 function hideTip() { if (tipEl) { tipEl.remove(); tipEl = null; } }
 renderRail();
+function penBtns(on) {
+  document.getElementById('pen-actions')?.remove();
+  if (!on) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'pen-actions';
+  wrap.style.cssText = 'display:flex;gap:6px;margin-bottom:8px';
+  wrap.innerHTML = `<button class="act" style="flex:1" id="pen-finish">✓ Finish path</button><button class="act" style="flex:1" id="pen-cancel">Cancel</button>`;
+  document.getElementById('tool-panel').prepend(wrap);
+  wrap.querySelector('#pen-finish').onclick = () => ed.finishPen();
+  wrap.querySelector('#pen-cancel').onclick = () => ed.cancelPen();
+}
 ed.on('tool', t => {
   renderRail();
   cropBtn(t === 'crop');
+  penBtns(t === 'pen');
   document.getElementById('tool-icon').innerHTML = iconSVG(t);
   document.getElementById('tool-name').textContent = t;
   document.getElementById('tool-hint').textContent = TOOL_HINTS[t] || 'Drag on the canvas to use this tool.';
   document.getElementById('gradient-section').style.display = t === 'gradient' ? '' : 'none';
+  document.getElementById('objselect-section').style.display = (t === 'objectselect' || t === 'hoverselect') ? '' : 'none';
 });
 ed._emit('tool', ed.tool);   // initial paint of the Tool panel
+
+/* ── object/hover select: live status line, sticky Add-mode, and a visible Tolerance slider —
+   ditto's Tool panel shows this inline instead of burying it in a generic "Selection" section, so
+   the live "click to select" / "Selected object" / busy feedback stays right where the user is
+   looking. Expand/Contract/Similar/Recolor stay in the shared Selection section below (they work
+   identically for every pixel-selection tool, not just these two) rather than duplicating buttons. */
+const objselectStatus = document.getElementById('objselect-status');
+const objselectAddBtn = document.getElementById('objselect-add');
+const objselectTolerance = document.getElementById('objselect-tolerance');
+let objselectBusy = false;
+function refreshObjselectStatus() {
+  objselectAddBtn.innerHTML = iconSVG('spark', 12) + '<span>Add' + (ed.toolOpts.addMode ? ' ✓' : '') + '</span>';
+  objselectAddBtn.dataset.on = String(ed.toolOpts.addMode);
+  objselectTolerance.value = ed.toolOpts.tolerance;
+  if (ed.tool !== 'objectselect' && ed.tool !== 'hoverselect') return;
+  const n = ed.selection ? selectionPolys(ed.selection).length : 0;
+  objselectStatus.textContent = objselectBusy ? 'Finding object…'
+    : n > 1 ? n + ' selected · ⇧-click (or Add) to keep combining'
+    : n === 1 ? 'Selected · ⇧-click to add more, ⌥-click to subtract'
+    : (ed.tool === 'hoverselect' ? 'Hover to preview, click to select' : 'Click an object to select it');
+}
+objselectAddBtn.onclick = () => { ed.setToolOptions({ addMode: !ed.toolOpts.addMode }); refreshObjselectStatus(); };
+objselectTolerance.oninput = () => ed.setToolOptions({ tolerance: +objselectTolerance.value });
+ed.on('tooloptions', refreshObjselectStatus);
+ed.on('selection', refreshObjselectStatus);
+ed.on('tool', refreshObjselectStatus);
+ed.on('hover', () => { if (objselectBusy) { objselectBusy = false; refreshObjselectStatus(); } });
+// wandPick/_hoverMove don't currently emit a busy/idle event of their own — approximate "busy" as
+// "mouse down on objectselect/hoverselect, no cached mask" so the status line reflects the async
+// cv round-trip instead of sitting on stale text while a click's grabCut/flood-fill is in flight.
+ed.fc.on('mouse:down', () => {
+  if (ed.tool !== 'objectselect' && ed.tool !== 'hoverselect') return;
+  objselectBusy = true; refreshObjselectStatus();
+  setTimeout(() => { if (objselectBusy) { objselectBusy = false; refreshObjselectStatus(); } }, 4000);   // safety timeout, not a real cap on cv latency
+});
+ed.on('error', () => { objselectBusy = false; refreshObjselectStatus(); });
+refreshObjselectStatus();
 
 /* ── gradient tool options: type (linear/radial) + a stop list (add/remove/recolor/reposition) ──
    Stops live on ed.toolOpts.gradientStops/gradientType (read by Editor#_move's live preview and
@@ -685,13 +1150,37 @@ document.getElementById('grad-add-stop').onclick = () => {
 };
 ed.on('tooloptions', () => { if (ed.tool === 'gradient') renderGradientStops(); });
 renderGradientStops();
+const CROP_RATIOS = [['Free', 0], ['Original', 'orig'], ['1:1', 1], ['4:5', 4 / 5], ['3:2', 3 / 2], ['16:9', 16 / 9], ['9:16', 9 / 16]];
 function cropBtn(on) {
   document.getElementById('applycrop')?.remove();
+  document.getElementById('crop-ratios')?.remove();
   if (on) {
+    const ratios = document.createElement('div');
+    ratios.id = 'crop-ratios';
+    ratios.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px';
+    ratios.innerHTML = CROP_RATIOS.map(([label]) => `<button class="chip" data-label="${label}">${label}</button>`).join('');
+    const syncRatioChips = () => {
+      const cur = ed.toolOpts.cropRatio || 0;
+      ratios.querySelectorAll('button').forEach(btn => {
+        const [, r] = CROP_RATIOS.find(([l]) => l === btn.dataset.label);
+        btn.dataset.on = String(r === 'orig' ? cur === (ed.W / ed.H) : cur === r);
+      });
+    };
+    ratios.addEventListener('click', e => {
+      const label = e.target.closest('button')?.dataset.label; if (!label) return;
+      const [, r] = CROP_RATIOS.find(([l]) => l === label);
+      const ratio = r === 'orig' ? ed.W / ed.H : r;
+      ed.setToolOptions({ cropRatio: ratio });
+      syncRatioChips();
+    });
+    syncRatioChips();
+    document.getElementById('tool-panel').prepend(ratios);
     const b = document.createElement('button');
     b.id = 'applycrop'; b.className = 'act'; b.innerHTML = '✓ Apply crop';
     b.onclick = () => ed.applyCrop();
     document.getElementById('tool-panel').prepend(b);
+  } else {
+    ed.setToolOptions({ cropRatio: 0 });
   }
 }
 
@@ -703,17 +1192,80 @@ ed.on('tooloptions', o => { col.value = /^#([0-9a-f]{6})$/i.test(o.color) ? o.co
 undo.innerHTML = iconSVG('undo'); redo.innerHTML = iconSVG('redo');
 undo.onclick = () => ed.undo(); redo.onclick = () => ed.redo();
 ed.on('history', h => { undo.disabled = h.past < 2; redo.disabled = !h.future; });
+document.getElementById('cmdk-open').innerHTML = iconSVG('search', 13) + '<span style="color:var(--dim);font-size:11.5px">Search</span><span class="tag mono" style="font-size:9.5px">⌘K</span>';
+document.getElementById('cmdk-open').onclick = () => cmdkOpen();
+
+/* ── Compare: snapshot the canvas the first time it's ever committed to (i.e. right after the
+   first image/element lands), then let the user flip back to that snapshot vs. the live render
+   at any point — canvasmith has no fixed "original ad template" the way the reference does, so
+   "first meaningful state" is the closest general equivalent. ─────────────────────────────── */
+const compareBtn = document.getElementById('compare-btn');
+compareBtn.innerHTML = iconSVG('search', 13) + '<span>Compare</span>';
+let _compareSnapshot = null;
+ed.on('change', () => { if (!_compareSnapshot) { _compareSnapshot = ed.exportPNG(); compareBtn.disabled = false; } });
+const compareBackdrop = document.getElementById('compare-backdrop');
+document.getElementById('compare-close').innerHTML = iconSVG('close', 14) + '<span>Close</span>';
+function openCompare() {
+  if (!_compareSnapshot) return;
+  document.getElementById('compare-img-before').src = _compareSnapshot;
+  document.getElementById('compare-img-after').src = ed.exportPNG();
+  compareBackdrop.hidden = false;
+}
+function closeCompare() { compareBackdrop.hidden = true; }
+compareBtn.onclick = openCompare;
+document.getElementById('compare-close').onclick = closeCompare;
+compareBackdrop.addEventListener('click', e => { if (e.target === compareBackdrop) closeCompare(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !compareBackdrop.hidden) closeCompare(); });
 
 /* ── canvas size popover: resizes the artboard boundary (Editor#resizeCanvas), not the content ── */
 const csBtn = document.getElementById('canvas-size-btn'), csPop = document.getElementById('canvas-size-pop');
 const csW = document.getElementById('cs-w'), csH = document.getElementById('cs-h'), csLock = document.getElementById('cs-lock');
+const csPreset = document.getElementById('cs-preset');
 let csRatio = ed.W / ed.H;
+
+/* Standard presets, grouped by use-case — width/height in px at a nominal 72–96dpi-ish "design
+   pixel" scale (matches how every web design tool treats these, not print-accurate 300dpi). */
+const CANVAS_PRESETS = [
+  ['Social', [
+    ['Instagram post (1:1)', 1080, 1080],
+    ['Instagram story (9:16)', 1080, 1920],
+    ['Facebook cover', 820, 312],
+    ['Twitter/X post', 1200, 675],
+    ['YouTube thumbnail', 1280, 720],
+    ['LinkedIn banner', 1584, 396],
+  ]],
+  ['Print', [
+    ['A4 portrait', 2480, 3508],
+    ['A4 landscape', 3508, 2480],
+    ['US Letter portrait', 2550, 3300],
+    ['US Letter landscape', 3300, 2550],
+  ]],
+  ['Screen', [
+    ['HD (720p)', 1280, 720],
+    ['Full HD (1080p)', 1920, 1080],
+    ['4K UHD', 3840, 2160],
+  ]],
+];
+for (const [group, sizes] of CANVAS_PRESETS) {
+  const og = document.createElement('optgroup'); og.label = group;
+  for (const [name, w, h] of sizes) {
+    const opt = document.createElement('option');
+    opt.value = `${w}x${h}`; opt.textContent = `${name} — ${w}×${h}`;
+    og.appendChild(opt);
+  }
+  csPreset.appendChild(og);
+}
+csPreset.onchange = () => {
+  if (!csPreset.value) return;
+  const [w, h] = csPreset.value.split('x').map(Number);
+  csW.value = w; csH.value = h; csRatio = w / h;
+};
 csBtn.onclick = () => {
-  csW.value = ed.W; csH.value = ed.H; csRatio = ed.W / ed.H;
+  csW.value = ed.W; csH.value = ed.H; csRatio = ed.W / ed.H; csPreset.value = '';
   csPop.hidden = !csPop.hidden;
 };
-csW.oninput = () => { if (csLock.checked) csH.value = Math.round(+csW.value / csRatio) || ''; };
-csH.oninput = () => { if (csLock.checked) csW.value = Math.round(+csH.value * csRatio) || ''; };
+csW.oninput = () => { csPreset.value = ''; if (csLock.checked) csH.value = Math.round(+csW.value / csRatio) || ''; };
+csH.oninput = () => { csPreset.value = ''; if (csLock.checked) csW.value = Math.round(+csH.value * csRatio) || ''; };
 document.getElementById('cs-cancel').onclick = () => { csPop.hidden = true; };
 document.getElementById('cs-apply').onclick = () => {
   const w = +csW.value, h = +csH.value;
@@ -724,6 +1276,57 @@ document.addEventListener('click', e => {
   if (!csPop.hidden && !csPop.contains(e.target) && e.target !== csBtn) csPop.hidden = true;
 });
 png.onclick = () => { const a = document.createElement('a'); a.href = ed.exportPNG(); a.download = 'canvasmith.png'; a.click(); };
+jpg.onclick = () => { const a = document.createElement('a'); a.href = ed.exportJPEG(); a.download = 'canvasmith.jpg'; a.click(); };
+
+/* ── zoom pill + dimension badge ──────────────────────────────────────────────────────────
+   Fabric's canvas element keeps its DOM size fixed at W×H; "zoom" is purely the viewport
+   transform's scale, applied around the stage's own center — same model as the reference
+   editor's floating zoom bar. Fit-to-screen picks the largest scale that keeps the whole
+   artboard inside the stage (minus a little breathing room), then re-centers the pan. */
+const stageEl = document.getElementById('stage');
+const zoomPctBtn = document.getElementById('zoom-pct');
+document.getElementById('zoom-out').innerHTML = iconSVG('minus', 14);
+document.getElementById('zoom-in').innerHTML = iconSVG('plus', 14);
+document.getElementById('zoom-fit').innerHTML = iconSVG('maximize', 14);
+function setZoomAtCenter(z) {
+  z = Math.min(5, Math.max(0.1, z));
+  const cx = stageEl.clientWidth / 2, cy = stageEl.clientHeight / 2;
+  ed.fc.zoomToPoint({ x: cx, y: cy }, z);
+  ed.fc.requestRenderAll();
+  refreshZoomUI();
+}
+function fitToScreen() {
+  const pad = 48;
+  const availW = Math.max(50, stageEl.clientWidth - pad), availH = Math.max(50, stageEl.clientHeight - pad);
+  const z = Math.min(2, Math.max(0.05, Math.min(availW / ed.W, availH / ed.H)));
+  ed.fc.setZoom(z);
+  const vpt = ed.fc.viewportTransform.slice();
+  vpt[4] = (stageEl.clientWidth - ed.W * z) / 2;
+  vpt[5] = (stageEl.clientHeight - ed.H * z) / 2;
+  ed.fc.setViewportTransform(vpt);
+  ed.fc.requestRenderAll();
+  refreshZoomUI();
+}
+function refreshZoomUI() {
+  zoomPctBtn.textContent = Math.round((ed.fc.getZoom() || 1) * 100) + '%';
+  document.getElementById('dim-badge').textContent = ed.W + '×' + ed.H;
+}
+document.getElementById('zoom-out').onclick = () => setZoomAtCenter(ed.fc.getZoom() * 0.83);
+document.getElementById('zoom-in').onclick = () => setZoomAtCenter(ed.fc.getZoom() * 1.2);
+document.getElementById('zoom-fit').onclick = fitToScreen;
+zoomPctBtn.onclick = fitToScreen;
+ed.on('zoom', refreshZoomUI);
+ed.on('resize', () => { fitToScreen(); });
+window.addEventListener('resize', () => refreshZoomUI());
+requestAnimationFrame(fitToScreen);
+document.addEventListener('keydown', e => {
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === '+' || e.key === '=') { e.preventDefault(); setZoomAtCenter(ed.fc.getZoom() * 1.2); }
+  else if (e.key === '-') { e.preventDefault(); setZoomAtCenter(ed.fc.getZoom() * 0.83); }
+  else if (e.key === '0') { e.preventDefault(); fitToScreen(); }
+});
 svg.onclick = () => {
   const blob = new Blob([ed.exportSVG()], { type: 'image/svg+xml' });
   const url = URL.createObjectURL(blob);
@@ -731,16 +1334,42 @@ svg.onclick = () => {
   URL.revokeObjectURL(url);
 };
 
-/* ── sidebar tabs + collapse ──────────────────────────────────────────── */
-const tabBtns = document.querySelectorAll('.tabs button');
-tabBtns[0].innerHTML = iconSVG('tool') + '<span>Tool</span>';
-tabBtns[1].innerHTML = iconSVG('layerstab') + '<span>Layers</span>';
-document.querySelector('.tabs').addEventListener('click', e => {
+/* ── sidebar tabs + collapse ──────────────────────────────────────────────────────────────
+   Two independent tab bars, matching the reference editor's split: LEFT keeps Tool/Layers (the
+   active tool's options, and the layer list) so they stay next to the canvas at all times; RIGHT
+   holds Layer(=Properties)/Design/Stickers/AI — everything that's about WHAT you're adding or
+   editing rather than HOW you're interacting with the canvas right now. */
+const leftTabBtns = document.querySelectorAll('#left-tabs button');
+leftTabBtns[0].innerHTML = iconSVG('tool') + '<span>Tool</span>';
+leftTabBtns[1].innerHTML = iconSVG('layerstab') + '<span>Layers</span>';
+const LEFT_TAB_PANELS = { tool: 'tool-panel', layers: 'layers-panel' };
+document.getElementById('left-tabs').addEventListener('click', e => {
   const btn = e.target.closest('button'); if (!btn) return;
   const tab = btn.dataset.tab;
-  tabBtns.forEach(b => b.dataset.on = String(b === btn));
-  document.getElementById('tool-panel').style.display = tab === 'tool' ? '' : 'none';
-  document.getElementById('layers-panel').style.display = tab === 'layers' ? 'flex' : 'none';
+  leftTabBtns.forEach(b => b.dataset.on = String(b === btn));
+  Object.entries(LEFT_TAB_PANELS).forEach(([t, id]) => {
+    document.getElementById(id).style.display = t === tab ? (t === 'tool' ? '' : 'flex') : 'none';
+  });
+  refreshLeftScrollCue();
+});
+
+const rightTabBtns = document.querySelectorAll('#right-tabs button');
+rightTabBtns[0].innerHTML = iconSVG('layerstab') + '<span>Layer</span>';
+rightTabBtns[1].innerHTML = iconSVG('palette') + '<span>Design</span>';
+rightTabBtns[2].innerHTML = iconSVG('star') + '<span>Stickers</span>';
+rightTabBtns[3].innerHTML = iconSVG('spark') + '<span>AI</span>';
+const RIGHT_TAB_PANELS = { layer: 'layer-panel', design: 'design-panel', stickers: 'stickers-panel', ai: 'ai-panel' };
+function setRightTab(tab) {
+  const btn = Array.from(rightTabBtns).find(b => b.dataset.tab === tab); if (!btn) return;
+  rightTabBtns.forEach(b => b.dataset.on = String(b === btn));
+  Object.entries(RIGHT_TAB_PANELS).forEach(([t, id]) => {
+    document.getElementById(id).style.display = t === tab ? (t === 'layer' ? '' : 'flex') : 'none';
+  });
+  refreshRightScrollCue();
+}
+document.getElementById('right-tabs').addEventListener('click', e => {
+  const btn = e.target.closest('button'); if (!btn) return;
+  setRightTab(btn.dataset.tab);
 });
 const mainEl = document.querySelector('main');
 const collapseLeftBtn = document.getElementById('collapse-left');
@@ -750,7 +1379,7 @@ collapseLeftBtn.onclick = () => {
   leftCollapsed = !leftCollapsed;
   mainEl.dataset.leftCollapsed = String(leftCollapsed);
   collapseLeftBtn.dataset.flip = String(leftCollapsed);
-  collapseLeftBtn.title = leftCollapsed ? 'Show Tool/Layers panel' : 'Hide Tool/Layers panel';
+  collapseLeftBtn.title = leftCollapsed ? 'Show side panel' : 'Hide side panel';
 };
 const collapseRightBtn = document.getElementById('collapse-right');
 collapseRightBtn.innerHTML = iconSVG('chevron', 10);
@@ -762,6 +1391,19 @@ collapseRightBtn.onclick = () => {
   collapseRightBtn.dataset.flip = String(!rightCollapsed);
   collapseRightBtn.title = rightCollapsed ? 'Show Properties panel' : 'Hide Properties panel';
 };
+// Tab: Photoshop-style — hide/show BOTH side panels together for a bigger canvas. Driven by
+// whichever panel is currently open (both-hidden -> both-shown; anything else -> both-hidden),
+// same "not both visible = collapsed" read the toolbar buttons already use individually.
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (ed.fc.getActiveObject()?.isEditing) return;
+  e.preventDefault();
+  const showBoth = leftCollapsed && rightCollapsed;
+  if (leftCollapsed !== !showBoth) collapseLeftBtn.onclick();
+  if (rightCollapsed !== !showBoth) collapseRightBtn.onclick();
+});
 
 /* ── snap toggle, align, duplicate ────────────────────────────────────── */
 const snapBtn = document.getElementById('snap-toggle');
@@ -830,12 +1472,30 @@ recolorBtn.innerHTML = iconSVG('eyedropper') + '<span>Recolor selection…</span
 recolorBtn.onclick = () => recolorInput.click();
 recolorInput.oninput = () => { recolorInput.style.display = ''; };
 recolorInput.onchange = e => { const id = ed.recolorSelection(e.target.value); if (!id) selMsg.textContent = 'Make a selection first.'; else selMsg.textContent = ''; recolorInput.style.display = 'none'; };
+
+/* ── clip / un-clip the active layer to the current selection — non-destructive: hides pixels
+   outside the selection via a clipPath, doesn't touch layer size/position/data, fully reversed
+   by "Clear clip" or by clipping to a new selection. Needs BOTH an active layer and a selection,
+   unlike Expand/Contract/Select similar/Recolor which only need a selection. ──────────────────── */
+const clipBtn = document.getElementById('sel-clip'); clipBtn.innerHTML = iconSVG('crop', 13) + '<span>Clip layer to selection</span>';
+const unclipBtn = document.getElementById('sel-unclip'); unclipBtn.innerHTML = iconSVG('close', 13) + '<span>Clear clip</span>';
+clipBtn.onclick = () => {
+  if (!ed.fc.getActiveObject()) { selMsg.textContent = 'Select a layer to clip first.'; return; }
+  ed.clipLayerToSelection(); selMsg.textContent = '';
+};
+unclipBtn.onclick = () => {
+  if (!ed.fc.getActiveObject()) { selMsg.textContent = 'Select a layer first.'; return; }
+  ed.clearLayerClip(); selMsg.textContent = '';
+};
+
 const refreshSelButtons = () => {
   const has = !!ed.selection;
-  [expBtn, conBtn, simBtn, recolorBtn].forEach(b => b.disabled = !has);
+  [expBtn, conBtn, simBtn, recolorBtn, clipBtn].forEach(b => b.disabled = !has);
+  unclipBtn.disabled = !ed.fc.getActiveObject();
   selMsg.textContent = has ? '' : 'Draw a marquee/lasso selection first — for a text or shape layer’s colour, use Fill in Properties instead.';
 };
 ed.on('selection', refreshSelButtons);
+ed.on('change', refreshSelButtons);
 refreshSelButtons();
 
 /* ── layer shadow ───────────────────────────────────────────────────────────────────────── */
@@ -911,10 +1571,37 @@ const layerOpacity = document.getElementById('layer-opacity');
 layerOpacity.oninput = () => { const a = ed.layers().find(l => l.active); if (a) ed.setLayer(a.id, { opacity: +layerOpacity.value }); };
 
 /* ── typography ───────────────────────────────────────────────────────────────────────────── */
-const txFont = document.getElementById('tx-font');
-txFont.innerHTML = FONT_GROUPS.map(g => `<optgroup label="${g.label}">${
-  g.fonts.map(([label, value]) => `<option value="${value.replace(/"/g, '&quot;')}">${label}</option>`).join('')
-}</optgroup>`).join('');
+/* Custom font picker — a popover list where every row renders in ITS OWN font (name + a live "Ag"
+   specimen), so choosing a font means seeing what it looks like first, unlike a native <select>
+   (whose <option>s always render in the browser's default list font regardless of any fontFamily
+   style put on them). `txFont` keeps a .value/.onchange shape so the rest of this file's
+   read-txFont-like-an-<input> code (refreshPropsPanel, the [disabled] toggle list) doesn't change. */
+const txFontBtn = document.getElementById('tx-font-btn'), txFontCurrent = document.getElementById('tx-font-current');
+const txFontPop = document.getElementById('tx-font-pop');
+document.getElementById('tx-font-caret').innerHTML = iconSVG('chevronD', 13);
+const txFont = { value: '', onchange: null, disabled: false };
+function fontLabelFor(value) {
+  for (const g of FONT_GROUPS) { const f = g.fonts.find(([, v]) => v === value); if (f) return f[0]; }
+  return value || 'Choose a font…';
+}
+function renderFontPop() {
+  txFontPop.innerHTML = FONT_GROUPS.map(g => `<div class="font-grp-label">${g.label}</div>` +
+    g.fonts.map(([label, value]) => `<div class="font-item" data-on="${value === txFont.value}" data-value="${value.replace(/"/g, '&quot;')}">
+      <span class="nm" style="font-family:${value}">${label}</span><span class="ag" style="font-family:${value}">Ag</span>
+    </div>`).join('')).join('');
+}
+txFontBtn.onclick = () => { if (txFont.disabled) return; renderFontPop(); txFontPop.hidden = !txFontPop.hidden; };
+txFontPop.addEventListener('click', e => {
+  const item = e.target.closest('.font-item'); if (!item) return;
+  txFont.value = item.dataset.value;
+  txFontCurrent.textContent = fontLabelFor(txFont.value);
+  txFontCurrent.style.fontFamily = txFont.value;
+  txFontPop.hidden = true;
+  if (txFont.onchange) txFont.onchange();
+});
+document.addEventListener('click', e => {
+  if (!txFontPop.hidden && !txFontPop.contains(e.target) && e.target !== txFontBtn && !txFontBtn.contains(e.target)) txFontPop.hidden = true;
+});
 const txSize = document.getElementById('tx-size'), txWeight = document.getElementById('tx-weight');
 const txItalic = document.getElementById('tx-italic'), txUnderline = document.getElementById('tx-underline'), txStrike = document.getElementById('tx-strike');
 const txAlignLeft = document.getElementById('tx-align-left'), txAlignCenter = document.getElementById('tx-align-center'), txAlignRight = document.getElementById('tx-align-right');
@@ -937,6 +1624,14 @@ const xfW = document.getElementById('xf-w'), xfH = document.getElementById('xf-h
 const xfFill = document.getElementById('xf-fill');
 xfFill.oninput = () => ed.setFill(xfFill.value);
 
+/* ── Border (stroke) + corner radius ──────────────────────────────────────────────────────── */
+const xfStrokeWidth = document.getElementById('xf-strokewidth'), xfStroke = document.getElementById('xf-stroke');
+const borderColorRow = document.getElementById('border-color-row');
+xfStrokeWidth.oninput = () => { ed.setStroke({ width: +xfStrokeWidth.value }); borderColorRow.style.display = +xfStrokeWidth.value > 0 ? 'flex' : 'none'; paintRangeFill(xfStrokeWidth); };
+xfStroke.oninput = () => ed.setStroke({ color: xfStroke.value });
+const xfRx = document.getElementById('xf-rx');
+xfRx.oninput = () => { ed.setNumeric({ rx: +xfRx.value }); paintRangeFill(xfRx); };
+
 /* ── Fill: Solid/Gradient toggle + gradient-fill stop editor ─────────────────────────────────
    Reuses the same {offset,color} stop shape as the paint-tool gradient, applied via
    ed.setShapeGradient() instead of paintGradient() — the shape keeps its own gradient (read back
@@ -946,7 +1641,7 @@ const fillSolidEl = document.getElementById('fill-solid'), fillGradientEl = docu
 const fgTypeLinear = document.getElementById('fg-type-linear'), fgTypeRadial = document.getElementById('fg-type-radial');
 const fgAngleRow = document.getElementById('fg-angle-row'), fgAngle = document.getElementById('fg-angle');
 const fgStopsEl = document.getElementById('fg-stops');
-let fgState = { type: 'linear', angle: 0, stops: [{ offset: 0, color: '#d4ff45' }, { offset: 1, color: '#7c3aed' }] };
+let fgState = { type: 'linear', angle: 0, stops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }] };
 function applyFgState() { ed.setShapeGradient(fgState.stops, fgState.type, fgState.angle); }
 function renderFgStops() {
   fgTypeLinear.dataset.on = String(fgState.type === 'linear');
@@ -1023,7 +1718,10 @@ function refreshPropsPanel() {
   const tx = ed.getTextProps();
   document.getElementById('typography-section').style.display = tx ? '' : 'none';
   if (tx) {
-    txFont.value = tx.fontFamily; txSize.value = tx.fontSize; txWeight.value = tx.fontWeight;
+    txFont.value = tx.fontFamily;
+    txFontCurrent.textContent = fontLabelFor(txFont.value);
+    txFontCurrent.style.fontFamily = txFont.value;
+    txSize.value = tx.fontSize; txWeight.value = tx.fontWeight;
     txItalic.dataset.active = String(tx.fontStyle === 'italic');
     txUnderline.dataset.active = String(tx.underline);
     txStrike.dataset.active = String(tx.linethrough);
@@ -1031,7 +1729,8 @@ function refreshPropsPanel() {
     ({ left: txAlignLeft, center: txAlignCenter, right: txAlignRight }[tx.textAlign] || txAlignLeft).dataset.active = 'true';
     txLineHeight.value = tx.lineHeight; txSpacing.value = tx.charSpacing;
   }
-  [txFont, txSize, txWeight, txItalic, txUnderline, txStrike, txAlignLeft, txAlignCenter, txAlignRight, txLineHeight, txSpacing].forEach(el => el.disabled = !tx);
+  txFont.disabled = !tx; txFontBtn.disabled = !tx;
+  [txSize, txWeight, txItalic, txUnderline, txStrike, txAlignLeft, txAlignCenter, txAlignRight, txLineHeight, txSpacing].forEach(el => el.disabled = !tx);
   // Fill only applies to fillable vector shapes/text — hide it for images, paint strokes, lines
   // (coloured via stroke, not fill) and anything with no fill to show at all (flat colour OR a
   // Fabric gradient object both count as "has a fill").
@@ -1051,6 +1750,19 @@ function refreshPropsPanel() {
     else if (solidFill) xfFill.value = fillTarget.fill.length === 4
       ? '#' + [...fillTarget.fill.slice(1)].map(c => c + c).join('') : fillTarget.fill;
   }
+  // Border applies to any fillable/strokeable vector shape or line — not images or paint strokes.
+  const hasBorder = !!fillTarget && !isImage && fillTarget.role !== 'paint';
+  document.getElementById('border-section').style.display = hasBorder ? '' : 'none';
+  if (hasBorder) {
+    xfStrokeWidth.value = Math.round(fillTarget.strokeWidth || 0);
+    borderColorRow.style.display = fillTarget.strokeWidth > 0 ? 'flex' : 'none';
+    if (fillTarget.stroke && typeof fillTarget.stroke === 'string') xfStroke.value = fillTarget.stroke.length === 4
+      ? '#' + [...fillTarget.stroke.slice(1)].map(c => c + c).join('') : fillTarget.stroke;
+  }
+  // Corner radius only makes sense on a rectangle.
+  const isRect = !!fillTarget && fillTarget.type === 'rect';
+  document.getElementById('radius-section').style.display = isRect ? '' : 'none';
+  if (isRect) xfRx.value = Math.round(fillTarget.rx || 0);
   blendSel.value = o ? (o.globalCompositeOperation || 'source-over') : 'source-over';
   layerOpacity.value = o && o.opacity != null ? o.opacity : 1;
   blendSel.disabled = layerOpacity.disabled = !o;
@@ -1070,7 +1782,7 @@ function refreshPropsPanel() {
   groupBtn.disabled = !(o && o.type === 'activeSelection');
   ungroupBtn.disabled = !(o && o.type === 'group');
   [document.getElementById('stack-top'), document.getElementById('stack-up'), document.getElementById('stack-down'), document.getElementById('stack-bottom')].forEach(el => el.disabled = !o);
-  [layerOpacity, xfAngle, shadowBlur, adjBrightness, adjContrast, adjSaturate, adjBlur, txLineHeight, txSpacing].forEach(paintRangeFill);
+  [layerOpacity, xfAngle, shadowBlur, adjBrightness, adjContrast, adjSaturate, adjBlur, txLineHeight, txSpacing, xfStrokeWidth, xfRx].forEach(paintRangeFill);
 }
 ed.on('change', refreshPropsPanel);
 ed.fc.on('selection:created', refreshPropsPanel);
@@ -1110,13 +1822,18 @@ function layerSubtitle(l) {
   const h = Math.round(o.getScaledHeight ? o.getScaledHeight() : (o.height || 0));
   return w && h ? `${w}×${h} ${l.role}` : l.role;
 }
+let _dragLayerId = null, _dragOverId = null, _renamingId = null, _lastLayerClick = null;
 const renderLayers = () => {
   _thumbVer++;
   panel.innerHTML = ed.layers().map(l => {
     const thumb = layerThumb(l.id);
-    return `<div class="layer" data-id="${l.id}" data-on="${l.active}" data-visible="${l.visible}">
+    const nameHtml = _renamingId === l.id
+      ? `<input class="layer-rename" data-id="${l.id}" value="${l.name.replace(/"/g, '&quot;')}">`
+      : `<span class="nm">${l.name}</span>`;
+    return `<div class="layer" data-id="${l.id}" data-on="${l.active}" data-visible="${l.visible}"
+        draggable="${l.role !== 'bg'}" data-dragover="${_dragOverId === l.id}" data-dragging="${_dragLayerId === l.id}">
        <div class="layer-thumb">${thumb ? `<img src="${thumb}" alt="">` : iconSVG(l.role === 'text' ? 'type' : l.role === 'bg' ? 'image' : 'box', 14)}</div>
-       <div class="layer-meta"><span class="nm">${l.name}</span><span class="sub">${layerSubtitle(l)}</span></div>
+       <div class="layer-meta">${nameHtml}<span class="sub">${layerSubtitle(l)}</span></div>
        <div class="layer-actions">
          <button data-act="up" title="Move up">${iconSVG('up', 12)}</button>
          <button data-act="lock" title="${l.locked ? 'Unlock' : 'Lock'}" data-active="${l.locked}">${iconSVG('lock', 12)}</button>
@@ -1128,7 +1845,16 @@ const renderLayers = () => {
          ${l.role !== 'bg' ? `<button data-act="del" title="Delete">${iconSVG('close', 12)}</button>` : ''}
        </div></div>`;
   }).join('');
+  if (_renamingId) {
+    const input = panel.querySelector('.layer-rename');
+    if (input) { input.focus(); input.select(); }
+  }
 };
+function commitRename(id, value) {
+  _renamingId = null;
+  const v = value.trim();
+  if (v) ed.setLayer(id, { name: v }); else renderLayers();
+}
 panel.addEventListener('click', e => {
   const row = e.target.closest('.layer'); if (!row) return;
   const id = row.dataset.id, act = e.target.closest('[data-act]')?.dataset.act;
@@ -1143,8 +1869,55 @@ panel.addEventListener('click', e => {
     if (l.editingMask) ed.exitMaskEdit();
     else { ed.activate(id); ed.enterMaskEdit(id); }
   }
-  else if (!act) ed.activate(id);
+  else if (!act && !e.target.closest('.layer-rename')) {
+    // Manual double-click detection keyed on the layer id rather than the DOM node: activate()
+    // re-renders the panel (a fresh <div> per row) whenever selection actually changes, so a
+    // native 'dblclick' — which requires both clicks to land on the SAME node — would silently
+    // never fire for the (very common) "click an unselected layer, then again to rename" gesture.
+    const now = Date.now();
+    if (_lastLayerClick && _lastLayerClick.id === id && now - _lastLayerClick.t < 400) {
+      _renamingId = id; renderLayers(); _lastLayerClick = null; return;
+    }
+    _lastLayerClick = { id, t: now };
+    if (!l.active) ed.activate(id);
+  }
 });
+panel.addEventListener('keydown', e => {
+  if (!e.target.classList.contains('layer-rename')) return;
+  if (e.key === 'Enter') commitRename(e.target.dataset.id, e.target.value);
+  else if (e.key === 'Escape') { _renamingId = null; renderLayers(); }
+});
+panel.addEventListener('blur', e => {
+  if (e.target.classList.contains('layer-rename')) commitRename(e.target.dataset.id, e.target.value);
+}, true);
+/* Drag-to-reorder: dropping row A onto row B places A directly above B in the panel (i.e. just
+   in front of it in the stack) — background layer is neither draggable nor a drop target. */
+panel.addEventListener('dragstart', e => {
+  const row = e.target.closest('.layer[draggable=true]'); if (!row) return;
+  _dragLayerId = row.dataset.id;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', _dragLayerId);
+  // Re-rendering here (replacing the very node mid-drag) would abort a real browser drag — the
+  // dimmed "dragging" look is applied as a live style tweak instead, deferred a tick so it takes
+  // effect after the browser has captured its drag image from the row's pre-drag appearance.
+  setTimeout(() => { row.style.opacity = '.4'; }, 0);
+});
+panel.addEventListener('dragover', e => {
+  const row = e.target.closest('.layer'); if (!row || row.dataset.id === _dragLayerId || !_dragLayerId) return;
+  e.preventDefault();
+  if (_dragOverId !== row.dataset.id) { _dragOverId = row.dataset.id; renderLayers(); }
+});
+panel.addEventListener('dragleave', e => {
+  if (!panel.contains(e.relatedTarget)) { _dragOverId = null; renderLayers(); }
+});
+panel.addEventListener('drop', e => {
+  const row = e.target.closest('.layer'); if (!row || !_dragLayerId) return;
+  e.preventDefault();
+  const targetId = row.dataset.id;
+  if (targetId !== _dragLayerId) ed.reorderLayerTo(_dragLayerId, targetId, { after: false });
+  _dragLayerId = null; _dragOverId = null;
+});
+panel.addEventListener('dragend', () => { _dragLayerId = null; _dragOverId = null; renderLayers(); });
 ed.on('change', renderLayers);
 ed.on('maskedit', renderLayers);
 renderLayers();
@@ -1161,7 +1934,7 @@ document.getElementById('add-box').innerHTML = iconSVG('rect', 12) + '<span>Box<
 document.getElementById('add-circle').innerHTML = iconSVG('hoverselect', 12) + '<span>Circle</span>';
 document.getElementById('add-image').innerHTML = iconSVG('image', 12) + '<span>Image</span>';
 document.getElementById('add-paint').innerHTML = iconSVG('layerstab', 12) + '<span>Paint Layer</span>';
-document.getElementById('add-adjustment').innerHTML = iconSVG('contrast', 12) + '<span>Adjustment</span>';
+document.getElementById('add-adjustment').innerHTML = iconSVG('contrast', 13) + '<span>Add adjustment layer</span>';
 const centerPt = () => ({ x: ed.W / 2, y: ed.H / 2 });
 document.getElementById('add-text').onclick = () => {
   const t = makeText(ed.fabric, centerPt(), { fontSize: 48 });
@@ -1179,7 +1952,243 @@ document.getElementById('add-image').onclick = () => file.click();
 document.getElementById('add-paint').onclick = () => ed.setTool('brush');
 document.getElementById('add-adjustment').onclick = () => { ed.addAdjustmentLayer(); };
 
+/* ── Design tab: background/fill tools ────────────────────────────────────────────────── */
+const designMsgEl = document.getElementById('design-msg');
+const designExtendBtn = document.getElementById('design-extend-bg');
+const designAiExtendBtn = document.getElementById('design-ai-extend-bg');
+const designFillColorLabelText = document.getElementById('design-fill-color-label-text');
+const designFillImageBtn = document.getElementById('design-fill-image');
+designExtendBtn.innerHTML = iconSVG('expand', 13) + '<span>Extend background to canvas</span>';
+designAiExtendBtn.innerHTML = iconSVG('spark', 13) + '<span>AI extend background</span>';
+const refreshDesignFillLabels = () => {
+  const region = ed.selection ? 'selection' : 'canvas';
+  designFillColorLabelText.innerHTML = iconSVG('bucket', 13) + `<span>Fill ${region} with colour</span>`;
+  designFillImageBtn.innerHTML = iconSVG('folder', 13) + `<span>Fill ${region} with image</span>`;
+};
+refreshDesignFillLabels();
+ed.on('selection', refreshDesignFillLabels);
+designExtendBtn.onclick = () => {
+  designMsgEl.textContent = ed.extendBackgroundToCanvas() ? '' : 'No background image to extend.';
+};
+designAiExtendBtn.onclick = async () => {
+  const original = designAiExtendBtn.innerHTML;
+  designAiExtendBtn.disabled = true; designAiExtendBtn.innerHTML = `<span class="btn-spin"></span><span>Extending…</span>`;
+  designMsgEl.textContent = '';
+  try {
+    const r = await ed.aiExtendBackground();
+    designMsgEl.textContent = r.status === 'ok' ? 'Applied ✓ (undo to revert)' : (r.message || r.reason);
+  } finally {
+    designAiExtendBtn.disabled = false; designAiExtendBtn.innerHTML = original;
+  }
+};
+document.getElementById('design-fill-color').addEventListener('input', e => { ed.fillWithColor(e.target.value); });
+designFillImageBtn.onclick = () => {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+  inp.onchange = (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const rd = new FileReader();
+    rd.onload = (ev) => ed.fillWithImage(ev.target.result);
+    rd.readAsDataURL(f);
+  };
+  inp.click();
+};
+
+/* ── stickers: category chips + a 4-col grid of recolorable vector shapes (see stickers.js) ──
+   Each grid cell renders the SAME spec the core uses to build the placed layer, so the preview
+   always matches what clicking it actually adds — no separate "icon" asset to keep in sync. */
+function stickerPreviewSVG(key) {
+  const spec = stickerSpec(key); if (!spec) return '';
+  let inner = '';
+  if (spec.kind === 'circle') inner = `<circle cx="50" cy="50" r="${spec.r}" fill="currentColor"/>`;
+  else if (spec.kind === 'rect') inner = `<rect x="${spec.x}" y="${spec.y}" width="${spec.w}" height="${spec.h}" rx="${spec.rx}" fill="currentColor"/>`;
+  else if (spec.kind === 'polygon') inner = `<polygon points="${spec.points}" fill="currentColor"/>`;
+  else if (spec.kind === 'path') inner = spec.stroke
+    ? `<path d="${spec.d}" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>`
+    : `<path d="${spec.d}" fill="currentColor" fill-rule="${spec.fillRule || 'nonzero'}"/>`;
+  return `<svg viewBox="0 0 100 100">${inner}</svg>`;
+}
+let stickerCat = 0;
+const stickerCatsEl = document.getElementById('sticker-cats'), stickerGridEl = document.getElementById('sticker-grid');
+function renderStickerCats() {
+  stickerCatsEl.innerHTML = STICKER_GROUPS.map((g, i) => `<button class="chip" data-on="${i === stickerCat}" data-i="${i}">${g.label}</button>`).join('');
+}
+function renderStickerGrid() {
+  const group = STICKER_GROUPS[stickerCat];
+  stickerGridEl.innerHTML = group.keys.map(k => `<button class="sticker-thumb" data-key="${k}" title="${k}">${stickerPreviewSVG(k)}</button>`).join('');
+}
+stickerCatsEl.addEventListener('click', e => {
+  const i = +(e.target.closest('button')?.dataset.i ?? -1); if (i < 0) return;
+  stickerCat = i; renderStickerCats(); renderStickerGrid();
+});
+stickerGridEl.addEventListener('click', e => {
+  const key = e.target.closest('.sticker-thumb')?.dataset.key; if (!key) return;
+  ed.addSticker(key);
+});
+renderStickerCats(); renderStickerGrid();
+
+/* ── "more below" scroll cues — see #left-scroll-cue's CSS comment for why these exist. Each
+   tracks whichever of ITS panel's tabs is the currently-visible scroll container (only one per
+   panel is ever display:flex/block at a time — see the two tab-switch handlers above) and shows
+   the cue only when that container is both actually scrollable AND not already scrolled to its
+   bottom. Left covers Tool/Layers; right covers Layer/Design/Stickers/AI. ── */
+const leftScrollCue = document.getElementById('left-scroll-cue');
+leftScrollCue.innerHTML = iconSVG('chevronD', 15);
+const leftPanelIds = Object.values(LEFT_TAB_PANELS);
+function activeLeftPanel() {
+  return leftPanelIds.map(id => document.getElementById(id)).find(el => el.style.display !== 'none') || document.getElementById('tool-panel');
+}
+function refreshLeftScrollCue() {
+  const active = activeLeftPanel();
+  const hasMore = active.scrollHeight - active.scrollTop - active.clientHeight > 4;
+  leftScrollCue.dataset.show = String(hasMore);
+}
+leftPanelIds.forEach(id => document.getElementById(id).addEventListener('scroll', refreshLeftScrollCue));
+leftScrollCue.addEventListener('click', () => {
+  activeLeftPanel().scrollBy({ top: activeLeftPanel().clientHeight * 0.8, behavior: 'smooth' });
+});
+new ResizeObserver(refreshLeftScrollCue).observe(document.getElementById('left-panel'));
+document.getElementById('left-tabs').addEventListener('click', () => setTimeout(refreshLeftScrollCue, 0));
+ed.on('change', refreshLeftScrollCue);
+ed.on('tool', refreshLeftScrollCue);
+refreshLeftScrollCue();
+
+const rightScrollCue = document.getElementById('right-scroll-cue');
+rightScrollCue.innerHTML = iconSVG('chevronD', 15);
+const rightPanelIds = Object.values(RIGHT_TAB_PANELS);
+function activeRightPanel() {
+  return rightPanelIds.map(id => document.getElementById(id)).find(el => el.style.display !== 'none') || document.getElementById('layer-panel');
+}
+function refreshRightScrollCue() {
+  const active = activeRightPanel();
+  const hasMore = active.scrollHeight - active.scrollTop - active.clientHeight > 4;
+  rightScrollCue.dataset.show = String(hasMore);
+}
+rightPanelIds.forEach(id => document.getElementById(id).addEventListener('scroll', refreshRightScrollCue));
+rightScrollCue.addEventListener('click', () => {
+  activeRightPanel().scrollBy({ top: activeRightPanel().clientHeight * 0.8, behavior: 'smooth' });
+});
+new ResizeObserver(refreshRightScrollCue).observe(document.getElementById('right-panel'));
+ed.on('change', refreshRightScrollCue);
+ed.on('selection', refreshRightScrollCue);
+refreshRightScrollCue();
+
+/* ── guided "convert to layers": review AI-detected regions as adjustable boxes before committing.
+   Boxes are plain absolutely-positioned <div>s over the canvas (not Fabric objects) — simpler than
+   the reference's Fabric-region-rect approach and avoids ever touching the real scene until Commit
+   is clicked. Canvas-scene ↔ screen mapping uses fc.viewportTransform directly since the canvas
+   element itself never gets CSS-scaled (see fitToScreen/setZoomAtCenter above — only the content
+   inside it moves/scales). Type is limited to text/image, matching what detectRegions() actually
+   returns (canvasmith's AI contract has no product/logo/sticker taxonomy to review). ───────────── */
+const reviewOverlay = document.getElementById('review-overlay'), reviewToolbar = document.getElementById('review-toolbar');
+const reviewCountEl = document.getElementById('review-count'), reviewCommitBtn = document.getElementById('review-commit'), reviewCancelBtn = document.getElementById('review-cancel'), reviewAddBoxBtn = document.getElementById('review-add-box');
+reviewCommitBtn.textContent = 'Create layers';
+reviewCancelBtn.textContent = 'Cancel';
+reviewAddBoxBtn.textContent = '+ Add box';
+let reviewState = null;   // { flat, boxes: [{id, type, content, x, y, w, h} in scene px] }
+function sceneToScreen(pt) {
+  const v = ed.fc.viewportTransform, canvasRect = document.getElementById('cv').getBoundingClientRect(), stageRect = stageEl.getBoundingClientRect();
+  return { x: canvasRect.left - stageRect.left + pt.x * v[0] + v[4], y: canvasRect.top - stageRect.top + pt.y * v[3] + v[5] };
+}
+function screenDeltaToScene(dx, dy) {
+  const v = ed.fc.viewportTransform;
+  return { dx: dx / v[0], dy: dy / v[3] };
+}
+function openReview(flat, regions) {
+  const boxes = regions.map((rg, i) => {
+    const bbox = rg.bbox || {};
+    return {
+      id: 'rv' + i, type: rg.type === 'text' ? 'text' : 'image', content: rg.content || '',
+      x: (bbox.x || 0) / 100 * ed.W, y: (bbox.y || 0) / 100 * ed.H,
+      w: Math.max(12, (bbox.width || 0) / 100 * ed.W), h: Math.max(12, (bbox.height || 0) / 100 * ed.H),
+    };
+  });
+  reviewState = { flat, boxes };
+  ed.setTool('select');
+  reviewOverlay.hidden = false; reviewToolbar.hidden = false;
+  renderReviewBoxes();
+}
+function closeReview() {
+  reviewState = null;
+  reviewOverlay.hidden = true; reviewToolbar.hidden = true;
+  reviewOverlay.innerHTML = '';
+}
+function renderReviewBoxes() {
+  if (!reviewState) return;
+  const v = ed.fc.viewportTransform;
+  reviewCountEl.textContent = reviewState.boxes.length + (reviewState.boxes.length === 1 ? ' region' : ' regions');
+  reviewOverlay.innerHTML = reviewState.boxes.map(b => {
+    const p = sceneToScreen({ x: b.x, y: b.y });
+    return `<div class="review-box" data-id="${b.id}" data-type="${b.type}" style="left:${p.x}px;top:${p.y}px;width:${b.w * v[0]}px;height:${b.h * v[3]}px">
+      <div class="review-tag" data-drag="tag">
+        <select data-act="type">
+          <option value="image" ${b.type === 'image' ? 'selected' : ''}>Image</option>
+          <option value="text" ${b.type === 'text' ? 'selected' : ''}>Text</option>
+        </select>
+        <button data-act="del" title="Remove">${iconSVG('close', 10)}</button>
+      </div>
+      <div class="review-handle" data-drag="resize"></div>
+    </div>`;
+  }).join('');
+}
+reviewOverlay.addEventListener('change', e => {
+  const box = e.target.closest('.review-box'); if (!box || e.target.dataset.act !== 'type') return;
+  const b = reviewState.boxes.find(x => x.id === box.dataset.id); if (!b) return;
+  b.type = e.target.value;
+  renderReviewBoxes();
+});
+reviewOverlay.addEventListener('click', e => {
+  const btn = e.target.closest('[data-act=del]'); if (!btn) return;
+  const box = e.target.closest('.review-box');
+  reviewState.boxes = reviewState.boxes.filter(x => x.id !== box.dataset.id);
+  renderReviewBoxes();
+});
+let _reviewDrag = null;
+reviewOverlay.addEventListener('mousedown', e => {
+  const dragType = e.target.closest('[data-drag]')?.dataset.drag;
+  const el = e.target.closest('.review-box'); if (!el) return;
+  const b = reviewState.boxes.find(x => x.id === el.dataset.id); if (!b) return;
+  e.preventDefault();
+  _reviewDrag = { b, el, mode: dragType === 'resize' ? 'resize' : 'move', lastX: e.clientX, lastY: e.clientY };
+});
+/* Update just the dragged box's own inline style during the drag, not a full re-render of every
+   box's innerHTML on every mousemove pixel — a full renderReviewBoxes() rebuild only runs once
+   the drag ends (mouseup), when box count/labels can't have changed anyway. */
+document.addEventListener('mousemove', e => {
+  if (!_reviewDrag) return;
+  const dx = e.clientX - _reviewDrag.lastX, dy = e.clientY - _reviewDrag.lastY;
+  _reviewDrag.lastX = e.clientX; _reviewDrag.lastY = e.clientY;
+  const { dx: sdx, dy: sdy } = screenDeltaToScene(dx, dy);
+  const b = _reviewDrag.b;
+  if (_reviewDrag.mode === 'move') { b.x += sdx; b.y += sdy; }
+  else { b.w = Math.max(12, b.w + sdx); b.h = Math.max(12, b.h + sdy); }
+  const v = ed.fc.viewportTransform, p = sceneToScreen({ x: b.x, y: b.y });
+  _reviewDrag.el.style.left = p.x + 'px'; _reviewDrag.el.style.top = p.y + 'px';
+  _reviewDrag.el.style.width = (b.w * v[0]) + 'px'; _reviewDrag.el.style.height = (b.h * v[3]) + 'px';
+});
+document.addEventListener('mouseup', () => {
+  if (_reviewDrag) { _reviewDrag = null; renderReviewBoxes(); }
+});
+reviewAddBoxBtn.onclick = () => {
+  const b = { id: 'rv' + Date.now(), type: 'image', content: '', x: ed.W * 0.35, y: ed.H * 0.35, w: ed.W * 0.3, h: ed.H * 0.3 };
+  reviewState.boxes.push(b);
+  renderReviewBoxes();
+};
+reviewCancelBtn.onclick = closeReview;
+reviewCommitBtn.onclick = async () => {
+  if (!reviewState || !reviewState.boxes.length) { closeReview(); return; }
+  const regions = reviewState.boxes.map(b => ({
+    type: b.type, content: b.content,
+    bbox: { x: b.x / ed.W * 100, y: b.y / ed.H * 100, width: b.w / ed.W * 100, height: b.h / ed.H * 100 },
+  }));
+  const flat = reviewState.flat;
+  closeReview();
+  await ed.commitRegions(flat, regions);
+};
+ed.on('zoom', () => renderReviewBoxes());
+window.addEventListener('resize', () => renderReviewBoxes());
+
 /* ── open: file picker, drag/drop+paste, and the cross-platform bridge ── */
+document.getElementById('openfile-icon').innerHTML = iconSVG('folder', 15);
 openfile.onclick = () => file.click();
 /* Every image entry point adds a layer that fits inside the CURRENT artboard — the artboard size
    never changes underneath you. This matches the reference editor: the canvas is a fixed ad
@@ -1206,39 +2215,181 @@ const renderAI = () => {
   } else {
     aibox.innerHTML = `<input id="gp" placeholder="e.g. make the sky sunset"><button class="act" id="grun">✦ Apply AI edit</button>
       <input id="gbg" placeholder="e.g. marble table, warm light" style="margin-top:6px"><button class="act" id="gbgrun">✦ Replace background</button>
+      <button class="act" id="gextend" style="margin-top:6px">✦ AI extend background</button>
       <input id="gins" placeholder="e.g. a small red balloon" style="margin-top:6px"><button class="act" id="ginsrun">✦ Generate <span id="ginslabel">here</span></button>
-      <button class="act" id="gregions" style="margin-top:6px">✦ Detect regions → layers</button>
       <button class="act" id="gkey2" style="font-size:11px;margin-top:6px">change key</button><div class="note" id="gmsg"></div>`;
     const msg = aibox.querySelector('#gmsg');
     aibox.querySelector('#ginslabel').textContent = ed.selection ? 'in selection' : 'here';
     ed.on('selection', () => { const l = aibox.querySelector('#ginslabel'); if (l) l.textContent = ed.selection ? 'in selection' : 'here'; });
+
+    /* Shared busy state: while ANY AI call is in flight, every AI button/input in the panel is
+       disabled (not just the one clicked) — an AI request takes seconds, and without this a user
+       could double-submit the same edit or fire a second AI call before the first lands, either
+       of which is confusing (which result wins?) as well as wasteful of the free daily quota.
+       The clicked button additionally swaps its label for a spinner + the given verb. */
+    const allAiControls = () => aibox.querySelectorAll('button, input');
+    async function runAi(btn, label, fn) {
+      const original = btn.innerHTML;
+      allAiControls().forEach(el => { el.disabled = true; });
+      btn.dataset.busy = 'true';
+      btn.innerHTML = `<span class="btn-spin"></span><span>${label}</span>`;
+      msg.textContent = '';
+      try {
+        return await fn();
+      } finally {
+        allAiControls().forEach(el => { el.disabled = false; });
+        btn.dataset.busy = 'false';
+        btn.innerHTML = original;
+      }
+    }
     aibox.querySelector('#grun').onclick = async () => {
+      const btn = aibox.querySelector('#grun');
       const p = aibox.querySelector('#gp').value.trim(); if (!p) return;
-      msg.textContent = 'Working…';
-      const r = await ed.aiEdit(p);
+      const r = await runAi(btn, 'Working…', () => ed.aiEdit(p));
       msg.textContent = r.status === 'ok' ? 'Applied ✓ (undo to revert)' : (r.message || r.reason);
     };
     aibox.querySelector('#gbgrun').onclick = async () => {
+      const btn = aibox.querySelector('#gbgrun');
       const p = aibox.querySelector('#gbg').value.trim(); if (!p) return;
-      msg.textContent = 'Replacing background…';
-      const r = await ed.aiBgSwap(p);
+      const r = await runAi(btn, 'Replacing…', () => ed.aiBgSwap(p));
       msg.textContent = r.status === 'ok' ? 'Applied ✓ (undo to revert)' : (r.message || r.reason);
     };
-    aibox.querySelector('#ginsrun').onclick = async () => {
-      const p = aibox.querySelector('#gins').value.trim(); if (!p) return;
-      msg.textContent = 'Generating…';
-      const r = await ed.aiInsertAt(p, { x: ed.W / 2, y: ed.H / 2 });
-      msg.textContent = r.status === 'ok' ? 'Inserted ✓ (undo to revert)' : (r.message || r.reason);
+    aibox.querySelector('#gextend').onclick = async () => {
+      const btn = aibox.querySelector('#gextend');
+      const r = await runAi(btn, 'Extending…', () => ed.aiExtendBackground());
+      msg.textContent = r.status === 'ok' ? 'Applied ✓ (undo to revert)' : (r.message || r.reason);
+      refreshExtendBanner();
     };
-    aibox.querySelector('#gregions').onclick = async () => {
-      msg.textContent = 'Detecting regions…';
-      const r = await ed.detectRegionsToLayers();
-      msg.textContent = r.status === 'ok' ? `Split into ${r.result} layers ✓ (undo to revert)` : (r.message || r.reason);
+    aibox.querySelector('#ginsrun').onclick = async () => {
+      const btn = aibox.querySelector('#ginsrun');
+      const p = aibox.querySelector('#gins').value.trim(); if (!p) return;
+      const r = await runAi(btn, 'Generating…', () => ed.aiInsertAt(p, { x: ed.W / 2, y: ed.H / 2 }));
+      msg.textContent = r.status === 'ok' ? 'Inserted ✓ (undo to revert)' : (r.message || r.reason);
     };
     aibox.querySelector('#gkey2').onclick = () => { gem.setKey(null); renderAI(); };
   }
 };
 renderAI();
+
+/* ── AI insert-at-point: the aiinsert tool's click opens a small prompt popover pinned to the
+   click, matching the reference editor's "draw here" gesture — no drag, no options, just a click
+   and a description. A click INSIDE an active selection switches it to "fill this shape" mode
+   (ed.emits {pt, region:true} — see Editor#_down), clipping the result to the selection's exact
+   outline instead of dropping a centered image. ───────────────────────────────────────────── */
+const aiinsertDot = document.getElementById('aiinsert-dot');
+const aiinsertPopover = document.getElementById('aiinsert-popover');
+const aiinsertTitleText = document.getElementById('aiinsert-title-text');
+const aiinsertNote = document.getElementById('aiinsert-note');
+const aiinsertPromptEl = document.getElementById('aiinsert-prompt');
+const aiinsertRunBtn = document.getElementById('aiinsert-run');
+document.getElementById('aiinsert-close').innerHTML = iconSVG('close', 13);
+let aiInsertState = null;   // { pt (scene px), region }
+function closeAiInsert() {
+  aiInsertState = null;
+  aiinsertDot.hidden = true;
+  aiinsertPopover.hidden = true;
+  aiinsertPromptEl.value = '';
+}
+function positionAiInsert() {
+  if (!aiInsertState) return;
+  const p = sceneToScreen(aiInsertState.pt);
+  aiinsertDot.style.left = p.x + 'px'; aiinsertDot.style.top = p.y + 'px';
+  const stageW = stageEl.clientWidth, stageH = stageEl.clientHeight;
+  aiinsertPopover.style.left = Math.max(8, Math.min(p.x - 10, stageW - 276)) + 'px';
+  aiinsertPopover.style.top = Math.max(8, Math.min(p.y + 12, stageH - 150)) + 'px';
+}
+ed.on('aiinsert', ({ pt, region }) => {
+  aiInsertState = { pt, region };
+  aiinsertDot.hidden = false;
+  aiinsertPopover.hidden = false;
+  aiinsertTitleText.textContent = region ? 'Fill the selection with AI' : 'Draw here with AI';
+  aiinsertNote.style.display = region ? '' : 'none';
+  aiinsertNote.textContent = 'The result is clipped to your selection — the AI draws only inside that shape.';
+  aiinsertRunBtn.innerHTML = iconSVG('spark', 13) + '<span>' + (region ? 'Generate in selection' : 'Generate here') + '</span>';
+  positionAiInsert();
+  aiinsertPromptEl.focus();
+});
+ed.on('zoom', positionAiInsert);
+window.addEventListener('resize', positionAiInsert);
+document.getElementById('aiinsert-close').onclick = closeAiInsert;
+async function runAiInsert() {
+  if (!aiInsertState) return;
+  const prompt = aiinsertPromptEl.value.trim();
+  if (!prompt) return;
+  if (!gem.hasKey()) { closeAiInsert(); setRightTab('ai'); return; }
+  const { pt, region } = aiInsertState;
+  aiinsertPromptEl.disabled = true; aiinsertRunBtn.disabled = true;
+  const original = aiinsertRunBtn.innerHTML;
+  aiinsertRunBtn.innerHTML = `<span class="btn-spin"></span><span>Generating…</span>`;
+  try {
+    const r = await ed.aiInsertAt(prompt, pt);
+    if (r.status === 'ok') { closeAiInsert(); ed.setTool('select'); }
+    else {
+      aiinsertNote.style.display = '';
+      aiinsertNote.textContent = r.message || r.reason || 'Could not generate that.';
+    }
+  } finally {
+    aiinsertPromptEl.disabled = false; aiinsertRunBtn.disabled = false;
+    aiinsertRunBtn.innerHTML = original;
+  }
+}
+aiinsertRunBtn.onclick = runAiInsert;
+aiinsertPromptEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); runAiInsert(); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeAiInsert(); }
+});
+ed.on('tool', t => { if (t !== 'aiinsert') closeAiInsert(); });
+
+/* ── Convert to layers: guided card — auto-detect (AI) or draw one box manually, both funnel into
+   the same review-box overlay (openReview/closeReview above) so adjusting/naming/committing boxes
+   works identically either way. ─────────────────────────────────────────────────────────────── */
+document.getElementById('convert-card-title').innerHTML = iconSVG('layerstab', 15) + '<span>Convert to layers</span><span class="tag">guided</span>';
+document.getElementById('convert-card-body').textContent = 'Detects objects and shows them as boxes — adjust, add or remove any, then create editable layers.';
+const convertDetectBtn = document.getElementById('convert-detect');
+const convertManualBtn = document.getElementById('convert-manual');
+convertDetectBtn.innerHTML = iconSVG('layerstab', 13) + '<span>Detect &amp; convert to layers</span>';
+convertManualBtn.innerHTML = iconSVG('lasso', 13) + '<span>Select one object manually</span>';
+convertDetectBtn.onclick = async () => {
+  if (!gem.hasKey()) { setRightTab('ai'); return; }
+  const original = convertDetectBtn.innerHTML;
+  convertDetectBtn.disabled = true; convertManualBtn.disabled = true;
+  convertDetectBtn.innerHTML = `<span class="btn-spin"></span><span>Detecting…</span>`;
+  try {
+    const r = await ed.detectRegions();
+    if (r.status !== 'ok') { return; }
+    openReview(r.result.flat, r.result.regions);
+  } finally {
+    convertDetectBtn.disabled = false; convertManualBtn.disabled = false;
+    convertDetectBtn.innerHTML = original;
+  }
+};
+convertManualBtn.onclick = () => {
+  openReview(ed.exportPNG(), []);
+  reviewAddBoxBtn.onclick();
+};
+
+/* ── extend-background nudge: a floating banner that appears once enough of the canvas is still
+   empty, offering the same AI-extend action as the AI panel button — debounced since it re-samples
+   the flattened canvas (see backgroundGapFraction) and change events can fire in bursts. ────────── */
+const extendBanner = document.getElementById('extend-banner');
+extendBanner.innerHTML = iconSVG('search', 13) + '<span>Background doesn’t fill the canvas — AI-extend it</span>';
+extendBanner.onclick = async () => {
+  extendBanner.hidden = true;
+  const r = await ed.aiExtendBackground();
+  if (r.status !== 'ok') alert(r.message || r.reason);
+  refreshExtendBanner();
+};
+let _extendCheckTimer = null;
+function refreshExtendBanner() {
+  clearTimeout(_extendCheckTimer);
+  _extendCheckTimer = setTimeout(async () => {
+    if (ed.tool === 'crop' || !gem.hasKey()) { extendBanner.hidden = true; return; }
+    const frac = await ed.backgroundGapFraction();
+    extendBanner.hidden = frac < 0.12;
+  }, 400);
+}
+ed.on('change', refreshExtendBanner);
+ed.on('tool', refreshExtendBanner);
 
 /* ── range slider fill: WebKit has no built-in "filled" track, so paint one via a gradient sized
    to the current value. Delegated for user drags; refreshPropsPanel (and the shadow-reset) call
@@ -1250,6 +2401,74 @@ function paintRangeFill(el) {
 }
 document.querySelectorAll('input[type=range]').forEach(paintRangeFill);
 document.addEventListener('input', e => { if (e.target.matches('input[type=range]')) paintRangeFill(e.target); });
+
+/* ── ⌘K command palette: every tool + a curated action list, fuzzy-filtered, arrow-key nav ──── */
+const cmdkBackdrop = document.getElementById('cmdk-backdrop'), cmdkInput = document.getElementById('cmdk-input'), cmdkList = document.getElementById('cmdk-list');
+document.getElementById('cmdk-search-icon').innerHTML = iconSVG('search', 16);
+const ALL_TOOL_ITEMS = TOOLGROUPS.flatMap(g => g).map(t => ({ group: 'Tool', icon: t.icon, label: TOOL_LABELS[t.id] || t.id, run: () => ed.setTool(t.id) }));
+function buildActionItems() {
+  return [
+    { group: 'Edit', icon: 'undo', label: 'Undo', run: () => ed.undo() },
+    { group: 'Edit', icon: 'redo', label: 'Redo', run: () => ed.redo() },
+    { group: 'Edit', icon: 'duplicate', label: 'Duplicate layer', run: () => { const a = ed.layers().find(l => l.active); if (a) ed.duplicateLayer(a.id); } },
+    { group: 'Edit', icon: 'close', label: 'Delete layer', run: () => { const a = ed.layers().find(l => l.active); if (a) ed.removeLayer(a.id); } },
+    { group: 'Select', icon: 'box', label: 'Group selection', run: () => ed.groupSelection() },
+    { group: 'Select', icon: 'grid', label: 'Ungroup', run: () => ed.ungroupSelection() },
+    { group: 'Select', icon: 'close', label: 'Deselect', run: () => ed.clearSelection() },
+    { group: 'View', icon: 'plus', label: 'Zoom in', run: () => setZoomAtCenter(ed.fc.getZoom() * 1.2) },
+    { group: 'View', icon: 'minus', label: 'Zoom out', run: () => setZoomAtCenter(ed.fc.getZoom() * 0.83) },
+    { group: 'View', icon: 'maximize', label: 'Fit to screen', run: () => fitToScreen() },
+    { group: 'View', icon: 'moon', label: 'Toggle light/dark theme', run: () => themeBtn.onclick() },
+    { group: 'View', icon: 'search', label: 'Compare with original', run: () => openCompare() },
+    { group: 'View', icon: 'chevron', label: leftCollapsed ? 'Show side panel' : 'Hide side panel', run: () => collapseLeftBtn.onclick() },
+    { group: 'View', icon: 'chevron', label: rightCollapsed ? 'Show Properties panel' : 'Hide Properties panel', run: () => collapseRightBtn.onclick() },
+    { group: 'Insert', icon: 'type', label: 'Add text', run: () => document.getElementById('add-text').click() },
+    { group: 'Insert', icon: 'rect', label: 'Add box', run: () => document.getElementById('add-box').click() },
+    { group: 'Insert', icon: 'hoverselect', label: 'Add circle', run: () => document.getElementById('add-circle').click() },
+    { group: 'Insert', icon: 'folder', label: 'Add image…', run: () => document.getElementById('add-image').click() },
+    { group: 'Export', icon: 'svg', label: 'Export PNG', run: () => png.click() },
+    { group: 'Export', icon: 'svg', label: 'Export JPG', run: () => jpg.click() },
+    { group: 'Export', icon: 'svg', label: 'Export SVG', run: () => svg.click() },
+  ];
+}
+let cmdkItems = [], cmdkIdx = 0;
+function cmdkOpen() {
+  cmdkBackdrop.hidden = false;
+  cmdkInput.value = '';
+  cmdkFilter();
+  requestAnimationFrame(() => cmdkInput.focus());
+}
+function cmdkClose() { cmdkBackdrop.hidden = true; }
+function cmdkFilter() {
+  const q = cmdkInput.value.trim().toLowerCase();
+  const all = ALL_TOOL_ITEMS.concat(buildActionItems());
+  cmdkItems = q ? all.filter(it => it.label.toLowerCase().includes(q) || it.group.toLowerCase().includes(q)) : all;
+  cmdkIdx = 0;
+  cmdkRender();
+}
+function cmdkRender() {
+  if (!cmdkItems.length) { cmdkList.innerHTML = '<div class="cmdk-empty">No matching commands</div>'; return; }
+  cmdkList.innerHTML = cmdkItems.map((it, i) => `<div class="cmdk-item" data-i="${i}" data-on="${i === cmdkIdx}">${iconSVG(it.icon, 15)}<span class="lbl">${it.label}</span><span class="grp">${it.group}</span></div>`).join('');
+  const on = cmdkList.querySelector('[data-on=true]');
+  if (on) on.scrollIntoView({ block: 'nearest' });
+}
+function cmdkRun(it) { cmdkClose(); if (it) it.run(); }
+cmdkInput.addEventListener('input', cmdkFilter);
+cmdkInput.addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); cmdkIdx = Math.min(cmdkItems.length - 1, cmdkIdx + 1); cmdkRender(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); cmdkIdx = Math.max(0, cmdkIdx - 1); cmdkRender(); }
+  else if (e.key === 'Enter') { e.preventDefault(); cmdkRun(cmdkItems[cmdkIdx]); }
+  else if (e.key === 'Escape') { e.preventDefault(); cmdkClose(); }
+});
+cmdkList.addEventListener('mousemove', e => {
+  const i = +(e.target.closest('.cmdk-item')?.dataset.i ?? -1); if (i < 0 || i === cmdkIdx) return;
+  cmdkIdx = i; cmdkRender();
+});
+cmdkList.addEventListener('click', e => { const i = +(e.target.closest('.cmdk-item')?.dataset.i ?? -1); if (i >= 0) cmdkRun(cmdkItems[i]); });
+cmdkBackdrop.addEventListener('click', e => { if (e.target === cmdkBackdrop) cmdkClose(); });
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); cmdkOpen(); }
+});
 </script>
 </body>
 </html>

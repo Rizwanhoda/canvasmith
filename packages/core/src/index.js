@@ -24,3 +24,4 @@ export { CvEngine, prepImageData } from './cv/client.js';
 export { cvWorkerBody, cvWorkerSource, DEFAULT_OPENCV_URL } from './cv/worker.js';
 export { installKeybindings, TOOL_KEYS } from './keybindings.js';
 export { makeMaskFilterClass, createMaskCanvas, maskStamp, maskLine } from './mask.js';
+export { STICKER_GROUPS, STICKER_PALETTE, stickerSpec } from './stickers.js';

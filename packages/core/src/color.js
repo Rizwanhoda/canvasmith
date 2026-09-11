@@ -88,7 +88,7 @@ export function recolorPixels(data, hex) {
    addColorStop and Fabric's colorStops both accept any valid CSS color string, so this needed no
    change on the consuming side (engine.js's buildCanvasGradient, editor.js's setShapeGradient). */
 export function normalizeGradientStops(stops) {
-  const s = (Array.isArray(stops) && stops.length ? stops : [{ offset: 0, color: '#d4ff45' }, { offset: 1, color: '#7c3aed' }])
+  const s = (Array.isArray(stops) && stops.length ? stops : [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }])
     .map(st => ({
       offset: Math.max(0, Math.min(1, st.offset)),
       color: (st.alpha == null || st.alpha >= 1) ? st.color : rgba(st.color, Math.max(0, st.alpha)),
