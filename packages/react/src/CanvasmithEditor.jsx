@@ -4,7 +4,34 @@
    top of the built-in light/dark palettes, which the toolbar toggle switches between. */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Editor, ALL_TOOLS, PAINT_TOOLS, SEL_TOOLS, SHAPE_TOOLS, GeminiProvider, installBridge, installDropImport, installKeybindings, selectionPolys, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, STICKER_PALETTE, stickerSpec } from '@canvasmith/core';
+import { Editor, ALL_TOOLS, PAINT_TOOLS, SEL_TOOLS, SHAPE_TOOLS, GeminiProvider, installBridge, installDropImport, installKeybindings, selectionPolys, selectionToPath2D, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, STICKER_PALETTE, stickerSpec, REGION_COLOR } from '@canvasmith/core';
+
+const REGION_TYPE_LABELS = { product: 'Product', logo: 'Logo', text: 'Text', sticker: 'Sticker', decorative: 'Decorative' };
+const CROP_RATIOS = [['Free', 0], ['Original', 'orig'], ['1:1', 1], ['4:5', 4 / 5], ['3:2', 3 / 2], ['16:9', 16 / 9], ['9:16', 9 / 16]];
+/* Standard canvas-size presets, grouped by use-case — width/height in px at a nominal
+   72-96dpi-ish "design pixel" scale (matches how every web design tool treats these, not
+   print-accurate 300dpi). Ported verbatim from the vanilla demo's CANVAS_PRESETS. */
+const CANVAS_PRESETS = [
+  ['Social', [
+    ['Instagram post (1:1)', 1080, 1080],
+    ['Instagram story (9:16)', 1080, 1920],
+    ['Facebook cover', 820, 312],
+    ['Twitter/X post', 1200, 675],
+    ['YouTube thumbnail', 1280, 720],
+    ['LinkedIn banner', 1584, 396],
+  ]],
+  ['Print', [
+    ['A4 portrait', 2480, 3508],
+    ['A4 landscape', 3508, 2480],
+    ['US Letter portrait', 2550, 3300],
+    ['US Letter landscape', 3300, 2550],
+  ]],
+  ['Screen', [
+    ['HD (720p)', 1280, 720],
+    ['Full HD (1080p)', 1920, 1080],
+    ['4K UHD', 3840, 2160],
+  ]],
+];
 
 // Compact SVG glyphs for the tool rail — avoids pulling in an icon-font/library dependency.
 const ICONS = {
@@ -27,6 +54,8 @@ const ICONS = {
   'lasso-mag': <path d="M6 18L16 8M14 4l1.5 1.5M19 7l1.5-1.5M18 12l2 .5M9 3l.5 2M20 17l-1.5 1.5" />,
   wand: <path d="m15 4 1.5 3L20 8.5 16.5 10 15 13l-1.5-3L10 8.5 13.5 7Z M5 21l8-8" />,
   spark: <path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8Z" />,
+  'objectselect-bbox': <path d="m15 4 1.5 3L20 8.5 16.5 10 15 13l-1.5-3L10 8.5 13.5 7Z M5 21l8-8" />,
+  magicwand: <><path d="m15 4 1.5 3L20 8.5 16.5 10 15 13l-1.5-3L10 8.5 13.5 7Z M5 21l8-8" /><circle cx="5.5" cy="18.5" r="1" fill="currentColor" stroke="none" /></>,
   palette: <><path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.2c2.4 0 4.3-1.9 4.3-4.3C21.5 6.1 17.2 3 12 3Z" /><circle cx="7.5" cy="10.5" r="1.3" fill="currentColor" stroke="none" /><circle cx="11" cy="7" r="1.3" fill="currentColor" stroke="none" /><circle cx="15.5" cy="8" r="1.3" fill="currentColor" stroke="none" /></>,
   objectselect: <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" />,
   hoverselect: <><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></>,
@@ -73,6 +102,12 @@ const ICONS = {
   'align-top': <><path d="M2 3h20" /><rect x="6" y="6" width="4" height="7" rx="1" fill="currentColor" stroke="none" /><rect x="14" y="6" width="4" height="12" rx="1" fill="currentColor" stroke="none" /></>,
   'align-v-center': <><path d="M2 12h20" /><rect x="6" y="8.5" width="4" height="7" rx="1" fill="currentColor" stroke="none" /><rect x="14" y="6" width="4" height="12" rx="1" fill="currentColor" stroke="none" /></>,
   'align-bottom': <><path d="M2 21h20" /><rect x="6" y="11" width="4" height="7" rx="1" fill="currentColor" stroke="none" /><rect x="14" y="6" width="4" height="12" rx="1" fill="currentColor" stroke="none" /></>,
+  pen: <path d="M12 3l7 7-9 9-5 1 1-5 6-6 2 2M11 6l4 4" />,
+  lock: <><rect x="5" y="11" width="14" height="9" rx="1.5" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></>,
+  minus: <path d="M5 12h14" />,
+  plus: <path d="M12 5v14M5 12h14" />,
+  maximize: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
+  search: <><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.35-4.35" /></>,
 };
 
 function Icon({ name, size = 15, style }) {
@@ -103,9 +138,9 @@ function StickerPreview({ shapeKey, size = 28 }) {
 const GROUPS = [
   { label: 'Move', tools: [['select', 'Select'], ['hand', 'Pan'], ['crop', 'Crop']] },
   { label: 'Paint', tools: [['brush', 'Brush'], ['pencil', 'Pencil'], ['eraser', 'Eraser'], ['clone', 'Clone'], ['heal', 'Heal'], ['dodge', 'Dodge'], ['burn', 'Burn'], ['sponge', 'Sponge'], ['redeye', 'Red-eye']] },
-  { label: 'Select', tools: [['marquee', 'Marquee'], ['marquee-ellipse', 'Ellipse'], ['lasso', 'Lasso'], ['lasso-poly', 'Polygon lasso'], ['lasso-mag', 'Magnetic lasso'], ['wand', 'Wand'], ['objectselect', 'Object select'], ['hoverselect', 'Hover select']] },
+  { label: 'Select', tools: [['marquee', 'Marquee'], ['marquee-ellipse', 'Ellipse'], ['lasso', 'Lasso'], ['lasso-poly', 'Polygon lasso'], ['lasso-mag', 'Magnetic lasso'], ['wand', 'Wand'], ['objectselect-bbox', 'Object / magic select'], ['magicwand', 'Magic wand'], ['objectselect', 'Object select'], ['hoverselect', 'Hover select']] },
   { label: 'AI', tools: [['aiinsert', 'AI insert']] },
-  { label: 'Draw', tools: [['rect', 'Rect'], ['ellipse', 'Ellipse'], ['line', 'Line'], ['triangle', 'Triangle'], ['polygon', 'Polygon'], ['star', 'Star'], ['type', 'Text'], ['bucket', 'Fill'], ['gradient', 'Gradient'], ['eyedropper', 'Pick']] },
+  { label: 'Draw', tools: [['rect', 'Rect'], ['ellipse', 'Ellipse'], ['line', 'Line'], ['triangle', 'Triangle'], ['polygon', 'Polygon'], ['star', 'Star'], ['pen', 'Pen'], ['type', 'Text'], ['bucket', 'Fill'], ['gradient', 'Gradient'], ['eyedropper', 'Pick']] },
 ];
 
 const BLEND_MODES = [
@@ -124,10 +159,18 @@ const SEL_REASON_MSG = {
   need_group: 'Select a group to ungroup.',
 };
 
+const AI_REASON_MSG = {
+  no_provider: 'No AI provider is registered.',
+  rate_limited: 'Free daily quota hit — try again later, or add billing to your key.',
+  no_regions: 'Nothing detected — try "Select one object manually" instead.',
+  destroyed: '',
+};
+
 const EMPTY_PROPS = {
   active: false, title: 'Properties', isImage: false, isAdjustment: false, fx: { brightness: 100, contrast: 100, saturate: 100, blur: 0, hue: 0, vibrance: 0, invert: false },
   text: null,
   hasFill: false, fill: '#ef6a2d', shapeGradient: null, blend: 'source-over', opacity: 1,
+  hasBorder: false, strokeWidth: 0, stroke: '#000000',
   angle: 0, x: '', y: '', w: '', h: '', skewX: 0, skewY: 0, isRect: false, rx: 0,
   shadow: { color: '#000000', blur: 0, offsetX: 0, offsetY: 0 },
   canGroup: false, canUngroup: false, hasSelectionPixels: false,
@@ -150,6 +193,12 @@ function readProps(ed) {
   const shapeGradient = ed.getShapeGradient();
   const hasFill = !!fillTarget && !isImage && fillTarget.type !== 'line' && fillTarget.role !== 'paint' && (solidFill || !!shapeGradient);
   const fill = solidFill ? (fillTarget.fill.length === 4 ? '#' + [...fillTarget.fill.slice(1)].map(c => c + c).join('') : fillTarget.fill) : '#ef6a2d';
+  // Border (stroke) applies to any fillable/strokeable vector shape or line — not images or paint
+  // strokes — same hasBorder condition as the vanilla demo's refreshPropsPanel.
+  const hasBorder = !!fillTarget && !isImage && fillTarget.role !== 'paint';
+  const strokeColor = fillTarget && typeof fillTarget.stroke === 'string'
+    ? (fillTarget.stroke.length === 4 ? '#' + [...fillTarget.stroke.slice(1)].map(c => c + c).join('') : fillTarget.stroke)
+    : '#000000';
   return {
     active: true,
     title: o.type === 'activeSelection' ? (o._objects ? o._objects.length + ' layers' : 'Selection') : (ed.layers().find(l => l.active)?.name || o.type || 'Layer'),
@@ -157,6 +206,7 @@ function readProps(ed) {
     fx: isAdjustment ? ed.getAdjustmentParams(o.id) : isImage ? ed.getImageFilters() : EMPTY_PROPS.fx,
     text: ed.getTextProps(),
     hasFill, fill, shapeGradient,
+    hasBorder, strokeWidth: Math.round((fillTarget && fillTarget.strokeWidth) || 0), stroke: strokeColor,
     blend: o.globalCompositeOperation || 'source-over',
     opacity: o.opacity != null ? o.opacity : 1,
     angle: Math.round(o.angle || 0),
@@ -222,13 +272,49 @@ const CSS = `
 .cm-toggle[data-on=true]{background:var(--cm-ink);color:var(--cm-panel);border-color:var(--cm-ink)}
 .cm-layer{display:flex;align-items:center;gap:6px;padding:5px 7px;border-radius:7px;cursor:pointer;font-size:12px}
 .cm-layer:hover{background:var(--cm-bg)}.cm-layer[data-on=true]{outline:1px solid var(--cm-accent)}
+.cm-layer[data-dragover=true]{background:color-mix(in srgb,var(--cm-accent) 16%,var(--cm-panel));box-shadow:inset 0 0 0 1px dashed var(--cm-accent),inset 0 0 0 1px var(--cm-accent)}
+.cm-layer[data-dragging=true]{opacity:.4}
 .cm-layer .cm-eye{cursor:pointer;opacity:.7;display:flex}
+.cm-layer-thumb{flex:none;width:28px;height:28px;border-radius:6px;overflow:hidden;display:grid;place-items:center;background:var(--cm-bg);border:1px solid var(--cm-line)}
+.cm-layer[data-on=true] .cm-layer-thumb{border-color:color-mix(in srgb,var(--cm-accent) 60%,var(--cm-line))}
+.cm-layer-thumb img{max-width:100%;max-height:100%;object-fit:contain;display:block;pointer-events:none}
+.cm-layer-thumb svg{color:var(--cm-dim)}
+.cm-layer-rename{all:unset;box-sizing:border-box;width:100%;font-size:12px;font-weight:600;padding:2px 5px;border-radius:5px;background:var(--cm-bg);border:1px solid var(--cm-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--cm-accent) 22%,transparent);color:var(--cm-ink)}
+.cm-asset-thumb{flex:none;width:56px;cursor:pointer;text-align:center}
+.cm-asset-thumb img{width:56px;height:56px;object-fit:cover;border-radius:9px;border:1px solid var(--cm-line);display:block;transition:border-color .1s;pointer-events:none}
+.cm-asset-thumb span{display:block;font-size:10px;color:var(--cm-dim);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cm-asset-thumb:hover img{border-color:var(--cm-dim)}
 .cm-btn{all:unset;cursor:pointer;padding:8px 12px;border-radius:9px;border:1px solid var(--cm-line);font-size:13px;display:inline-flex;align-items:center;gap:7px}
 .cm-btn:hover{border-color:var(--cm-accent)}.cm-btn:disabled{opacity:.4;cursor:default}
 .cm-icon-btn{all:unset;cursor:pointer;display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:7px;border:1px solid var(--cm-line);color:var(--cm-ink)}
 .cm-icon-btn:hover{border-color:var(--cm-accent)}
 .cm-icon-btn[data-active=true]{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent)}
 .cm-top input[type=range]{width:90px}.cm-top input[type=color]{width:26px;height:26px;border:none;background:none;cursor:pointer}
+.cm-zoom-pill{display:flex;align-items:center;gap:2px;padding:2px;border-radius:999px;background:var(--cm-bg);border:1px solid var(--cm-line)}
+.cm-cmdk-backdrop{position:fixed;inset:0;z-index:200;background:rgba(8,8,12,.5);display:flex;align-items:flex-start;justify-content:center;padding-top:14vh}
+.cm-cmdk-box{width:min(560px,92vw);max-height:min(60vh,420px);background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.45);overflow:hidden;display:flex;flex-direction:column}
+.cm-cmdk-search-row{display:flex;align-items:center;gap:9px;padding:12px 14px;border-bottom:1px solid var(--cm-line);flex:none;color:var(--cm-dim)}
+.cm-cmdk-input{all:unset;box-sizing:border-box;flex:1;font-size:14px;color:var(--cm-ink)}
+.cm-tag{display:inline-flex;align-items:center;padding:2px 7px;border-radius:6px;background:var(--cm-bg);color:var(--cm-dim);font-size:10px;font-weight:600}
+.cm-tag.mono{font-family:"JetBrains Mono",ui-monospace,monospace}
+.cm-cmdk-list{overflow-y:auto;padding:6px;flex:1}
+.cm-cmdk-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:12.5px;color:var(--cm-dim)}
+.cm-cmdk-item[data-on=true]{background:var(--cm-bg);color:var(--cm-accent)}
+.cm-cmdk-item .lbl{flex:1;color:var(--cm-ink)}
+.cm-cmdk-item[data-on=true] .lbl{color:var(--cm-ink)}
+.cm-cmdk-item .grp{font-size:10.5px;color:var(--cm-dim)}
+.cm-cmdk-empty{padding:16px;text-align:center;font-size:12.5px;color:var(--cm-dim)}
+.cm-compare-backdrop{position:fixed;inset:0;z-index:200;background:rgba(12,12,14,.95);backdrop-filter:blur(10px);display:flex;flex-direction:column}
+.cm-compare-header{display:flex;align-items:flex-start;justify-content:space-between;padding:20px 28px;flex:none}
+.cm-compare-header strong{font-size:16px;color:var(--cm-ink)}
+.cm-compare-header p{font-size:13px;color:var(--cm-dim);margin:4px 0 0}
+.cm-compare-panes{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:0 28px 28px;min-height:0}
+.cm-compare-pane{position:relative;display:grid;place-items:center;background:var(--cm-stage);border:1px solid var(--cm-line);border-radius:12px;overflow:hidden;min-height:0}
+.cm-compare-pane img{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px}
+.cm-compare-label{position:absolute;top:14px;left:14px;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:999px;padding:4px 11px;font-size:11px;font-weight:600;color:var(--cm-dim)}
+@media (max-width:640px){.cm-compare-panes{grid-template-columns:1fr;overflow-y:auto}}
+.cm-extend-banner{all:unset;position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:16;display:flex;align-items:center;gap:7px;background:var(--cm-accent);color:var(--cm-accent-ink);border-radius:999px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.cm-extend-banner:hover{filter:brightness(1.06)}
 .cm-ai{display:flex;gap:6px;margin-top:6px}.cm-ai input{flex:1;background:var(--cm-bg);border:1px solid var(--cm-line);border-radius:7px;color:var(--cm-ink);padding:5px 8px;font-size:12px}
 .cm-note{font-size:11px;color:var(--cm-dim);margin-top:6px;line-height:1.5}
 .cm-ai-card{padding:14px;border-radius:16px;border:1px solid var(--cm-line);background:linear-gradient(160deg,color-mix(in srgb,var(--cm-accent) 16%,transparent),var(--cm-bg));margin-bottom:14px}
@@ -240,10 +326,12 @@ const CSS = `
 .cm-ai-suggestions{display:flex;flex-direction:column;gap:6px}
 .cm-chip{all:unset;cursor:pointer;display:flex;align-items:center;gap:7px;padding:7px 13px;border-radius:999px;border:1px solid var(--cm-line);font-size:12.5px;font-weight:500;color:var(--cm-ink)}
 .cm-chip:hover{border-color:var(--cm-accent)}
+.cm-chip[data-on=true]{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent);font-weight:600}
 .cm-review-overlay{position:absolute;inset:0;z-index:5}
+/* Per-type border/fill color comes from REGION_COLOR (editor.js) via an inline style on each box
+   below — not a CSS[data-type=] rule — so the 5 region types share one color source with
+   commitRegions' own REGION_ROLE mapping instead of duplicating the palette here. */
 .cm-review-box{position:absolute;border:2px dashed;border-radius:5px;cursor:move;box-sizing:border-box}
-.cm-review-box[data-type=text]{border-color:#ffd166;background:rgba(255,209,102,.12)}
-.cm-review-box[data-type=image]{border-color:var(--cm-accent);background:color-mix(in srgb,var(--cm-accent) 12%,transparent)}
 .cm-review-tag{position:absolute;top:-24px;left:-2px;display:flex;align-items:center;gap:4px;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:6px;padding:2px 4px;box-shadow:0 2px 8px rgba(0,0,0,.3)}
 .cm-review-tag select{all:unset;font-size:10.5px;font-weight:600;color:var(--cm-ink);cursor:pointer;padding:1px 3px}
 .cm-review-tag button{all:unset;box-sizing:border-box;cursor:pointer;width:16px;height:16px;display:flex;align-items:center;justify-content:center;border-radius:4px;color:var(--cm-dim)}
@@ -270,8 +358,59 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const stageRef = useRef(null);
   const edRef = useRef(null);
   const [tool, setTool] = useState('select');
-  const [opts, setOpts] = useState({ size: 30, opacity: 1, color: '#ef6a2d', tolerance: 32, addMode: false, gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }] });
+  const [opts, setOpts] = useState({ size: 30, opacity: 1, color: '#ef6a2d', tolerance: 32, addMode: false, gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }], cropRatio: 0 });
   const [layers, setLayers] = useState([]);
+  // Layer-panel thumbnails: generated on demand from the fabric object itself (toDataURL at a
+  // small multiplier), cached per layer id and invalidated on every scene change — same
+  // version-keyed cache contract as the vanilla demo's layerThumb/_thumbVer, since the headless
+  // Editor's layers() API is deliberately thumbnail-free (DOM/canvas rendering is a host concern).
+  const thumbCacheRef = useRef(new Map());
+  const thumbVerRef = useRef(0);
+  const [renamingId, setRenamingId] = useState(null);
+  const [dragLayerId, setDragLayerId] = useState(null);
+  const [dragOverId, setDragOverId] = useState(null);
+  const lastLayerClickRef = useRef(null);
+  // Compare: snapshot the canvas the first time it's ever committed to (i.e. right after the
+  // first image/element lands), then let the user flip back to that snapshot vs. the live render
+  // at any point — canvasmith has no fixed "original ad template" the way the reference does, so
+  // "first meaningful state" is the closest general equivalent. Ports the vanilla demo's Compare
+  // view exactly. The snapshot lives in a ref (not state) so capturing it inside the 'change'
+  // handler below doesn't itself trigger a re-render loop.
+  const compareSnapshotRef = useRef(null);
+  const [compareReady, setCompareReady] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [compareAfter, setCompareAfter] = useState(null);
+  // Asset tray: every image source successfully added to the document this session (opened,
+  // dropped/pasted, picked via the file input, or handed in via the bridge/postMessage import) —
+  // click or drag one back onto the canvas to insert it again. Session-only by design (no
+  // localStorage persistence): a generic library has no "generated ad" / "product photo" asset
+  // taxonomy of its own the way a specific ad-generation product would, so this tracks exactly
+  // what the user has actually brought into THIS document rather than inventing categories.
+  // Deduped by src so re-adding the same image doesn't grow the tray forever.
+  const [assets, setAssets] = useState([]);
+  const trackAsset = useCallback((src, name) => {
+    setAssets(prev => prev.some(a => a.src === src) ? prev : [...prev, { id: 'asset' + Date.now() + Math.random().toString(36).slice(2, 6), src, name: name || 'Image' }]);
+  }, []);
+  // Only intercept our own asset drag payload — an unrelated drag (a real OS file, which
+  // installDropImport already handles) must fall through untouched, same guard the vanilla
+  // demo's onStageDragOver uses.
+  const onStageDragOver = (e) => { if (e.dataTransfer.types.includes('text/x-canvasmith-asset')) e.preventDefault(); };
+  const onStageDrop = (e) => {
+    const src = e.dataTransfer.getData('text/x-canvasmith-asset');
+    if (!src) return;
+    e.preventDefault();
+    // fc.getPointer reads clientX/clientY straight off the event and maps them through fabric's
+    // own upper-canvas offset + viewport transform — same conversion _pt(opt) uses in editor.js,
+    // so this lands exactly where a real click at this screen position would.
+    const scenePt = ed().fc.getPointer(e);
+    ed().addImage(src, { name: 'Image' }).then(img => {
+      if (!img) return;
+      img.set({ left: scenePt.x, top: scenePt.y, originX: 'center', originY: 'center' });
+      img.setCoords();
+      ed().fc.renderAll();
+      ed().commit('image');
+    });
+  };
   const [maskEdit, setMaskEdit] = useState(null);
   const [hist, setHist] = useState({ past: 1, future: 0 });
   const [aiBusy, setAiBusy] = useState(false);
@@ -313,23 +452,101 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     const f = fabric || (typeof window !== 'undefined' && window.fabric);
     const ed = new Editor({ fabric: f, canvasEl: canvasRef.current, width, height, openCvUrl });
     edRef.current = ed;
-    // Figma-style smart guides while dragging — thin magenta lines showing what a layer just
-    // snapped to. Drawn on fabric's shared top context, so it must redraw fabric's own top layer
-    // (marquee box / control handles) first — clearContext wipes contextTop wholesale.
-    let dragGuides = null;
-    const drawGuides = () => {
+    // Overlay chrome: marching-ants selection outline, crop scrim/thirds/handles/dimension
+    // readout, hover-select preview, pen in-progress path, and Figma-style smart guides while
+    // dragging — all drawn on fabric's shared top context, so this must redraw fabric's own top
+    // layer (marquee box / control handles) first, since clearContext wipes contextTop wholesale.
+    // Ports the vanilla demo's drawOverlays exactly (its own header comment calls it "the
+    // reference implementation other UIs can copy") — kept pixel-for-pixel identical rather than
+    // reinvented, so the two shells read as the same editor.
+    let dragGuides = null, hoverPreview = null, penBuild = null;
+    let antsOffset = 0, antsRunning = false;
+    const startAntsLoopIfNeeded = () => {
+      if (antsRunning || !ed.selection) return;
+      antsRunning = true;
+      const step = () => {
+        if (!ed.selection) { antsRunning = false; return; }
+        antsOffset = (antsOffset + 0.4) % 12;
+        ed.fc.requestRenderAll();
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    };
+    const drawOverlays = () => {
       const ctx = ed.fc.contextTop; if (!ctx) return;
       ed.fc.clearContext(ctx);
       ed.fc.renderTopLayer(ctx);
-      if (!dragGuides) return;
       const v = ed.fc.viewportTransform;
       ctx.save(); ctx.transform(v[0], v[1], v[2], v[3], v[4], v[5]);
-      ctx.strokeStyle = '#ff2fc0'; ctx.lineWidth = 1 / v[0]; ctx.setLineDash([]);
-      if (dragGuides.x) { ctx.beginPath(); ctx.moveTo(dragGuides.x.x, dragGuides.x.y0); ctx.lineTo(dragGuides.x.x, dragGuides.x.y1); ctx.stroke(); }
-      if (dragGuides.y) { ctx.beginPath(); ctx.moveTo(dragGuides.y.x0, dragGuides.y.y); ctx.lineTo(dragGuides.y.x1, dragGuides.y.y); ctx.stroke(); }
+      if (ed.selection) {
+        const p = selectionToPath2D(ed.selection, ed.W, ed.H);
+        ctx.lineWidth = 1.6 / v[0];
+        ctx.setLineDash([7 / v[0], 5 / v[0]]);
+        ctx.lineDashOffset = -antsOffset / v[0];
+        ctx.strokeStyle = '#ef6a2d'; ctx.stroke(p);
+        ctx.lineDashOffset = (6 - antsOffset) / v[0]; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.stroke(p);
+        ctx.setLineDash([]);
+        const s = ed.selection;
+        if ((s.kind === 'rect' || s.kind === 'ellipse') && (ed.tool === 'marquee' || ed.tool === 'marquee-ellipse')) {
+          const hs = 4.5 / v[0]; ctx.fillStyle = '#ef6a2d'; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.lineWidth = 1 / v[0];
+          for (const [hx, hy] of [[s.x, s.y], [s.x + s.w, s.y], [s.x, s.y + s.h], [s.x + s.w, s.y + s.h],
+                                  [s.x + s.w / 2, s.y], [s.x + s.w / 2, s.y + s.h], [s.x, s.y + s.h / 2], [s.x + s.w, s.y + s.h / 2]]) {
+            ctx.beginPath(); ctx.arc(hx, hy, hs, 0, 7); ctx.fill(); ctx.stroke();
+          }
+        }
+      }
+      if (hoverPreview) {
+        const p = selectionToPath2D({ kind: 'poly', pts: hoverPreview.pts }, ed.W, ed.H);
+        ctx.lineWidth = 1.2 / v[0];
+        ctx.setLineDash([4 / v[0], 3 / v[0]]);
+        ctx.strokeStyle = 'rgba(239,106,45,.65)'; ctx.stroke(p);
+        ctx.setLineDash([]);
+      }
+      if (ed.crop) {
+        const c = ed.crop;
+        ctx.fillStyle = 'rgba(0,0,0,0.48)';
+        ctx.beginPath(); ctx.rect(0, 0, ed.W, ed.H); ctx.rect(c.x, c.y, c.w, c.h); ctx.fill('evenodd');
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.4 / v[0]; ctx.strokeRect(c.x, c.y, c.w, c.h);
+        ctx.lineWidth = 0.7 / v[0]; ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        for (let i = 1; i < 3; i++) {
+          ctx.beginPath(); ctx.moveTo(c.x + c.w * i / 3, c.y); ctx.lineTo(c.x + c.w * i / 3, c.y + c.h); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(c.x, c.y + c.h * i / 3); ctx.lineTo(c.x + c.w, c.y + c.h * i / 3); ctx.stroke();
+        }
+        const hs = 5.5 / v[0]; ctx.fillStyle = '#ef6a2d';
+        for (const [hx, hy] of [[c.x, c.y], [c.x + c.w, c.y], [c.x, c.y + c.h], [c.x + c.w, c.y + c.h],
+                                [c.x + c.w / 2, c.y], [c.x + c.w / 2, c.y + c.h], [c.x, c.y + c.h / 2], [c.x + c.w, c.y + c.h / 2]])
+          ctx.fillRect(hx - hs, hy - hs, hs * 2, hs * 2);
+        const label = Math.round(c.w) + ' × ' + Math.round(c.h);
+        const fs = 12 / v[0], pad = 6 / v[0];
+        ctx.font = fs + 'px "JetBrains Mono", ui-monospace, monospace';
+        const tw = ctx.measureText(label).width;
+        const lx = c.x + c.w / 2, ly = c.y - pad * 2 - fs / 2;
+        ctx.fillStyle = 'rgba(20,20,23,.92)';
+        ctx.beginPath(); ctx.roundRect(lx - tw / 2 - pad, ly - fs / 2 - pad * 0.6, tw + pad * 2, fs + pad * 1.2, pad);
+        ctx.fill();
+        ctx.fillStyle = '#f1efe9'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(label, lx, ly);
+        ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      }
+      if (dragGuides) {
+        ctx.strokeStyle = '#ff2fc0'; ctx.lineWidth = 1 / v[0]; ctx.setLineDash([]);
+        if (dragGuides.x) { ctx.beginPath(); ctx.moveTo(dragGuides.x.x, dragGuides.x.y0); ctx.lineTo(dragGuides.x.x, dragGuides.x.y1); ctx.stroke(); }
+        if (dragGuides.y) { ctx.beginPath(); ctx.moveTo(dragGuides.y.x0, dragGuides.y.y); ctx.lineTo(dragGuides.y.x1, dragGuides.y.y); ctx.stroke(); }
+      }
+      if (penBuild && penBuild.pts.length) {
+        ctx.strokeStyle = '#ef6a2d'; ctx.lineWidth = 1.4 / v[0]; ctx.setLineDash([]);
+        ctx.beginPath();
+        penBuild.pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+        ctx.stroke();
+        const r = 3.5 / v[0];
+        penBuild.pts.forEach((p, i) => {
+          ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 7);
+          if (i === 0) { ctx.fillStyle = '#ef6a2d'; ctx.fill(); } else { ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.strokeStyle = '#ef6a2d'; ctx.lineWidth = 1.2 / v[0]; ctx.stroke(); }
+        });
+      }
       ctx.restore();
     };
-    ed.fc.on('after:render', drawGuides);
+    ed.fc.on('after:render', drawOverlays);
     // Fabric's own click-to-select (no edit made) doesn't go through commit()/activate(), so
     // 'change' alone misses it — without these, layers() (and activeLayer/Fill below) stay stale
     // after a plain click on the canvas.
@@ -347,22 +564,41 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     ed.fc.on('object:moving', refreshProps);
     ed.fc.on('object:scaling', refreshProps);
     ed.fc.on('object:rotating', refreshProps);
+    // Extend-background nudge banner — see showExtendBanner's declaration for the full rationale.
+    let extendCheckTimer = null;
+    const refreshExtendBanner = () => {
+      clearTimeout(extendCheckTimer);
+      extendCheckTimer = setTimeout(async () => {
+        const provider = ed.ai.provider();
+        if (ed.tool === 'crop' || !provider || !provider.hasKey || !provider.hasKey()) { setShowExtendBanner(false); return; }
+        const frac = await ed.backgroundGapFraction();
+        setShowExtendBanner(frac >= 0.12);
+      }, 400);
+    };
     const offs = [
-      ed.on('tool', t => { setTool(t); if (t !== 'aiinsert') setAiInsert(null); }),
+      ed.on('tool', t => { setTool(t); if (t !== 'aiinsert') setAiInsert(null); if (t !== 'crop') ed.setToolOptions({ cropRatio: 0 }); refreshExtendBanner(); }),
       ed.on('history', h => setHist(h)),
-      ed.on('change', () => { setLayers(ed.layers()); refreshProps(); }),
-      ed.on('tooloptions', o => setOpts({ size: o.size, opacity: o.opacity, color: o.color, tolerance: o.tolerance, addMode: o.addMode, gradientType: o.gradientType, gradientStops: o.gradientStops })),
+      ed.on('change', () => {
+        thumbVerRef.current++; setLayers(ed.layers()); refreshProps();
+        if (!compareSnapshotRef.current) { compareSnapshotRef.current = ed.exportPNG(); setCompareReady(true); }
+        refreshExtendBanner();
+      }),
+      ed.on('tooloptions', o => setOpts({ size: o.size, opacity: o.opacity, color: o.color, tolerance: o.tolerance, addMode: o.addMode, gradientType: o.gradientType, gradientStops: o.gradientStops, cropRatio: o.cropRatio || 0 })),
       ed.on('guides', g => { dragGuides = g; ed.fc.requestRenderAll(); }),
-      ed.on('selection', s => { refreshProps(); setSelMsg(''); setObjselectBusy(false); setSelCount(s ? (selectionPolys(s) || []).length : 0); }),
+      ed.on('selection', s => { refreshProps(); setSelMsg(''); setObjselectBusy(false); setSelCount(s ? (selectionPolys(s) || []).length : 0); ed.fc.requestRenderAll(); startAntsLoopIfNeeded(); }),
+      ed.on('crop', () => ed.fc.requestRenderAll()),
+      ed.on('pen', build => { penBuild = build; ed.fc.requestRenderAll(); }),
       ed.on('maskedit', m => { setMaskEdit(m); setLayers(ed.layers()); }),
       ed.on('aiinsert', ({ pt, region }) => setAiInsert({ pt, region, prompt: '', busy: false, msg: '' })),
-      ed.on('hover', () => setObjselectBusy(false)),
+      ed.on('hover', h => { hoverPreview = h; ed.fc.requestRenderAll(); setObjselectBusy(false); }),
       ed.on('error', () => setObjselectBusy(false)),
+      ed.on('zoom', z => setZoomPct(Math.round((z || ed.fc.getZoom() || 1) * 100))),
+      ed.on('resize', () => fitToScreen()),
     ];
     const onObjselectDown = () => {
-      if (ed.tool !== 'objectselect' && ed.tool !== 'hoverselect') return;
+      if (ed.tool !== 'objectselect' && ed.tool !== 'hoverselect' && ed.tool !== 'magicwand') return;
       setObjselectBusy(true);
-      setTimeout(() => setObjselectBusy(b => (ed.tool === 'objectselect' || ed.tool === 'hoverselect') ? false : b), 4000);
+      setTimeout(() => setObjselectBusy(b => (ed.tool === 'objectselect' || ed.tool === 'hoverselect' || ed.tool === 'magicwand') ? false : b), 4000);
     };
     ed.fc.on('mouse:down', onObjselectDown);
     if (ai === 'gemini') {
@@ -374,13 +610,33 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     }
     const stops = [installKeybindings(ed)];
     if (bridge) {
-      stops.push(installBridge(src => ed.openImage(src)));
-      stops.push(installDropImport(stageRef.current, src => ed.addImage(src)));
+      stops.push(installBridge(src => { ed.openImage(src); trackAsset(src, 'Opened image'); }));
+      stops.push(installDropImport(stageRef.current, src => { ed.addImage(src); trackAsset(src, 'Dropped image'); }));
     }
-    if (image) ed.openImage(image);
+    if (image) { ed.openImage(image); trackAsset(image, 'Opened image'); }
     setLayers(ed.layers());
     onReady && onReady(ed);
-    return () => { offs.forEach(f2 => f2()); stops.forEach(f2 => f2()); ed.destroy(); };
+    requestAnimationFrame(() => fitToScreen());
+    const onWindowResize = () => setZoomPct(Math.round((ed.fc.getZoom() || 1) * 100));
+    window.addEventListener('resize', onWindowResize);
+    // +/-/0 zoom shortcuts — no modifier, same guard (not typing, no Cmd/Ctrl/Alt) as the vanilla
+    // demo's own zoom keydown listener, kept separate from installKeybindings (core) since zoom is
+    // shell-owned UI state (the pill's displayed percentage), not editor state.
+    const onZoomKey = (e) => {
+      const tag = document.activeElement && document.activeElement.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === '+' || e.key === '=') { e.preventDefault(); setZoomAtCenter(ed.fc.getZoom() * 1.2); }
+      else if (e.key === '-') { e.preventDefault(); setZoomAtCenter(ed.fc.getZoom() * 0.83); }
+      else if (e.key === '0') { e.preventDefault(); fitToScreen(); }
+    };
+    document.addEventListener('keydown', onZoomKey);
+    return () => {
+      offs.forEach(f2 => f2()); stops.forEach(f2 => f2()); ed.destroy();
+      window.removeEventListener('resize', onWindowResize);
+      document.removeEventListener('keydown', onZoomKey);
+      clearTimeout(extendCheckTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -391,6 +647,31 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const align = (edge) => activeLayer && ed().alignLayer(activeLayer.id, edge);
   const duplicate = () => activeLayer && ed().duplicateLayer(activeLayer.id);
   const toggleSnap = () => { const on = !snapOn; setSnapOn(on); ed().setSnapEnabled(on); };
+
+  // ── zoom pill + fit-to-screen — ports the vanilla demo's setZoomAtCenter/fitToScreen exactly.
+  // Fabric's canvas element keeps its DOM size fixed at W×H; "zoom" is purely the viewport
+  // transform's scale, applied around the stage's own center.
+  const [zoomPct, setZoomPct] = useState(100);
+  const setZoomAtCenter = (z) => {
+    z = Math.min(5, Math.max(0.1, z));
+    const stage = stageRef.current; if (!stage) return;
+    ed().fc.zoomToPoint({ x: stage.clientWidth / 2, y: stage.clientHeight / 2 }, z);
+    ed().fc.requestRenderAll();
+    setZoomPct(Math.round(z * 100));
+  };
+  const fitToScreen = useCallback(() => {
+    const e = edRef.current, stage = stageRef.current; if (!e || !stage) return;
+    const pad = 48;
+    const availW = Math.max(50, stage.clientWidth - pad), availH = Math.max(50, stage.clientHeight - pad);
+    const z = Math.min(2, Math.max(0.05, Math.min(availW / e.W, availH / e.H)));
+    e.fc.setZoom(z);
+    const vpt = e.fc.viewportTransform.slice();
+    vpt[4] = (stage.clientWidth - e.W * z) / 2;
+    vpt[5] = (stage.clientHeight - e.H * z) / 2;
+    e.fc.setViewportTransform(vpt);
+    e.fc.requestRenderAll();
+    setZoomPct(Math.round(z * 100));
+  }, []);
 
   // ── Properties panel actions — mirrors the vanilla demo's wiring 1:1 so both UIs behave the
   // same; refreshProps() (via the 'change'/'selection' events already wired above) keeps `props`
@@ -418,9 +699,81 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     if ('angle' in patch) setFgAngle(patch.angle);
     ed().setShapeGradient(next.stops, next.type, 'angle' in patch ? patch.angle : fgAngle);
   };
+  // ── Compare: side-by-side view of the first meaningful state vs. the live render — see the
+  // compareSnapshotRef declaration above (near the other refs) for the snapshot-capture rationale.
+  const openCompare = () => {
+    if (!compareSnapshotRef.current) return;
+    setCompareAfter(ed().exportPNG());
+    setCompareOpen(true);
+  };
+  const closeCompare = () => setCompareOpen(false);
+  useEffect(() => {
+    if (compareOpen) {
+      const onKey = (e) => { if (e.key === 'Escape') closeCompare(); };
+      document.addEventListener('keydown', onKey);
+      return () => document.removeEventListener('keydown', onKey);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compareOpen]);
+
+  // ── ⌘K command palette — ports the vanilla demo's cmdk implementation onto React state. Tool
+  // items come from GROUPS (already the single source of truth for the tool rail); action items
+  // are React-shell equivalents of the demo's Edit/Select/View/Insert/Export groups, using only
+  // capabilities that actually exist in this shell (no video/catalogue-specific actions).
+  const [cmdkOpen, setCmdkOpen] = useState(false);
+  const [cmdkQuery, setCmdkQuery] = useState('');
+  const [cmdkIdx, setCmdkIdx] = useState(0);
+  const cmdkInputRef = useRef(null);
+  const ALL_TOOL_ITEMS = GROUPS.flatMap(g => g.tools).map(([id, label]) => ({ group: 'Tool', icon: id, label, run: () => ed().setTool(id) }));
+  const buildActionItems = () => [
+    { group: 'Edit', icon: 'undo', label: 'Undo', run: () => ed().undo() },
+    { group: 'Edit', icon: 'redo', label: 'Redo', run: () => ed().redo() },
+    { group: 'Edit', icon: 'duplicate', label: 'Duplicate layer', run: duplicate },
+    { group: 'Edit', icon: 'close', label: 'Delete layer', run: () => activeLayer && ed().removeLayer(activeLayer.id) },
+    { group: 'Select', icon: 'box', label: 'Group selection', run: groupSel },
+    { group: 'Select', icon: 'duplicate', label: 'Ungroup', run: ungroupSel },
+    { group: 'Select', icon: 'close', label: 'Deselect', run: () => ed().clearSelection() },
+    { group: 'View', icon: 'plus', label: 'Zoom in', run: () => setZoomAtCenter(ed().fc.getZoom() * 1.2) },
+    { group: 'View', icon: 'minus', label: 'Zoom out', run: () => setZoomAtCenter(ed().fc.getZoom() * 0.83) },
+    { group: 'View', icon: 'maximize', label: 'Fit to screen', run: fitToScreen },
+    { group: 'View', icon: 'search', label: 'Compare with original', run: openCompare },
+    { group: 'View', icon: mode_ === 'dark' ? 'sun' : 'moon', label: 'Toggle light/dark theme', run: () => setMode(m => m === 'dark' ? 'light' : 'dark') },
+    { group: 'View', icon: 'chevron', label: leftCollapsed ? 'Show side panel' : 'Hide side panel', run: () => setLeftCollapsed(s => !s) },
+    { group: 'View', icon: 'chevron', label: sideCollapsed ? 'Show Properties panel' : 'Hide Properties panel', run: () => setSideCollapsed(s => !s) },
+    { group: 'Insert', icon: 'type', label: 'Add text', run: () => ed().setTool('type') },
+    { group: 'Insert', icon: 'box', label: 'Add rectangle', run: () => ed().setTool('rect') },
+    { group: 'Insert', icon: 'eye', label: 'Add ellipse', run: () => ed().setTool('ellipse') },
+    { group: 'Insert', icon: 'duplicate', label: 'Add image…', run: addImagePick },
+    { group: 'Insert', icon: 'spark', label: 'Add CTA button', run: () => { ed().addCTA(null, { text: 'Shop now' }); ed().setTool('select'); } },
+    { group: 'Insert', icon: 'hoverselect', label: 'Add badge', run: () => { ed().addBadge(null, { text: 'Sale' }); ed().setTool('select'); } },
+    { group: 'Insert', icon: 'box', label: 'Add price', run: () => { ed().addPrice(null, { current: '$29', original: '$40', save: 'Save 27%' }); ed().setTool('select'); } },
+    { group: 'Insert', icon: 'box', label: 'Add brand lockup', run: () => { ed().addBrandLockup(null, { text: 'Brand' }); ed().setTool('select'); } },
+    { group: 'Export', icon: 'duplicate', label: 'Export PNG', run: () => { const u = ed().exportPNG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.png'); } },
+    { group: 'Export', icon: 'duplicate', label: 'Export JPG', run: () => { const u = ed().exportJPEG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.jpg'); } },
+    { group: 'Export', icon: 'duplicate', label: 'Export SVG', run: exportSvg },
+  ];
+  const cmdkAllItems = () => ALL_TOOL_ITEMS.concat(buildActionItems());
+  const cmdkFilteredItems = () => {
+    const q = cmdkQuery.trim().toLowerCase();
+    const all = cmdkAllItems();
+    return q ? all.filter(it => it.label.toLowerCase().includes(q) || it.group.toLowerCase().includes(q)) : all;
+  };
+  const openCmdk = () => { setCmdkQuery(''); setCmdkIdx(0); setCmdkOpen(true); requestAnimationFrame(() => cmdkInputRef.current && cmdkInputRef.current.focus()); };
+  const closeCmdk = () => setCmdkOpen(false);
+  const runCmdkItem = (it) => { closeCmdk(); if (it) it.run(); };
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openCmdk(); }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const setBlend = (blend) => activeLayer && ed().setLayer(activeLayer.id, { blend });
   const setOpacity = (opacity) => activeLayer && ed().setLayer(activeLayer.id, { opacity });
   const setFillColor = (color) => ed().setFill(color);
+  const setStroke = (patch) => ed().setStroke(patch);
   const setNumeric = (patch) => ed().setNumeric(patch);
   const flip = (axis) => ed().flipLayer(axis);
   const centerH = () => ed().fc.getActiveObject() && ed().alignActiveSelection('center');
@@ -431,6 +784,18 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const contractSel = async () => showSelResult(await ed().contractSelection(6));
   const selectSimilar = async () => showSelResult(await ed().selectSimilar());
   const recolorSel = (hex) => { const id = ed().recolorSelection(hex); setSelMsg(id ? '' : 'Make a selection first.'); };
+  // Clip/unclip the active layer to the current selection — non-destructive: hides pixels
+  // outside the selection via a clipPath, doesn't touch layer size/position/data. Needs BOTH an
+  // active layer and a selection, unlike Expand/Contract/Select similar/Recolor which only need
+  // a selection — ported from the vanilla demo's sel-clip/sel-unclip, previously absent here.
+  // clipLayerToSelection/clearLayerClip (editor.js) already resolve a fallback active layer via
+  // _lastActiveId when a drawing tool has discarded Fabric's own active object — checking
+  // fc.getActiveObject() directly here would re-introduce that exact bug in the UI guard even
+  // though the underlying call would have succeeded, so this checks the SAME resolved layer the
+  // editor methods themselves use.
+  const hasResolvableLayer = () => !!(ed().fc.getActiveObject() || (ed()._lastActiveId && ed()._byId(ed()._lastActiveId)));
+  const clipToSel = () => { if (!hasResolvableLayer()) { setSelMsg('Select a layer to clip first.'); return; } ed().clipLayerToSelection(); setSelMsg(''); };
+  const clearClip = () => { if (!hasResolvableLayer()) { setSelMsg('Select a layer first.'); return; } ed().clearLayerClip(); setSelMsg(''); };
   const [detectResults, setDetectResults] = useState([]);
   const detectObjects = async () => {
     setDetectResults([]);
@@ -454,10 +819,28 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     setAiBusy(false);
     setAiMsg(r.status === 'ok' ? 'Applied ✓ (undo to revert)' : r.message || r.reason);
   };
+  // "Replace background" — aiBgSwap() — previously absent from the React shell entirely (the
+  // vanilla demo has it as its own prompt+button, separate from the general "Apply AI edit"
+  // magic-edit box). Shares the AI tab's aiBusy/aiMsg state, same "every AI action in this tab
+  // disables while any one is in flight" contract runAI already has.
+  const [aiBgPrompt, setAiBgPrompt] = useState('');
+  const runAiBgSwap = async () => {
+    if (!aiBgPrompt.trim()) return;
+    setAiBusy(true); setAiMsg('');
+    const r = await ed().aiBgSwap(aiBgPrompt.trim());
+    setAiBusy(false);
+    setAiMsg(r.status === 'ok' ? 'Applied ✓ (undo to revert)' : r.message || r.reason);
+  };
   const saveKey = (k) => { ed().ai.provider().setKey(k); setNeedKey(!k); };
 
   // ── Design tab: canvas-level background/fill tools and add-element shortcuts ────────────
   const [designBusy, setDesignBusy] = useState(false);
+  // Extend-background nudge: a floating banner over the canvas that appears once enough of the
+  // artboard is still empty, offering the same AI-extend action as the Design tab's own button —
+  // debounced (400ms) since it re-samples the flattened canvas and 'change' events can fire in
+  // bursts. Ported from the vanilla demo's extend-banner/refreshExtendBanner, previously absent
+  // from the React shell entirely.
+  const [showExtendBanner, setShowExtendBanner] = useState(false);
   const [designMsg, setDesignMsg] = useState('');
   const extendBackground = () => setDesignMsg(ed().extendBackgroundToCanvas() ? '' : 'No background image to extend.');
   const aiExtendBackground = async () => {
@@ -465,6 +848,11 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     const r = await ed().aiExtendBackground();
     setDesignBusy(false);
     setDesignMsg(r.status === 'ok' ? '' : r.message || r.reason);
+  };
+  const onExtendBannerClick = async () => {
+    setShowExtendBanner(false);
+    const r = await ed().aiExtendBackground();
+    if (r.status !== 'ok') setDesignMsg(r.message || r.reason);
   };
   const fillWithColor = (color) => ed().fillWithColor(color);
   const pickImage = (onPicked) => {
@@ -478,7 +866,16 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     inp.click();
   };
   const fillWithImagePick = () => pickImage(src => ed().fillWithImage(src));
-  const addImagePick = () => pickImage(src => ed().addImage(src));
+  const addImagePick = () => pickImage(src => { ed().addImage(src); trackAsset(src, 'Image'); });
+  // Vector export — exportSVG() returns a plain SVG string (not a dataURL, unlike PNG/JPEG), so
+  // it needs wrapping in a Blob URL before it can be downloaded — same as the vanilla demo's own
+  // svg.onclick. Previously absent from the React shell entirely (only PNG/JPG existed here).
+  const exportSvg = () => {
+    const blob = new Blob([ed().exportSVG()], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    if (onExport) onExport(url); else downloadURL(url, 'canvasmith.svg');
+    URL.revokeObjectURL(url);
+  };
 
   // ── Convert to layers: guided review-box overlay over the canvas ────────────────────────
   // review = { flat, boxes: [{id, type, x, y, w, h} in scene px] } | null. Box positions are
@@ -487,6 +884,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   // contract as the vanilla demo's openReview/sceneToScreen.
   const [review, setReview] = useState(null);
   const [convertBusy, setConvertBusy] = useState(false);
+  const [convertMsg, setConvertMsg] = useState('');
   const sceneToScreen = (pt) => {
     const v = ed().fc.viewportTransform;
     const canvasRect = canvasRef.current.getBoundingClientRect();
@@ -501,7 +899,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     const boxes = regions.map((rg, i) => {
       const bbox = rg.bbox || {};
       return {
-        id: 'rv' + i, type: rg.type === 'text' ? 'text' : 'image',
+        id: 'rv' + i, type: REGION_COLOR[rg.type] ? rg.type : 'decorative',
         x: (bbox.x || 0) / 100 * ed().W, y: (bbox.y || 0) / 100 * ed().H,
         w: Math.max(12, (bbox.width || 0) / 100 * ed().W), h: Math.max(12, (bbox.height || 0) / 100 * ed().H),
       };
@@ -509,16 +907,23 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     setReview({ flat, boxes });
     ed().setTool('select');
   };
-  const closeReview = () => setReview(null);
-  const addReviewBox = () => setReview(r => r && ({ ...r, boxes: [...r.boxes, { id: 'rv' + Date.now(), type: 'image', x: ed().W * 0.35, y: ed().H * 0.35, w: ed().W * 0.3, h: ed().H * 0.3 }] }));
+  const closeReview = () => { setReview(null); setConvertMsg(''); };
+  const addReviewBox = () => setReview(r => r && ({ ...r, boxes: [...r.boxes, { id: 'rv' + Date.now(), type: 'decorative', x: ed().W * 0.35, y: ed().H * 0.35, w: ed().W * 0.3, h: ed().H * 0.3 }] }));
   const removeReviewBox = (id) => setReview(r => r && ({ ...r, boxes: r.boxes.filter(b => b.id !== id) }));
   const setReviewBoxType = (id, type) => setReview(r => r && ({ ...r, boxes: r.boxes.map(b => b.id === id ? { ...b, type } : b) }));
   const detectAndConvert = async () => {
-    if (needKey) return;
+    if (needKey) { setSideTab('ai'); return; }
     setConvertBusy(true);
+    setConvertMsg('');
     try {
       const r = await ed().detectRegions();
-      if (r.status === 'ok') openReview(r.result.flat, r.result.regions);
+      if (r.status === 'ok') { openReview(r.result.flat, r.result.regions); return; }
+      // Every failure reason (no_provider / rate_limited / provider_failed / no_regions) now
+      // surfaces to the user instead of the button silently resetting with no explanation —
+      // previously detectAndConvert() just swallowed a non-'ok' status entirely.
+      setConvertMsg(r.message || AI_REASON_MSG[r.reason] || r.reason || 'Detect failed — try again.');
+    } catch (e) {
+      setConvertMsg((e && e.message) ? e.message.slice(0, 120) : 'Detect failed — try again.');
     } finally {
       setConvertBusy(false);
     }
@@ -588,6 +993,65 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     else setAiInsert(a => a && ({ ...a, busy: false, msg: r.message || r.reason || 'Could not generate that.' }));
   };
 
+  // ── layer panel: thumbnails, rename, drag-to-reorder — ports the vanilla demo's layerThumb/
+  // layerSubtitle/renderLayers click+drag handling onto React state instead of direct DOM writes.
+  const layerThumb = (id) => {
+    const o = ed().fc.getObjects().find(x => x.id === id);
+    if (!o || !o.toDataURL) return null;
+    const cached = thumbCacheRef.current.get(id);
+    if (cached && cached.ver === thumbVerRef.current) return cached.url;
+    try {
+      const br = o.getBoundingRect ? o.getBoundingRect(true) : null;
+      const dim = br ? Math.max(br.width || 1, br.height || 1) : 1;
+      const mult = Math.max(0.03, Math.min(1, 56 / dim));
+      const url = o.toDataURL({ format: 'png', multiplier: mult, enableRetinaScaling: false });
+      thumbCacheRef.current.set(id, { ver: thumbVerRef.current, url });
+      return url;
+    } catch (e) { return null; }
+  };
+  const layerSubtitle = (l) => {
+    const o = ed().fc.getObjects().find(x => x.id === l.id);
+    if (!o) return l.role;
+    const w = Math.round(o.getScaledWidth ? o.getScaledWidth() : (o.width || 0));
+    const h = Math.round(o.getScaledHeight ? o.getScaledHeight() : (o.height || 0));
+    return w && h ? `${w}×${h} ${l.role}` : l.role;
+  };
+  const commitRename = (id, value) => {
+    setRenamingId(null);
+    const v = value.trim();
+    if (v) ed().setLayer(id, { name: v });
+  };
+  const onLayerRowClick = (l) => {
+    // Manual double-click detection keyed on the layer id (not the DOM node), same reasoning as
+    // the vanilla demo: activate() re-renders the row via React state on selection change, so a
+    // native 'dblclick' (which needs both clicks on the SAME node) would miss the common
+    // "click an unselected layer, then again to rename" gesture.
+    const now = Date.now();
+    const last = lastLayerClickRef.current;
+    if (last && last.id === l.id && now - last.t < 400) {
+      setRenamingId(l.id); lastLayerClickRef.current = null; return;
+    }
+    lastLayerClickRef.current = { id: l.id, t: now };
+    if (!l.active) ed().activate(l.id);
+  };
+  const onLayerDragStart = (e, l) => {
+    if (l.role === 'bg') { e.preventDefault(); return; }
+    setDragLayerId(l.id);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', l.id);
+  };
+  const onLayerDragOver = (e, l) => {
+    if (!dragLayerId || l.id === dragLayerId) return;
+    e.preventDefault();
+    if (dragOverId !== l.id) setDragOverId(l.id);
+  };
+  const onLayerDrop = (e, l) => {
+    e.preventDefault();
+    if (dragLayerId && l.id !== dragLayerId) ed().reorderLayerTo(dragLayerId, l.id, { after: false });
+    setDragLayerId(null); setDragOverId(null);
+  };
+  const onLayerDragEnd = () => { setDragLayerId(null); setDragOverId(null); };
+
   const palette = THEMES[mode_] || THEMES.dark;
   const style = Object.fromEntries(Object.entries({ ...palette, 'accent-ink': palette.accentInk, ...theme })
     .filter(([k]) => k !== 'accentInk').map(([k, v]) => ['--cm-' + k, v]));
@@ -617,6 +1081,22 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
               padding: 14, boxShadow: '0 8px 24px rgba(0,0,0,.35)',
             }}>
               <h4 style={{ margin: '0 0 10px', fontSize: 12 }}>Canvas size</h4>
+              <select className="cm-select" style={{ width: '100%', marginBottom: 8 }} defaultValue=""
+                onChange={e => {
+                  if (!e.target.value) return;
+                  const [w, h] = e.target.value.split('x').map(Number);
+                  setCsW(w); setCsH(h);
+                  e.target.value = '';
+                }}>
+                <option value="">Preset…</option>
+                {CANVAS_PRESETS.map(([group, sizes]) => (
+                  <optgroup key={group} label={group}>
+                    {sizes.map(([name, w, h]) => (
+                      <option key={name} value={`${w}x${h}`}>{name} — {w}×{h}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
               <div style={{ display: 'flex', gap: 8 }}>
                 <label style={{ flex: 1, fontSize: 11 }}>W
                   <input type="number" min="1" max="8000" value={csW} style={{ width: '100%' }}
@@ -638,11 +1118,21 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           )}
         </span>
         <span style={{ flex: 1 }} />
+        <div className="cm-zoom-pill">
+          <button className="cm-icon-btn" title="Zoom out (-)" onClick={() => setZoomAtCenter(ed().fc.getZoom() * 0.83)}><Icon name="minus" size={13} /></button>
+          <button className="cm-btn" style={{ minWidth: 44, justifyContent: 'center' }} title="Fit to screen (0)" onClick={fitToScreen}>{zoomPct}%</button>
+          <button className="cm-icon-btn" title="Zoom in (+)" onClick={() => setZoomAtCenter(ed().fc.getZoom() * 1.2)}><Icon name="plus" size={13} /></button>
+          <button className="cm-icon-btn" title="Fit to screen (0)" onClick={fitToScreen}><Icon name="maximize" size={13} /></button>
+        </div>
+        <button className="cm-btn" disabled={!compareReady} title="Compare with the first-loaded version" onClick={openCompare}>
+          <Icon name="search" size={13} />Compare
+        </button>
         <button className="cm-icon-btn" title={mode_ === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} onClick={() => setMode(mode_ === 'dark' ? 'light' : 'dark')}>
           <Icon name={mode_ === 'dark' ? 'sun' : 'moon'} />
         </button>
         <button className="cm-btn" onClick={() => { const u = ed().exportPNG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.png'); }}>⬇ PNG</button>
         <button className="cm-btn" onClick={() => { const u = ed().exportJPEG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.jpg'); }}>⬇ JPG</button>
+        <button className="cm-btn" onClick={exportSvg}>⬇ SVG</button>
       </div>
       <div className="cm-rail">
         {GROUPS.map(g => (
@@ -688,13 +1178,31 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                   {tool === 'select' ? 'Click a layer on the canvas, or drag to move the selected layer.'
                     : tool === 'crop' ? 'Drag the handles, then Apply crop in the top bar.'
                     : tool === 'aiinsert' ? 'Click a spot to draw there — or make a selection first and click inside it: the AI fills exactly that shape.'
+                    : tool === 'pen' ? 'Click to place points; click near the start (or press Enter) to close, Escape to cancel.'
                     : 'Drag on the canvas to use this tool.'}
                 </div>
+                {tool === 'pen' && (
+                  <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                    <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => ed().finishPen()}>✓ Finish path</button>
+                    <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => ed().cancelPen()}>Cancel</button>
+                  </div>
+                )}
+                {tool === 'crop' && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                    {CROP_RATIOS.map(([label, r]) => {
+                      const ratio = r === 'orig' ? ed().W / ed().H : r;
+                      const on = r === 'orig' ? opts.cropRatio === (ed().W / ed().H) : opts.cropRatio === r;
+                      return (
+                        <button key={label} className="cm-chip" data-on={on} onClick={() => ed().setToolOptions({ cropRatio: ratio })}>{label}</button>
+                      );
+                    })}
+                  </div>
+                )}
                 <button className="cm-toggle" data-on={snapOn} onClick={toggleSnap} style={{ marginTop: 10 }}>
                   {snapOn ? 'Snap: on' : 'Snap: off'}
                 </button>
 
-                {(tool === 'objectselect' || tool === 'hoverselect') && (
+                {(tool === 'objectselect' || tool === 'hoverselect' || tool === 'magicwand') && (
                   <React.Fragment>
                     <div className="cm-note" style={{ marginTop: 8 }}>
                       {objselectBusy ? 'Finding object…'
@@ -808,34 +1316,60 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                   <input type="color" style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }}
                     onChange={e => recolorSel(e.target.value)} />
                 </label>
+                <div className="cm-row" style={{ marginTop: 6 }}>
+                  <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={clipToSel}><Icon name="crop" size={13} /> Clip layer to selection</button>
+                  <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={clearClip}><Icon name="close" size={13} /> Clear clip</button>
+                </div>
                 {selMsg && <div className="cm-note">{selMsg}</div>}
               </div>
             )}
 
             {leftTab === 'layers' && (
               <div>
-                {layers.map(l => (
-                  <div key={l.id} className="cm-layer" data-on={l.active} onClick={() => ed().activate(l.id)}>
-                    <span className="cm-eye" onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { visible: !l.visible }); }}><Icon name={l.visible ? 'eye' : 'eyeOff'} size={13} /></span>
-                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: l.visible ? 1 : 0.4 }}>{l.name}</span>
-                    {l.maskable && (l.hasMask ? (
-                      <React.Fragment>
-                        <span className="cm-eye" title={l.editingMask ? 'Stop editing mask' : 'Edit mask'}
-                          style={{ opacity: (l.editingMask || !l.maskEnabled) ? 1 : 0.7, color: l.editingMask ? 'var(--cm-accent)' : undefined }}
-                          onClick={e => { e.stopPropagation(); if (l.editingMask) ed().exitMaskEdit(); else { ed().activate(l.id); ed().enterMaskEdit(l.id); } }}>
+                {layers.map(l => {
+                  const thumb = layerThumb(l.id);
+                  return (
+                    <div key={l.id} className="cm-layer" data-on={l.active} data-dragover={dragOverId === l.id} data-dragging={dragLayerId === l.id}
+                      draggable={l.role !== 'bg'}
+                      onDragStart={e => onLayerDragStart(e, l)} onDragOver={e => onLayerDragOver(e, l)}
+                      onDragLeave={() => setDragOverId(id => id === l.id ? null : id)} onDrop={e => onLayerDrop(e, l)} onDragEnd={onLayerDragEnd}
+                      onClick={() => { if (renamingId !== l.id) onLayerRowClick(l); }}>
+                      <span className="cm-layer-thumb">
+                        {thumb ? <img src={thumb} alt="" /> : <Icon name={l.role === 'text' ? 'type' : l.role === 'bg' ? 'duplicate' : 'box'} size={14} />}
+                      </span>
+                      <span className="cm-eye" onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { visible: !l.visible }); }}><Icon name={l.visible ? 'eye' : 'eyeOff'} size={13} /></span>
+                      <span className="cm-eye" title={l.locked ? 'Unlock' : 'Lock'} style={{ opacity: l.locked ? 1 : 0.5 }} onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { locked: !l.locked }); }}><Icon name="lock" size={13} /></span>
+                      {renamingId === l.id ? (
+                        <input className="cm-layer-rename" defaultValue={l.name} autoFocus
+                          onClick={e => e.stopPropagation()}
+                          onFocus={e => e.target.select()}
+                          onKeyDown={e => { if (e.key === 'Enter') commitRename(l.id, e.target.value); else if (e.key === 'Escape') setRenamingId(null); }}
+                          onBlur={e => commitRename(l.id, e.target.value)} />
+                      ) : (
+                        <span style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: l.visible ? 1 : 0.4 }}>{l.name}</span>
+                          <span style={{ fontSize: 10, color: 'var(--cm-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{layerSubtitle(l)}</span>
+                        </span>
+                      )}
+                      {l.maskable && (l.hasMask ? (
+                        <React.Fragment>
+                          <span className="cm-eye" title={l.editingMask ? 'Stop editing mask' : 'Edit mask'}
+                            style={{ opacity: (l.editingMask || !l.maskEnabled) ? 1 : 0.7, color: l.editingMask ? 'var(--cm-accent)' : undefined }}
+                            onClick={e => { e.stopPropagation(); if (l.editingMask) ed().exitMaskEdit(); else { ed().activate(l.id); ed().enterMaskEdit(l.id); } }}>
+                            <Icon name="mask" size={13} />
+                          </span>
+                          <span className="cm-eye" title="Delete mask" onClick={e => { e.stopPropagation(); ed().removeMask(l.id); }}><Icon name="close" size={13} /></span>
+                        </React.Fragment>
+                      ) : (
+                        <span className="cm-eye" title="Add layer mask" onClick={e => { e.stopPropagation(); ed().addMask(l.id); ed().enterMaskEdit(l.id); }}>
                           <Icon name="mask" size={13} />
                         </span>
-                        <span className="cm-eye" title="Delete mask" onClick={e => { e.stopPropagation(); ed().removeMask(l.id); }}><Icon name="close" size={13} /></span>
-                      </React.Fragment>
-                    ) : (
-                      <span className="cm-eye" title="Add layer mask" onClick={e => { e.stopPropagation(); ed().addMask(l.id); ed().enterMaskEdit(l.id); }}>
-                        <Icon name="mask" size={13} />
-                      </span>
-                    ))}
-                    <span className="cm-eye" title="Up" onClick={e => { e.stopPropagation(); ed().moveLayer(l.id, 'up'); }}><Icon name="up" size={13} /></span>
-                    <span className="cm-eye" title="Delete" onClick={e => { e.stopPropagation(); ed().removeLayer(l.id); }}><Icon name="close" size={13} /></span>
-                  </div>
-                ))}
+                      ))}
+                      <span className="cm-eye" title="Up" onClick={e => { e.stopPropagation(); ed().moveLayer(l.id, 'up'); }}><Icon name="up" size={13} /></span>
+                      {l.role !== 'bg' && <span className="cm-eye" title="Delete" onClick={e => { e.stopPropagation(); ed().removeLayer(l.id); }}><Icon name="close" size={13} /></span>}
+                    </div>
+                  );
+                })}
                 <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} onClick={() => ed().addAdjustmentLayer()}>
                   <Icon name="contrast" size={13} /> Add adjustment layer
                 </button>
@@ -844,22 +1378,27 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           </React.Fragment>
         )}
       </div>
-      <div className="cm-stage" ref={stageRef}>
+      <div className="cm-stage" ref={stageRef} onDragOver={onStageDragOver} onDrop={onStageDrop}>
         <canvas ref={canvasRef} />
+        {showExtendBanner && (
+          <button className="cm-extend-banner" onClick={onExtendBannerClick}>
+            <Icon name="search" size={13} />Background doesn't fill the canvas — AI-extend it
+          </button>
+        )}
         {review && (
           <React.Fragment>
             <div className="cm-review-overlay">
               {review.boxes.map(b => {
                 const p = sceneToScreen({ x: b.x, y: b.y });
                 const v = ed().fc.viewportTransform;
+                const color = REGION_COLOR[b.type] || REGION_COLOR.decorative;
                 return (
                   <div key={b.id} className="cm-review-box" data-type={b.type}
-                    style={{ left: p.x, top: p.y, width: b.w * v[0], height: b.h * v[3] }}
+                    style={{ left: p.x, top: p.y, width: b.w * v[0], height: b.h * v[3], borderColor: color, background: color + '1f' }}
                     onMouseDown={e => onReviewBoxMouseDown(e, b, 'move')}>
                     <div className="cm-review-tag" onMouseDown={e => e.stopPropagation()}>
                       <select value={b.type} onChange={e => setReviewBoxType(b.id, e.target.value)}>
-                        <option value="image">Image</option>
-                        <option value="text">Text</option>
+                        {Object.entries(REGION_TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                       </select>
                       <button onClick={() => removeReviewBox(b.id)} title="Remove"><Icon name="close" size={10} /></button>
                     </div>
@@ -1052,6 +1591,19 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                       </React.Fragment>
                     )}
 
+                    {props.hasBorder && (
+                      <React.Fragment>
+                        <div className="cm-grp">Border</div>
+                        <div className="cm-slider-row">Width <input type="range" min="0" max="40" value={props.strokeWidth} onChange={e => setStroke({ width: +e.target.value })} /></div>
+                        {props.strokeWidth > 0 && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                            <input type="color" value={props.stroke} title="Border colour" onChange={e => setStroke({ color: e.target.value })} />
+                            <span className="cm-note" style={{ margin: 0 }}>Colour of the border/outline.</span>
+                          </div>
+                        )}
+                      </React.Fragment>
+                    )}
+
                     <div className="cm-grp">Blend &amp; opacity</div>
                     <select className="cm-select" value={props.blend} onChange={e => setBlend(e.target.value)}>
                       {BLEND_MODES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
@@ -1126,6 +1678,31 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                   <button className="cm-btn" onClick={() => ed().setTool('brush')}><Icon name="wand" size={13} />Brush</button>
                 </div>
                 <div className="cm-note">Drag any layer to move · pull the handles to resize · grab the top handle to rotate.</div>
+
+                <div className="cm-grp">Ad copy</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <button className="cm-btn" onClick={() => { ed().addCTA(null, { text: 'Shop now' }); ed().setTool('select'); }}><Icon name="spark" size={13} />CTA button</button>
+                  <button className="cm-btn" onClick={() => { ed().addBadge(null, { text: 'Sale' }); ed().setTool('select'); }}><Icon name="hoverselect" size={13} />Badge</button>
+                  <button className="cm-btn" onClick={() => { ed().addPrice(null, { current: '$29', original: '$40', save: 'Save 27%' }); ed().setTool('select'); }}><Icon name="box" size={13} />Price</button>
+                  <button className="cm-btn" onClick={() => { ed().addBrandLockup(null, { text: 'Brand' }); ed().setTool('select'); }}><Icon name="box" size={13} />Brand lockup</button>
+                </div>
+
+                {assets.length > 0 && (
+                  <React.Fragment>
+                    <div className="cm-grp">Assets · click or drag in</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                      {assets.map(a => (
+                        <div key={a.id} className="cm-asset-thumb" title={'Drag onto the canvas, or click to add · ' + a.name}
+                          draggable
+                          onDragStart={e => { e.dataTransfer.effectAllowed = 'copy'; e.dataTransfer.setData('text/x-canvasmith-asset', a.src); e.dataTransfer.setData('text/plain', a.src); }}
+                          onClick={() => ed().addImage(a.src)}>
+                          <img src={a.src} alt="" />
+                          <span>{a.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </React.Fragment>
+                )}
               </div>
             )}
 
@@ -1173,6 +1750,14 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                         <button key={s} className="cm-chip" onClick={() => setAiPrompt(s)}><Icon name="spark" size={11} />{s}</button>
                       ))}
                     </div>
+
+                    <h4>Replace background</h4>
+                    <input className="cm-ai-textarea" style={{ width: '100%' }} placeholder='e.g. "marble table, warm light"'
+                      value={aiBgPrompt} onChange={e => setAiBgPrompt(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') runAiBgSwap(); }} />
+                    <button className="cm-btn cm-btn-accent" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} disabled={aiBusy || !aiBgPrompt.trim()} onClick={runAiBgSwap}>
+                      {aiBusy ? 'Working…' : <React.Fragment><Icon name="spark" size={14} />Replace background</React.Fragment>}
+                    </button>
                   </React.Fragment>
                 )}
 
@@ -1187,12 +1772,61 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                 <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} disabled={convertBusy || !!review} onClick={selectOneManually}>
                   <Icon name="lasso" size={13} />Select one object manually
                 </button>
+                {convertMsg && <div className="cm-note" style={{ color: 'var(--cm-accent)' }}>{convertMsg}</div>}
                 <div className="cm-note">Auto-detect everything, or draw one box yourself — adjust, add or remove boxes, then create layers.</div>
               </React.Fragment>
             )}
           </React.Fragment>
         )}
       </div>
+      {compareOpen && (
+        <div className="cm-compare-backdrop">
+          <div className="cm-compare-header">
+            <div>
+              <strong>Compare</strong>
+              <p>Compare your edited canvas with the first version you opened</p>
+            </div>
+            <button className="cm-btn" onClick={closeCompare}><Icon name="close" size={14} />Close</button>
+          </div>
+          <div className="cm-compare-panes">
+            <div className="cm-compare-pane"><span className="cm-compare-label">Original</span><img src={compareSnapshotRef.current} alt="Original" /></div>
+            <div className="cm-compare-pane"><span className="cm-compare-label">Current</span><img src={compareAfter} alt="Current" /></div>
+          </div>
+        </div>
+      )}
+      {cmdkOpen && (
+        <div className="cm-cmdk-backdrop" onClick={e => { if (e.target === e.currentTarget) closeCmdk(); }}>
+          <div className="cm-cmdk-box">
+            <div className="cm-cmdk-search-row">
+              <Icon name="search" size={16} />
+              <input ref={cmdkInputRef} className="cm-cmdk-input" placeholder="Search tools & actions…" autoComplete="off"
+                value={cmdkQuery}
+                onChange={e => { setCmdkQuery(e.target.value); setCmdkIdx(0); }}
+                onKeyDown={e => {
+                  const items = cmdkFilteredItems();
+                  if (e.key === 'ArrowDown') { e.preventDefault(); setCmdkIdx(i => Math.min(items.length - 1, i + 1)); }
+                  else if (e.key === 'ArrowUp') { e.preventDefault(); setCmdkIdx(i => Math.max(0, i - 1)); }
+                  else if (e.key === 'Enter') { e.preventDefault(); runCmdkItem(items[cmdkIdx]); }
+                  else if (e.key === 'Escape') { e.preventDefault(); closeCmdk(); }
+                }} />
+              <span className="cm-tag mono">Esc</span>
+            </div>
+            <div className="cm-cmdk-list">
+              {cmdkFilteredItems().length === 0 ? (
+                <div className="cm-cmdk-empty">No matching commands</div>
+              ) : cmdkFilteredItems().map((it, i) => (
+                <div key={it.group + it.label} className="cm-cmdk-item" data-on={i === cmdkIdx}
+                  onMouseMove={() => { if (i !== cmdkIdx) setCmdkIdx(i); }}
+                  onClick={() => runCmdkItem(it)}>
+                  <Icon name={it.icon} size={15} />
+                  <span className="lbl">{it.label}</span>
+                  <span className="grp">{it.group}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

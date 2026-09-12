@@ -156,9 +156,11 @@
   /* ── guided "convert to layers" region review ────────────────────────────────────────────── */
   #review-overlay { position:absolute; inset:0; z-index:18 }
   #review-overlay[hidden] { display:none }
+  /* Per-type border/fill color comes from REGION_COLOR (editor.js) via an inline style on each
+     box — not a CSS[data-type=] rule — so the 5 region types (product/logo/text/sticker/
+     decorative) share one color source with commitRegions' own REGION_ROLE mapping instead of
+     duplicating the palette here and risking drift. */
   .review-box { position:absolute; border:2px dashed; border-radius:5px; cursor:move; box-sizing:border-box }
-  .review-box[data-type=text] { border-color:#ffd166; background:rgba(255,209,102,.12) }
-  .review-box[data-type=image] { border-color:#ef6a2d; background:rgba(239,106,45,.12) }
   .review-tag { position:absolute; top:-24px; left:-2px; display:flex; align-items:center; gap:4px; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:2px 4px; box-shadow:var(--shadow-sm) }
   .review-tag select { all:unset; font-size:10.5px; font-weight:600; color:var(--ink); cursor:pointer; padding:1px 3px }
   .review-tag button { all:unset; box-sizing:border-box; cursor:pointer; width:16px; height:16px; display:flex; align-items:center; justify-content:center; border-radius:4px; color:var(--dim) }
@@ -625,6 +627,17 @@
         <button class="chip" id="add-paint"></button>
       </div>
       <div class="note">Drag &amp; drop / paste an image anywhere on the canvas, or open this page with <code>?image=&lt;url&gt;</code>.</div>
+      <div class="grp">Ad copy</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        <button class="chip" id="add-cta"></button>
+        <button class="chip" id="add-badge"></button>
+        <button class="chip" id="add-price"></button>
+        <button class="chip" id="add-brand"></button>
+      </div>
+      <div id="assets-tray" style="display:none">
+        <div class="grp">Assets · click or drag in</div>
+        <div class="asset-grid" style="display:flex;flex-wrap:wrap;gap:10px"></div>
+      </div>
     </div>
     <div id="stickers-panel" style="display:none; flex-direction:column; flex:1; min-height:0; overflow-y:auto">
       <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Stickers</div>
@@ -641,6 +654,7 @@
       </div>
       <button class="act act-accent" id="convert-detect" style="width:100%"></button>
       <button class="act" id="convert-manual" style="width:100%"></button>
+      <div class="note" id="convert-msg" style="display:none;color:var(--accent)"></div>
       <div class="note">Auto-detect everything, or draw one box yourself — adjust, add or remove boxes, then create layers.</div>
     </div>
     <div id="right-scroll-cue"></div>
@@ -677,7 +691,7 @@
 </div>
 
 <script type="module">
-import { Editor, GeminiProvider, installBridge, installDropImport, selectionToPath2D, selectionPolys, makeShape, makeText, installKeybindings, TOOL_KEYS, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, stickerSpec }
+import { Editor, GeminiProvider, installBridge, installDropImport, selectionToPath2D, selectionPolys, makeShape, makeText, installKeybindings, TOOL_KEYS, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, stickerSpec, REGION_COLOR }
   from '../../packages/core/src/index.js';
 
 const ed = new Editor({ fabric: window.fabric, canvasEl: document.getElementById('cv'), width: 960, height: 640 });
@@ -719,6 +733,13 @@ const ICON_PATHS = {
      cue) instead of reusing wand2 verbatim. */
   'lasso-mag': 'M4 12c0-4.4 3.6-7 8-7s8 2.6 8 7-3.6 7-8 7c-1.2 0-1.8 1-1.8 2a1.8 1.8 0 0 0 2.8 1.5M5.5 17.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z M4.5 9.5l1.6.6M18 8.5l1.7-.7M9.5 4.6l.4 1.7M15 19.8l-.6-1.7',
   wand: 'M6 18L16 8M14 4l1.5 1.5M19 7l1.5-1.5M18 12l2 .5M9 3l.5 2M20 17l-1.5 1.5',          // ditto's wand2 (magic wand)
+  /* ditto's own toolbar reuses "wand2" for BOTH its 'wand' (object-select bbox stub, key W) and
+     its 'magicwand' (real CV click-to-grab, key A) tools too — same never-shown-side-by-side
+     reasoning as lasso/lasso-mag above. This demo's flat list needs them visually distinct:
+     objectselect-bbox keeps ditto's wand2 glyph verbatim (it's the tool ditto's own W key names
+     "Object / magic select"), magicwand gets a small sparkle added to the wand tip as the CV cue. */
+  'objectselect-bbox': 'M6 18L16 8M14 4l1.5 1.5M19 7l1.5-1.5M18 12l2 .5M9 3l.5 2M20 17l-1.5 1.5',
+  magicwand: 'M6 18L16 8M14 4l1.5 1.5M19 7l1.5-1.5M18 12l2 .5M9 3l.5 2M20 17l-1.5 1.5 M4.5 19.5l1.4 1.4M5.2 20.2h.01',
   objectselect: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z',           // ditto's spark
   hoverselect: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',   // ditto's eye
   expand: 'M3 8V3h5M21 8V3h-5M3 16v5h5M21 16v5h-5',
@@ -770,6 +791,7 @@ const ICON_PATHS = {
   maximize: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
   pen: 'M12 3l7 7-9 9-5 1 1-5 6-6 2 2M11 6l4 4',
   search: 'circle:11,11,7|M21 21l-4.35-4.35',
+  tag: 'M20.6 12.2 12.8 20a2 2 0 0 1-2.8 0l-6-6a2 2 0 0 1 0-2.8L11.8 3.4a2 2 0 0 1 1.4-.6H19a2 2 0 0 1 2 2v5.8a2 2 0 0 1-.4 1.6z M16.5 7a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1z',
 };
 function iconSVG(name, size = 15) {
   const spec = ICON_PATHS[name]; if (!spec) return '';
@@ -929,6 +951,7 @@ const TOOL_LABELS = {
   marquee: 'Rectangular marquee', 'marquee-ellipse': 'Elliptical marquee', lasso: 'Lasso (freehand)',
   'lasso-poly': 'Polygonal lasso · click to add points', 'lasso-mag': 'Magnetic lasso · snaps to edges',
   wand: 'Magic wand · click a colour region', objectselect: 'Object select', hoverselect: 'Hover select · preview on hover',
+  'objectselect-bbox': 'Object / magic select', magicwand: 'Magic wand · click an object to grab it',
   heal: 'Spot heal', clone: 'Clone stamp', redeye: 'Red-eye',
   brush: 'Brush', pencil: 'Pencil', eraser: 'Eraser',
   bucket: 'Paint bucket', gradient: 'Gradient',
@@ -945,14 +968,17 @@ const TOOL_HINTS = {
   wand: 'Click a colour region to select it. Shift-click adds, Alt-click subtracts.',
   objectselect: 'Click an object to select it (OpenCV-assisted). Shift-click adds, Alt-click subtracts.',
   hoverselect: 'Hover to preview what a click would select, then click to commit it.',
+  'objectselect-bbox': 'Click selects the active layer’s own bounding box; with nothing active, selects a center region.',
+  magicwand: 'Click an object to grab it (OpenCV-assisted). Shift-click adds, Alt-click subtracts, re-click cycles overlapping objects.',
   pen: 'Click to place points; click near the start (or press Enter) to close into a filled shape, Escape to cancel.',
   aiinsert: 'AI insert · click a spot to draw there — or make a selection first and click inside it: the AI fills exactly that shape',
 };
 const TOOLGROUPS = [
   [{ id: 'select', icon: 'select' }, { id: 'hand', icon: 'hand' }],
   [{ id: 'marquee', icon: 'marquee' }, { id: 'marquee-ellipse', icon: 'marquee-ellipse' }, { id: 'lasso', icon: 'lasso' },
-   { id: 'lasso-poly', icon: 'lasso-poly' }, { id: 'lasso-mag', icon: 'lasso-mag' }, { id: 'wand', icon: 'wand' }],
-  [{ id: 'objectselect', icon: 'objectselect' }, { id: 'hoverselect', icon: 'hoverselect' }],
+   { id: 'lasso-poly', icon: 'lasso-poly' }, { id: 'lasso-mag', icon: 'lasso-mag' }, { id: 'wand', icon: 'wand' },
+   { id: 'objectselect-bbox', icon: 'objectselect-bbox' }],
+  [{ id: 'magicwand', icon: 'magicwand' }, { id: 'objectselect', icon: 'objectselect' }, { id: 'hoverselect', icon: 'hoverselect' }],
   [{ id: 'aiinsert', icon: 'spark' }],
   [{ id: 'crop', icon: 'crop' }],
   [{ id: 'eyedropper', icon: 'eyedropper' }],
@@ -1064,7 +1090,7 @@ ed.on('tool', t => {
   document.getElementById('tool-name').textContent = t;
   document.getElementById('tool-hint').textContent = TOOL_HINTS[t] || 'Drag on the canvas to use this tool.';
   document.getElementById('gradient-section').style.display = t === 'gradient' ? '' : 'none';
-  document.getElementById('objselect-section').style.display = (t === 'objectselect' || t === 'hoverselect') ? '' : 'none';
+  document.getElementById('objselect-section').style.display = (t === 'objectselect' || t === 'hoverselect' || t === 'magicwand') ? '' : 'none';
 });
 ed._emit('tool', ed.tool);   // initial paint of the Tool panel
 
@@ -1081,7 +1107,7 @@ function refreshObjselectStatus() {
   objselectAddBtn.innerHTML = iconSVG('spark', 12) + '<span>Add' + (ed.toolOpts.addMode ? ' ✓' : '') + '</span>';
   objselectAddBtn.dataset.on = String(ed.toolOpts.addMode);
   objselectTolerance.value = ed.toolOpts.tolerance;
-  if (ed.tool !== 'objectselect' && ed.tool !== 'hoverselect') return;
+  if (ed.tool !== 'objectselect' && ed.tool !== 'hoverselect' && ed.tool !== 'magicwand') return;
   const n = ed.selection ? selectionPolys(ed.selection).length : 0;
   objselectStatus.textContent = objselectBusy ? 'Finding object…'
     : n > 1 ? n + ' selected · ⇧-click (or Add) to keep combining'
@@ -1098,7 +1124,7 @@ ed.on('hover', () => { if (objselectBusy) { objselectBusy = false; refreshObjsel
 // "mouse down on objectselect/hoverselect, no cached mask" so the status line reflects the async
 // cv round-trip instead of sitting on stale text while a click's grabCut/flood-fill is in flight.
 ed.fc.on('mouse:down', () => {
-  if (ed.tool !== 'objectselect' && ed.tool !== 'hoverselect') return;
+  if (ed.tool !== 'objectselect' && ed.tool !== 'hoverselect' && ed.tool !== 'magicwand') return;
   objselectBusy = true; refreshObjselectStatus();
   setTimeout(() => { if (objselectBusy) { objselectBusy = false; refreshObjselectStatus(); } }, 4000);   // safety timeout, not a real cap on cv latency
 });
@@ -1479,12 +1505,18 @@ recolorInput.onchange = e => { const id = ed.recolorSelection(e.target.value); i
    unlike Expand/Contract/Select similar/Recolor which only need a selection. ──────────────────── */
 const clipBtn = document.getElementById('sel-clip'); clipBtn.innerHTML = iconSVG('crop', 13) + '<span>Clip layer to selection</span>';
 const unclipBtn = document.getElementById('sel-unclip'); unclipBtn.innerHTML = iconSVG('close', 13) + '<span>Clear clip</span>';
+// clipLayerToSelection/clearLayerClip (editor.js) resolve a fallback active layer via
+// _lastActiveId when a drawing tool (marquee/lasso/wand — exactly when a pixel selection exists)
+// has already discarded Fabric's own active object, so this guard checks the SAME resolved layer
+// those methods use rather than fc.getActiveObject() directly, which would re-introduce that bug
+// in the UI guard even though the underlying call would have succeeded.
+const hasResolvableLayer = () => !!(ed.fc.getActiveObject() || (ed._lastActiveId && ed._byId(ed._lastActiveId)));
 clipBtn.onclick = () => {
-  if (!ed.fc.getActiveObject()) { selMsg.textContent = 'Select a layer to clip first.'; return; }
+  if (!hasResolvableLayer()) { selMsg.textContent = 'Select a layer to clip first.'; return; }
   ed.clipLayerToSelection(); selMsg.textContent = '';
 };
 unclipBtn.onclick = () => {
-  if (!ed.fc.getActiveObject()) { selMsg.textContent = 'Select a layer first.'; return; }
+  if (!hasResolvableLayer()) { selMsg.textContent = 'Select a layer first.'; return; }
   ed.clearLayerClip(); selMsg.textContent = '';
 };
 
@@ -1952,6 +1984,19 @@ document.getElementById('add-image').onclick = () => file.click();
 document.getElementById('add-paint').onclick = () => ed.setTool('brush');
 document.getElementById('add-adjustment').onclick = () => { ed.addAdjustmentLayer(); };
 
+/* ── ad copy: CTA / badge / price / brand lockup (adtext.js via editor.js's addCTA etc.) ──────
+   Each editor method already centers on the artboard, adds, activates and commits — these chips
+   just supply the starting copy/colour a user can immediately edit afterward, same "insert a
+   sensible default, let them customize it" convention as add-text's placeholder string. */
+document.getElementById('add-cta').innerHTML = iconSVG('spark', 12) + '<span>CTA</span>';
+document.getElementById('add-badge').innerHTML = iconSVG('hoverselect', 12) + '<span>Badge</span>';
+document.getElementById('add-price').innerHTML = iconSVG('tag', 12) + '<span>Price</span>';
+document.getElementById('add-brand').innerHTML = iconSVG('box', 12) + '<span>Brand</span>';
+document.getElementById('add-cta').onclick = () => { ed.addCTA(null, { text: 'Shop now' }); ed.setTool('select'); };
+document.getElementById('add-badge').onclick = () => { ed.addBadge(null, { text: 'Sale' }); ed.setTool('select'); };
+document.getElementById('add-price').onclick = () => { ed.addPrice(null, { current: '$29', original: '$40', save: 'Save 27%' }); ed.setTool('select'); };
+document.getElementById('add-brand').onclick = () => { ed.addBrandLockup(null, { text: 'Brand' }); ed.setTool('select'); };
+
 /* ── Design tab: background/fill tools ────────────────────────────────────────────────── */
 const designMsgEl = document.getElementById('design-msg');
 const designExtendBtn = document.getElementById('design-extend-bg');
@@ -2077,8 +2122,9 @@ refreshRightScrollCue();
    the reference's Fabric-region-rect approach and avoids ever touching the real scene until Commit
    is clicked. Canvas-scene ↔ screen mapping uses fc.viewportTransform directly since the canvas
    element itself never gets CSS-scaled (see fitToScreen/setZoomAtCenter above — only the content
-   inside it moves/scales). Type is limited to text/image, matching what detectRegions() actually
-   returns (canvasmith's AI contract has no product/logo/sticker taxonomy to review). ───────────── */
+   inside it moves/scales). Type is the full product/logo/text/sticker/decorative vocabulary
+   REGION_COLOR/REGION_ROLE (editor.js) know about — commitRegions() maps each to its committed
+   layer's role (text -> headline, sticker -> decorative, others pass through unchanged). ───────── */
 const reviewOverlay = document.getElementById('review-overlay'), reviewToolbar = document.getElementById('review-toolbar');
 const reviewCountEl = document.getElementById('review-count'), reviewCommitBtn = document.getElementById('review-commit'), reviewCancelBtn = document.getElementById('review-cancel'), reviewAddBoxBtn = document.getElementById('review-add-box');
 reviewCommitBtn.textContent = 'Create layers';
@@ -2097,7 +2143,7 @@ function openReview(flat, regions) {
   const boxes = regions.map((rg, i) => {
     const bbox = rg.bbox || {};
     return {
-      id: 'rv' + i, type: rg.type === 'text' ? 'text' : 'image', content: rg.content || '',
+      id: 'rv' + i, type: REGION_COLOR[rg.type] ? rg.type : 'decorative', content: rg.content || '',
       x: (bbox.x || 0) / 100 * ed.W, y: (bbox.y || 0) / 100 * ed.H,
       w: Math.max(12, (bbox.width || 0) / 100 * ed.W), h: Math.max(12, (bbox.height || 0) / 100 * ed.H),
     };
@@ -2111,18 +2157,21 @@ function closeReview() {
   reviewState = null;
   reviewOverlay.hidden = true; reviewToolbar.hidden = true;
   reviewOverlay.innerHTML = '';
+  const msgEl = document.getElementById('convert-msg');
+  if (msgEl) msgEl.style.display = 'none';
 }
 function renderReviewBoxes() {
   if (!reviewState) return;
   const v = ed.fc.viewportTransform;
   reviewCountEl.textContent = reviewState.boxes.length + (reviewState.boxes.length === 1 ? ' region' : ' regions');
+  const TYPE_LABELS = { product: 'Product', logo: 'Logo', text: 'Text', sticker: 'Sticker', decorative: 'Decorative' };
   reviewOverlay.innerHTML = reviewState.boxes.map(b => {
     const p = sceneToScreen({ x: b.x, y: b.y });
-    return `<div class="review-box" data-id="${b.id}" data-type="${b.type}" style="left:${p.x}px;top:${p.y}px;width:${b.w * v[0]}px;height:${b.h * v[3]}px">
+    const color = REGION_COLOR[b.type] || REGION_COLOR.decorative;
+    return `<div class="review-box" data-id="${b.id}" data-type="${b.type}" style="left:${p.x}px;top:${p.y}px;width:${b.w * v[0]}px;height:${b.h * v[3]}px;border-color:${color};background:${color}1f">
       <div class="review-tag" data-drag="tag">
         <select data-act="type">
-          <option value="image" ${b.type === 'image' ? 'selected' : ''}>Image</option>
-          <option value="text" ${b.type === 'text' ? 'selected' : ''}>Text</option>
+          ${Object.entries(TYPE_LABELS).map(([v, l]) => `<option value="${v}" ${b.type === v ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
         <button data-act="del" title="Remove">${iconSVG('close', 10)}</button>
       </div>
@@ -2169,7 +2218,7 @@ document.addEventListener('mouseup', () => {
   if (_reviewDrag) { _reviewDrag = null; renderReviewBoxes(); }
 });
 reviewAddBoxBtn.onclick = () => {
-  const b = { id: 'rv' + Date.now(), type: 'image', content: '', x: ed.W * 0.35, y: ed.H * 0.35, w: ed.W * 0.3, h: ed.H * 0.3 };
+  const b = { id: 'rv' + Date.now(), type: 'decorative', content: '', x: ed.W * 0.35, y: ed.H * 0.35, w: ed.W * 0.3, h: ed.H * 0.3 };
   reviewState.boxes.push(b);
   renderReviewBoxes();
 };
@@ -2195,9 +2244,54 @@ openfile.onclick = () => file.click();
    format, not something a dropped-in photo gets to resize. (Editor#openImage's fit-artboard
    behavior still exists in core for hosts that want "start a document from this photo"; this demo
    just doesn't use it as the default add-image path.) */
-file.onchange = () => { const f = file.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => ed.addImage(r.result); r.readAsDataURL(f); };
-installDropImport(document.getElementById('stage'), src => ed.addImage(src));
-installBridge(src => ed.addImage(src));   // ?image= / #img= / postMessage / localStorage handoff
+/* ── asset tray: every image source added to the document this session, click or drag back in ──
+   Session-only (no localStorage) — a generic library has no "generated ad" / "product photo"
+   asset taxonomy of its own, so this tracks exactly what the user has actually brought into THIS
+   document rather than inventing categories. Deduped by src. */
+const assets = [];
+const assetsEl = document.getElementById('assets-tray');
+function trackAsset(src, name) {
+  if (assets.some(a => a.src === src)) return;
+  assets.push({ id: 'asset' + Date.now() + Math.random().toString(36).slice(2, 6), src, name: name || 'Image' });
+  renderAssets();
+}
+function renderAssets() {
+  if (!assetsEl) return;
+  assetsEl.style.display = assets.length ? '' : 'none';
+  assetsEl.querySelector('.asset-grid').innerHTML = assets.map(a =>
+    `<div class="asset-thumb" data-id="${a.id}" draggable="true" title="Drag onto the canvas, or click to add · ${a.name}">
+       <img src="${a.src}" alt="">
+       <span>${a.name}</span>
+     </div>`).join('');
+}
+assetsEl?.querySelector('.asset-grid').addEventListener('click', e => {
+  const el = e.target.closest('.asset-thumb'); if (!el) return;
+  const a = assets.find(x => x.id === el.dataset.id); if (a) ed.addImage(a.src);
+});
+assetsEl?.querySelector('.asset-grid').addEventListener('dragstart', e => {
+  const el = e.target.closest('.asset-thumb'); if (!el) return;
+  const a = assets.find(x => x.id === el.dataset.id); if (!a) return;
+  e.dataTransfer.effectAllowed = 'copy';
+  e.dataTransfer.setData('text/x-canvasmith-asset', a.src);
+  e.dataTransfer.setData('text/plain', a.src);
+});
+stageEl.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('text/x-canvasmith-asset')) e.preventDefault(); });
+stageEl.addEventListener('drop', e => {
+  const src = e.dataTransfer.getData('text/x-canvasmith-asset'); if (!src) return;
+  e.preventDefault();
+  const scenePt = ed.fc.getPointer(e);
+  ed.addImage(src, { name: 'Image' }).then(img => {
+    if (!img) return;
+    img.set({ left: scenePt.x, top: scenePt.y, originX: 'center', originY: 'center' });
+    img.setCoords();
+    ed.fc.renderAll();
+    ed.commit('image');
+  });
+});
+
+file.onchange = () => { const f = file.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { ed.addImage(r.result); trackAsset(r.result, f.name || 'Image'); }; r.readAsDataURL(f); };
+installDropImport(document.getElementById('stage'), src => { ed.addImage(src); trackAsset(src, 'Dropped image'); });
+installBridge(src => { ed.addImage(src); trackAsset(src, 'Opened image'); });   // ?image= / #img= / postMessage / localStorage handoff
 
 /* ── AI box: free Gemini key flow ──────────────────────────────────── */
 const gem = new GeminiProvider();
@@ -2349,15 +2443,31 @@ const convertDetectBtn = document.getElementById('convert-detect');
 const convertManualBtn = document.getElementById('convert-manual');
 convertDetectBtn.innerHTML = iconSVG('layerstab', 13) + '<span>Detect &amp; convert to layers</span>';
 convertManualBtn.innerHTML = iconSVG('lasso', 13) + '<span>Select one object manually</span>';
+const AI_REASON_MSG = {
+  no_provider: 'No AI provider is registered.',
+  rate_limited: 'Free daily quota hit — try again later, or add billing to your key.',
+  no_regions: 'Nothing detected — try "Select one object manually" instead.',
+};
+const convertMsgEl = document.getElementById('convert-msg');
 convertDetectBtn.onclick = async () => {
   if (!gem.hasKey()) { setRightTab('ai'); return; }
   const original = convertDetectBtn.innerHTML;
   convertDetectBtn.disabled = true; convertManualBtn.disabled = true;
   convertDetectBtn.innerHTML = `<span class="btn-spin"></span><span>Detecting…</span>`;
+  convertMsgEl.style.display = 'none';
   try {
     const r = await ed.detectRegions();
-    if (r.status !== 'ok') { return; }
+    if (r.status !== 'ok') {
+      // Every failure reason (no_provider / rate_limited / provider_failed / no_regions) now
+      // surfaces here instead of the button silently resetting with no explanation.
+      convertMsgEl.textContent = r.message || AI_REASON_MSG[r.reason] || r.reason || 'Detect failed — try again.';
+      convertMsgEl.style.display = '';
+      return;
+    }
     openReview(r.result.flat, r.result.regions);
+  } catch (e) {
+    convertMsgEl.textContent = (e && e.message) ? e.message.slice(0, 120) : 'Detect failed — try again.';
+    convertMsgEl.style.display = '';
   } finally {
     convertDetectBtn.disabled = false; convertManualBtn.disabled = false;
     convertDetectBtn.innerHTML = original;
@@ -2426,6 +2536,10 @@ function buildActionItems() {
     { group: 'Insert', icon: 'rect', label: 'Add box', run: () => document.getElementById('add-box').click() },
     { group: 'Insert', icon: 'hoverselect', label: 'Add circle', run: () => document.getElementById('add-circle').click() },
     { group: 'Insert', icon: 'folder', label: 'Add image…', run: () => document.getElementById('add-image').click() },
+    { group: 'Insert', icon: 'spark', label: 'Add CTA button', run: () => document.getElementById('add-cta').click() },
+    { group: 'Insert', icon: 'hoverselect', label: 'Add badge', run: () => document.getElementById('add-badge').click() },
+    { group: 'Insert', icon: 'tag', label: 'Add price', run: () => document.getElementById('add-price').click() },
+    { group: 'Insert', icon: 'box', label: 'Add brand lockup', run: () => document.getElementById('add-brand').click() },
     { group: 'Export', icon: 'svg', label: 'Export PNG', run: () => png.click() },
     { group: 'Export', icon: 'svg', label: 'Export JPG', run: () => jpg.click() },
     { group: 'Export', icon: 'svg', label: 'Export SVG', run: () => svg.click() },

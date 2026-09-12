@@ -17,6 +17,7 @@ import { parseLaunch } from '../packages/core/src/bridge.js';
 import { starPoints } from '../packages/core/src/shapes.js';
 import { cvWorkerSource } from '../packages/core/src/cv/worker.js';
 import { CvEngine } from '../packages/core/src/cv/client.js';
+import { buildPromoLayout } from '../packages/core/src/templates.js';
 
 /* ── colour ─────────────────────────────────────────────────────────── */
 test('color: hex round-trips and short form expands', () => {
@@ -372,4 +373,87 @@ test('color: splitGradientStopColor decodes an rgba() string back to color + alp
 
 test('color: splitGradientStopColor treats a plain hex as fully opaque', () => {
   assert.deepEqual(splitGradientStopColor('#7c3aed'), { color: '#7c3aed', alpha: 1 });
+});
+
+/* ── promo layout: buildPromoLayout's pure percentage-of-artboard positioning (no fabric touched;
+   see templates.js's own header for why the fabric-object-building half lives in the browser
+   suite instead) ─────────────────────────────────────────────────────────────────────────────── */
+test('templates: buildPromoLayout always leads with a locked full-canvas background layer', () => {
+  const { layers } = buildPromoLayout({}, 1080, 1080);
+  assert.equal(layers[0].id, 'bg');
+  assert.equal(layers[0].role, 'bg');
+  assert.equal(layers[0].width, 1080); assert.equal(layers[0].height, 1080);
+  assert.equal(layers[0].locked, true);
+});
+
+test('templates: unknown/omitted layout falls back to the centered group', () => {
+  const centered = buildPromoLayout({ layout: 'centered' }, 1000, 1000);
+  const omitted = buildPromoLayout({}, 1000, 1000);
+  const bogus = buildPromoLayout({ layout: 'not-a-real-layout' }, 1000, 1000);
+  const kinds = (r) => r.layers.map(l => l.id).sort();
+  assert.deepEqual(kinds(centered), kinds(omitted));
+  assert.deepEqual(kinds(centered), kinds(bogus));
+  // centered group: brand centered, headline centered, product ellipse (no explicit image), no scrim/burst
+  assert.ok(centered.layers.some(l => l.id === 'brand' && l.originX === 'center'));
+  assert.ok(centered.layers.some(l => l.id === 'headline' && l.align === 'center'));
+  assert.ok(centered.layers.some(l => l.id === 'product' && l.kind === 'ellipse'));
+  assert.ok(!centered.layers.some(l => l.id === 'scrim' || l.id === 'burst'));
+});
+
+test('templates: hero/editorial/lookbook/split all fold into the same hero group layout', () => {
+  const ids = ['hero', 'editorial', 'lookbook', 'split'].map(layout => buildPromoLayout({ layout }, 1080, 1350).layers.map(l => l.id));
+  ids.forEach(list => assert.deepEqual(list, ids[0]));
+  const hero = buildPromoLayout({ layout: 'hero' }, 1080, 1350);
+  assert.ok(hero.layers.some(l => l.id === 'scrim' && l.fill === 'scrim'));
+  assert.ok(hero.layers.some(l => l.id === 'product' && l.left === 0 && l.top === 0));
+});
+
+test('templates: sale layout adds an accent burst and rotates the product corner shot', () => {
+  const sale = buildPromoLayout({ layout: 'sale' }, 1080, 1080);
+  const burst = sale.layers.find(l => l.id === 'burst');
+  assert.ok(burst);
+  assert.equal(burst.kind, 'ellipse');
+  assert.equal(burst.fill, sale.accent);
+  const product = sale.layers.find(l => l.id === 'product');
+  assert.equal(product.angle, -8);
+});
+
+test('templates: badge layer is omitted entirely when no badge text is given, present when it is', () => {
+  const noBadge = buildPromoLayout({ layout: 'centered' }, 1000, 1000);
+  const withBadge = buildPromoLayout({ layout: 'centered', badge: 'New' }, 1000, 1000);
+  assert.ok(!noBadge.layers.some(l => l.id === 'badge'));
+  const b = withBadge.layers.find(l => l.id === 'badge');
+  assert.ok(b);
+  assert.equal(b.text, 'New');
+});
+
+test('templates: subhead layer is omitted when sub is empty, present with the given text otherwise', () => {
+  const noSub = buildPromoLayout({ layout: 'hero', sub: '' }, 1080, 1350);
+  const withSub = buildPromoLayout({ layout: 'hero', sub: 'Limited time only' }, 1080, 1350);
+  assert.ok(!noSub.layers.some(l => l.id === 'sub'));
+  const s = withSub.layers.find(l => l.id === 'sub');
+  assert.equal(s.text, 'Limited time only');
+});
+
+test('templates: a dark accent picks light (white) ink, a light accent picks dark ink, for legibility', () => {
+  const dark = buildPromoLayout({ palette: { accent: '#111114' } }, 1000, 1000);
+  const light = buildPromoLayout({ palette: { accent: '#f5f3ee' } }, 1000, 1000);
+  const darkCta = dark.layers.find(l => l.id === 'cta'), lightCta = light.layers.find(l => l.id === 'cta');
+  assert.equal(darkCta.ink, '#ffffff');
+  assert.equal(lightCta.ink, '#0c0c0e');
+});
+
+test('templates: product without a productImg falls back to a placeholder kind (rect/ellipse, not image)', () => {
+  const noImg = buildPromoLayout({ layout: 'hero' }, 1080, 1350);
+  const withImg = buildPromoLayout({ layout: 'hero', productImg: 'data:image/png;base64,x' }, 1080, 1350);
+  assert.equal(noImg.layers.find(l => l.id === 'product').kind, 'rect');
+  assert.equal(withImg.layers.find(l => l.id === 'product').kind, 'image');
+});
+
+test('templates: layer geometry scales with W/H (percentage-of-artboard, not fixed pixels)', () => {
+  const small = buildPromoLayout({ layout: 'centered' }, 500, 500);
+  const big = buildPromoLayout({ layout: 'centered' }, 1000, 1000);
+  const headSmall = small.layers.find(l => l.id === 'headline'), headBig = big.layers.find(l => l.id === 'headline');
+  assert.equal(headBig.size, headSmall.size * 2);
+  assert.equal(headBig.top, headSmall.top * 2);
 });

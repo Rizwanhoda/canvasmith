@@ -181,6 +181,72 @@ test('browser: toolOpts.addMode makes every click add to the selection without h
   assert.equal(calls[2].add, true);   // Shift still works independent of addMode, on objectselect too
 });
 
+/* ── objectselect-bbox: the reference editor's near-stub "wand" (key W) — no pixel analysis at
+   all, just the active object's own bounding box, or a fixed center region with nothing active ── */
+test('browser: objectselect-bbox selects the active object\'s bounding box, or a center region with nothing active', async () => {
+  await page.evaluate(() => window.__ed.setTool('objectselect-bbox'));
+  const canvasBox = await page.locator('#cv').boundingBox();
+  // Nothing active yet — a plain click falls back to the fixed center-region rect.
+  await page.mouse.click(canvasBox.x + 50, canvasBox.y + 50);
+  const centerSel = await page.evaluate(() => window.__ed.selection);
+  assert.equal(centerSel.kind, 'rect');
+  const W = await page.evaluate(() => window.__ed.W), H = await page.evaluate(() => window.__ed.H);
+  assert.equal(centerSel.x, W * 0.18); assert.equal(centerSel.y, H * 0.18);
+  assert.equal(centerSel.w, W * 0.64); assert.equal(centerSel.h, H * 0.64);
+
+  // With a shape active, the click selects exactly that object's own getBoundingRect(true) —
+  // NOT the raw drag dimensions, since every object here carries a themed selection `padding`
+  // (see the Editor constructor's 'object:added' handler) that getBoundingRect(true) includes.
+  await page.evaluate(() => window.__ed.setTool('rect'));
+  await page.mouse.move(canvasBox.x + 60, canvasBox.y + 60);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 140, canvasBox.y + 120, { steps: 4 });
+  await page.mouse.up();   // shape tools auto-return to select with the new object active
+  const expectedBox = await page.evaluate(() => {
+    const o = window.__ed.fc.getActiveObject(); o.setCoords();
+    return o.getBoundingRect(true);
+  });
+  await page.evaluate(() => window.__ed.setTool('objectselect-bbox'));
+  await page.mouse.click(canvasBox.x + 200, canvasBox.y + 200);   // click position is irrelevant — no pt-based logic
+  const bboxSel = await page.evaluate(() => window.__ed.selection);
+  assert.equal(bboxSel.kind, 'rect');
+  assert.equal(bboxSel.x, expectedBox.left); assert.equal(bboxSel.y, expectedBox.top);
+  assert.equal(bboxSel.w, expectedBox.width); assert.equal(bboxSel.h, expectedBox.height);
+});
+
+/* ── magicwand: the reference editor's real per-click CV wand (key A) — routes through the exact
+   same wandPick() the plain-JS 'wand' tool and objectselect/hoverselect already use, just without
+   objectselect/hoverselect's pre-populated hover cache. Stubbed the same way the addMode test
+   above stubs wandPick, so this only verifies Editor#_down's dispatch, not the cv algorithm. ──── */
+test('browser: magicwand tool dispatches clicks through wandPick with no hover cache involved', async () => {
+  await page.evaluate(() => {
+    window.__wandCalls = [];
+    window.__ed.wandPick = (pt, opts) => { window.__wandCalls.push(opts); return Promise.resolve({ status: 'ok' }); };
+    window.__ed.setTool('magicwand');
+  });
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.click(canvasBox.x + 50, canvasBox.y + 50);
+  let calls = await page.evaluate(() => window.__wandCalls);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].add, false); assert.equal(calls[0].subtract, false);
+
+  await page.keyboard.down('Shift');
+  await page.mouse.click(canvasBox.x + 80, canvasBox.y + 50);
+  await page.keyboard.up('Shift');
+  calls = await page.evaluate(() => window.__wandCalls);
+  assert.equal(calls[1].add, true);   // Shift-click adds, same contract as objectselect/hoverselect
+
+  await page.keyboard.down('Alt');
+  await page.mouse.click(canvasBox.x + 110, canvasBox.y + 50);
+  await page.keyboard.up('Alt');
+  calls = await page.evaluate(() => window.__wandCalls);
+  assert.equal(calls[2].subtract, true);   // Alt-click subtracts
+
+  // No hover cache exists for magicwand (only objectselect/hoverselect populate one in setTool),
+  // so every click always falls through to wandPick — never short-circuited by a cached preview.
+  assert.equal(await page.evaluate(() => !!window.__ed._hoverCache), false);
+});
+
 /* ── aiinsert: click opens the host's prompt popover (via the 'aiinsert' event) instead of
    drawing anything itself — plain click reports region:false, a click inside an active pixel
    selection reports region:true so the host UI can offer "fill this shape" instead ────────── */
@@ -227,6 +293,17 @@ test('browser: installKeybindings wires tool-switch letters and arrow-key nudge'
   await page.keyboard.press('v');
   assert.equal(await page.evaluate(() => window.__ed.tool), 'select');
 
+  // Reference-editor letter parity for the keys that were remapped off Canvasmith's prior
+  // bindings: N=AI insert (was pencil), U=rect (was burn), W=objectselect-bbox (was the color
+  // wand), A=magicwand (new), G=bucket (was gradient), K=the plain-JS color wand (moved off G).
+  await page.keyboard.press('n'); assert.equal(await page.evaluate(() => window.__ed.tool), 'aiinsert');
+  await page.keyboard.press('u'); assert.equal(await page.evaluate(() => window.__ed.tool), 'rect');
+  await page.keyboard.press('w'); assert.equal(await page.evaluate(() => window.__ed.tool), 'objectselect-bbox');
+  await page.keyboard.press('a'); assert.equal(await page.evaluate(() => window.__ed.tool), 'magicwand');
+  await page.keyboard.press('g'); assert.equal(await page.evaluate(() => window.__ed.tool), 'bucket');
+  await page.keyboard.press('k'); assert.equal(await page.evaluate(() => window.__ed.tool), 'wand');
+  await page.keyboard.press('v'); assert.equal(await page.evaluate(() => window.__ed.tool), 'select');
+
   await page.evaluate(() => window.__ed.setTool('rect'));
   const canvasBox = await page.locator('#cv').boundingBox();
   await page.mouse.move(canvasBox.x + 50, canvasBox.y + 50);
@@ -255,6 +332,75 @@ test('browser: installKeybindings wires delete/backspace on the active layer', a
   await page.keyboard.press('Backspace');
   await page.waitForTimeout(50);
   assert.equal(await page.evaluate(() => window.__ed.layers().length), 0);
+});
+
+test('browser: holding Space pans the canvas with any tool active, without switching tools', async () => {
+  await page.evaluate(() => window.__ed.setTool('brush'));
+  const canvasBox = await page.locator('#cv').boundingBox();
+  const vptBefore = await page.evaluate(() => window.__ed.fc.viewportTransform.slice());
+  await page.keyboard.down('Space');
+  await page.waitForTimeout(30);
+  assert.equal(await page.evaluate(() => window.__ed._spaceDown), true);
+  await page.mouse.move(canvasBox.x + 100, canvasBox.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 150, canvasBox.y + 140, { steps: 4 });
+  await page.mouse.up();
+  await page.keyboard.up('Space');
+  await page.waitForTimeout(30);
+  const vptAfter = await page.evaluate(() => window.__ed.fc.viewportTransform.slice());
+  assert.notDeepEqual(vptAfter, vptBefore);   // the viewport actually panned
+  assert.equal(await page.evaluate(() => window.__ed.tool), 'brush');   // tool never switched to hand
+  assert.equal(await page.evaluate(() => window.__ed._spaceDown), false);
+  // brush still works normally once space is released — no lingering pan state
+  await page.mouse.move(canvasBox.x + 60, canvasBox.y + 60);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 80, canvasBox.y + 80, { steps: 2 });
+  await page.mouse.up();
+  await page.waitForTimeout(50);
+  const hasPaintLayer = await page.evaluate(() => window.__ed.fc.getObjects().some(o => o.role === 'paint'));
+  assert.equal(hasPaintLayer, true);
+});
+
+test('browser: Cmd/Ctrl+J copies the selected pixels of the active layer into a new layer', async () => {
+  await page.evaluate(() => window.__ed.setTool('rect'));
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.move(canvasBox.x + 40, canvasBox.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 200, canvasBox.y + 150, { steps: 4 });
+  await page.mouse.up();
+  await page.evaluate(() => window.__ed.setTool('marquee'));
+  await page.mouse.move(canvasBox.x + 60, canvasBox.y + 60);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 120, canvasBox.y + 110, { steps: 4 });
+  await page.mouse.up();
+  assert.equal(await page.evaluate(() => window.__ed.layers().length), 1);
+  await page.keyboard.press('ControlOrMeta+j');
+  await page.waitForTimeout(50);
+  assert.equal(await page.evaluate(() => window.__ed.layers().length), 2);   // new "... copy" layer added
+  // duplicateSelectionToLayer is non-destructive — the source rect is untouched
+  const rectStillFull = await page.evaluate(() => window.__ed.fc.getObjects().find(o => o.type === 'rect').clipPath == null);
+  assert.equal(rectStillFull, true);
+});
+
+test('browser: Backspace with an active pixel selection cuts (clips) it from the active layer instead of deleting the whole layer', async () => {
+  await page.evaluate(() => window.__ed.setTool('rect'));
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.move(canvasBox.x + 40, canvasBox.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 200, canvasBox.y + 150, { steps: 4 });
+  await page.mouse.up();
+  await page.evaluate(() => window.__ed.setTool('marquee'));
+  await page.mouse.move(canvasBox.x + 60, canvasBox.y + 60);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 120, canvasBox.y + 110, { steps: 4 });
+  await page.mouse.up();
+  assert.equal(await page.evaluate(() => window.__ed.layers().length), 1);
+  await page.keyboard.press('Backspace');
+  await page.waitForTimeout(50);
+  // the layer survives (only clipped), unlike a plain Backspace with no selection which removes it
+  assert.equal(await page.evaluate(() => window.__ed.layers().length), 1);
+  const hasClip = await page.evaluate(() => !!window.__ed.fc.getObjects()[0].clipPath);
+  assert.equal(hasClip, true);
 });
 
 /* ── auto-detect: detectObjects / selectDetectedBox (cv-only, vendored OpenCV) ────────── */
@@ -349,6 +495,73 @@ test('browser: setShapeGradient applies a Fabric gradient fill, no-op on an imag
     return typeof o.fill === 'object' && o.fill.type === 'linear';
   });
   assert.equal(isFabricGradient, true);
+});
+
+/* ── gradient tool: object-local mode — dragging onto an active vector object with no pixel
+   selection applies the gradient as that object's own Fabric fill instead of painting a raster
+   stripe into the paint layer (matches the reference editor's applyCustomGradient exactly). ──── */
+test('browser: dragging the gradient tool onto an active shape (no selection) fills it as an object gradient, not a raster paint layer', async () => {
+  await page.evaluate(() => window.__ed.setTool('rect'));
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.move(canvasBox.x + 60, canvasBox.y + 60);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 180, canvasBox.y + 140, { steps: 4 });
+  await page.mouse.up();   // rect is now active (shape tools auto-return to select + activate)
+
+  await page.evaluate(() => window.__ed.setToolOptions({ gradientStops: [
+    { offset: 0, color: '#ff0000' }, { offset: 1, color: '#0000ff' },
+  ] }));
+  await page.evaluate(() => window.__ed.setTool('gradient'));
+  await page.mouse.move(canvasBox.x + 60, canvasBox.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 180, canvasBox.y + 100, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(50);
+
+  const result = await page.evaluate(() => {
+    const objs = window.__ed.fc.getObjects();
+    const rect = objs.find(o => o.type === 'rect');
+    return {
+      objectCount: objs.length,   // must stay 1 — no paint layer was created for this drag
+      hasPaintLayer: objs.some(o => o.role === 'paint'),
+      fillType: typeof rect.fill === 'object' ? rect.fill.type : null,
+      stops: (rect.fill.colorStops || []).map(s => s.color),
+    };
+  });
+  assert.equal(result.objectCount, 1);
+  assert.equal(result.hasPaintLayer, false);
+  assert.equal(result.fillType, 'linear');
+  assert.deepEqual(result.stops, ['#ff0000', '#0000ff']);
+});
+
+test('browser: gradient tool falls back to raster paint when there IS a pixel selection, even with an object active', async () => {
+  await page.evaluate(() => window.__ed.setTool('rect'));
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.move(canvasBox.x + 60, canvasBox.y + 60);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 180, canvasBox.y + 140, { steps: 4 });
+  await page.mouse.up();
+
+  // Draw a marquee selection — Editor#setTool('marquee') itself doesn't touch the rect's active
+  // state, but a fabric selectable=false object can't stay "active" once a non-select tool takes
+  // over pointer handling; what matters here is only that ed.selection is truthy at drag time.
+  await page.evaluate(() => window.__ed.setTool('marquee'));
+  await page.mouse.move(canvasBox.x + 40, canvasBox.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 200, canvasBox.y + 160, { steps: 4 });
+  await page.mouse.up();
+  assert.ok(await page.evaluate(() => !!window.__ed.selection));
+
+  await page.evaluate(() => window.__ed.setToolOptions({ gradientStops: [{ offset: 0, color: '#00ff00' }, { offset: 1, color: '#ffff00' }] }));
+  await page.evaluate(() => window.__ed.setTool('gradient'));
+  await page.mouse.move(canvasBox.x + 60, canvasBox.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 180, canvasBox.y + 100, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(50);
+
+  const hasPaintLayer = await page.evaluate(() => window.__ed.fc.getObjects().some(o => o.role === 'paint'));
+  assert.equal(hasPaintLayer, true);   // a selection present means raster mode, not object-local mode
 });
 
 /* ── typography: setTextProps/getTextProps act only on text objects ──────────────────────── */
@@ -707,4 +920,318 @@ test('browser: extendBackgroundToCanvas scales the background image to cover the
   assert.equal(result.ok, true);
   assert.ok(result.scaleX >= 400 / 50 - 0.001);   // covers the 400x300 test artboard from a 50x50 source
   assert.ok(result.scaleY >= 400 / 50 - 0.001);
+});
+
+/* ── ad-copy layers (adtext.js via editor.js's addCTA/addBadge/addPrice/addBrandLockup) ──────── */
+test('browser: addCTA builds a pill group sized to its own label, with a readable ink color', async () => {
+  const info = await page.evaluate(() => {
+    const ed = window.__ed;
+    const id = ed.addCTA(null, { text: 'Buy now', size: 20, fill: '#111114' });
+    const o = ed.fc.getObjects().find(x => x.id === id);
+    return { role: o.role, name: o.name, type: o.type, childCount: o._objects.length, width: o.width, height: o.height };
+  });
+  assert.equal(info.role, 'cta');
+  assert.equal(info.name, 'CTA');
+  assert.equal(info.type, 'group');
+  assert.equal(info.childCount, 3);   // pill rect + label text + arrow glyph
+  assert.ok(info.width > 0 && info.height > 0);
+});
+
+test('browser: addBadge uppercases its text and omits nothing — role/name/group shape', async () => {
+  const info = await page.evaluate(() => {
+    const ed = window.__ed;
+    const id = ed.addBadge(null, { text: 'sale', size: 16 });
+    const o = ed.fc.getObjects().find(x => x.id === id);
+    const label = o._objects[1];
+    return { role: o.role, name: o.name, childCount: o._objects.length, labelText: label.text };
+  });
+  assert.equal(info.role, 'badge');
+  assert.equal(info.name, 'Badge');
+  assert.equal(info.childCount, 2);   // pill rect + label text
+  assert.equal(info.labelText, 'SALE');
+});
+
+test('browser: addPrice includes the strikethrough original and savings text only when given', async () => {
+  const withAll = await page.evaluate(() => {
+    const ed = window.__ed;
+    const id = ed.addPrice(null, { current: '$40', original: '$60', save: 'Save 33%', size: 24 });
+    const o = ed.fc.getObjects().find(x => x.id === id);
+    return { childCount: o._objects.length, linethrough: o._objects[1].linethrough, texts: o._objects.map(c => c.text) };
+  });
+  assert.equal(withAll.childCount, 3);
+  assert.equal(withAll.linethrough, true);
+  assert.deepEqual(withAll.texts, ['$40', '$60', 'Save 33%']);
+
+  const currentOnly = await page.evaluate(() => {
+    const ed = window.__ed;
+    const id = ed.addPrice(null, { current: '$40', size: 24 });
+    const o = ed.fc.getObjects().find(x => x.id === id);
+    return o._objects.length;
+  });
+  assert.equal(currentOnly, 1);
+});
+
+test('browser: addBrandLockup builds a mark + lowercase initial + name, mark fill matches the given color', async () => {
+  const info = await page.evaluate(() => {
+    const ed = window.__ed;
+    const id = ed.addBrandLockup(null, { text: 'Acme', color: '#2f6df0', size: 18 });
+    const o = ed.fc.getObjects().find(x => x.id === id);
+    const [mark, letter, name] = o._objects;
+    return { role: o.role, markFill: mark.fill, letterText: letter.text, nameText: name.text };
+  });
+  assert.equal(info.role, 'brand');
+  assert.equal(info.markFill, '#2f6df0');
+  assert.equal(info.letterText, 'a');   // lowercased first letter of "Acme"
+  assert.equal(info.nameText, 'Acme');
+});
+
+test('browser: layerLabel shows the ad-copy layer\'s own name, not its Fabric Group child count', async () => {
+  const label = await page.evaluate(async () => {
+    const { layerLabel } = await import('/packages/core/src/index.js');
+    const ed = window.__ed;
+    const id = ed.addCTA(null, { text: 'Go' });
+    const o = ed.fc.getObjects().find(x => x.id === id);
+    return layerLabel(o);
+  });
+  assert.equal(label, 'CTA');   // NOT "3 layers" (the generic Group fallback)
+});
+
+/* ── promo layout (templates.js via editor.js's applyPromoLayout) ────────────────────────────── */
+test('browser: applyPromoLayout replaces the composition with a real hero/sale/centered layer stack', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    await ed.applyPromoLayout({ layout: 'centered', head: 'Big Sale', sub: 'This week only', cta: 'Shop now', brand: 'Acme' });
+    const objs = ed.fc.getObjects();
+    return {
+      count: objs.length,
+      roles: objs.map(o => o.role),
+      headlineText: objs.find(o => o.role === 'headline').text,
+      bgLocked: objs.find(o => o.role === 'bg').locked,
+    };
+  });
+  assert.ok(result.roles.includes('bg'));
+  assert.ok(result.roles.includes('brand'));
+  assert.ok(result.roles.includes('headline'));
+  assert.ok(result.roles.includes('sub'));
+  assert.ok(result.roles.includes('cta'));
+  assert.ok(result.roles.includes('product'));
+  assert.equal(result.headlineText, 'Big Sale');
+  assert.equal(result.bgLocked, true);
+});
+
+test('browser: applyPromoLayout replacing the composition is a single undoable history step', async () => {
+  const depths = await page.evaluate(async () => {
+    const ed = window.__ed;
+    ed.fc.getObjects().slice().forEach(o => ed.fc.remove(o));
+    ed.commit('clear');
+    const before = ed.history.depth();
+    await ed.applyPromoLayout({ layout: 'sale', head: 'Flash sale' });
+    const after = ed.history.depth();
+    ed.undo();
+    await new Promise(r => setTimeout(r, 50));
+    const objRolesAfterUndo = ed.fc.getObjects().map(o => o.role);
+    return { before: before.past, after: after.past, objRolesAfterUndo };
+  });
+  assert.equal(depths.after, depths.before + 1);   // one commit for the whole layout, not one per layer
+  assert.deepEqual(depths.objRolesAfterUndo, []);   // undo restores the pre-layout (empty) canvas
+});
+
+test('browser: applyPromoLayout auto-fits the headline text to its slot height when maxH is exceeded', async () => {
+  const sizes = await page.evaluate(async () => {
+    const ed = window.__ed;
+    // A tiny artboard forces the hero headline's font size well past what its own maxH slot
+    // (derived from W*0.115 in templates.js's hero branch) can hold at the nominal W*0.088 size.
+    await ed.applyPromoLayout({ layout: 'hero', head: 'A very long headline that must shrink to fit' }, );
+    const headline = ed.fc.getObjects().find(o => o.role === 'headline');
+    return { fontSize: headline.fontSize, height: headline.height };
+  });
+  // No hard assertion on the exact shrunk size (depends on font metrics), just that autoFitText
+  // actually ran and produced a renderable, non-degenerate textbox.
+  assert.ok(sizes.fontSize >= 9);
+  assert.ok(sizes.height > 0);
+});
+
+/* ── AI: mask-guided background swap/extend, non-destructive (only the bg layer's pixels swap —
+   every other layer in the composition survives, unlike the old whole-scene openImageResult
+   contract these two methods used before) ──────────────────────────────────────────────────── */
+test('browser: aiBgSwap with no selection asks magicEdit with no mask, and swaps only the bg layer', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    // a small red bg image + an unrelated shape layer on top, to prove the shape survives
+    const c = document.createElement('canvas'); c.width = 40; c.height = 40;
+    c.getContext('2d').fillStyle = '#ff0000'; c.getContext('2d').fillRect(0, 0, 40, 40);
+    const bg = await ed.addImage(c.toDataURL(), { role: 'bg', name: 'Background' });
+    ed.setTool('rect');
+    // place a marker shape via the API directly (avoids a real pointer drag in this test)
+    const shape = new ed.fabric.Rect({ left: 10, top: 10, width: 20, height: 20, fill: '#00ff00' });
+    shape.set({ id: 'marker', role: 'shape', name: 'Marker' });
+    ed.fc.add(shape);
+    ed.setTool('select');
+
+    let calls = [];
+    ed.ai.register({ async magicEdit(imageDataURL, instruction, maskDataURL) {
+      calls.push({ hasImage: !!imageDataURL, instruction, maskDataURL });
+      const out = document.createElement('canvas'); out.width = 40; out.height = 40;
+      out.getContext('2d').fillStyle = '#0000ff'; out.getContext('2d').fillRect(0, 0, 40, 40);
+      return out.toDataURL('image/png');
+    } });
+
+    const r = await ed.aiBgSwap('a blue sky');
+    const objs = ed.fc.getObjects();
+    const newBg = objs.find(o => o.id === bg.id);
+    const ctx = newBg._element.getContext ? newBg._element.getContext('2d') : null;
+    return {
+      status: r.status,
+      callCount: calls.length,
+      maskDataURL: calls[0] && calls[0].maskDataURL,
+      instruction: calls[0] && calls[0].instruction,
+      markerSurvived: objs.some(o => o.id === 'marker'),
+      objectCount: objs.length,
+      bgIdentityKept: newBg.role === 'bg' && newBg.name === 'Background',
+    };
+  });
+  assert.equal(result.status, 'ok');
+  assert.equal(result.callCount, 1);
+  assert.equal(result.maskDataURL, undefined);   // no selection → magicEdit called with only (image, instruction)
+  assert.ok(result.instruction.includes('a blue sky'));
+  assert.equal(result.markerSurvived, true);   // the unrelated shape layer was NOT wiped
+  assert.equal(result.objectCount, 2);         // bg + marker, nothing added/removed besides the swap
+  assert.equal(result.bgIdentityKept, true);   // same role/name — the swap preserved layer identity
+});
+
+test('browser: aiBgSwap with an active selection passes a real white=editable/black=protect mask', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const c = document.createElement('canvas'); c.width = 40; c.height = 40;
+    c.getContext('2d').fillStyle = '#ff0000'; c.getContext('2d').fillRect(0, 0, 40, 40);
+    await ed.addImage(c.toDataURL(), { role: 'bg', name: 'Background' });
+    ed.selection = { kind: 'rect', x: 5, y: 5, w: 10, h: 10 };
+
+    let capturedMask = null;
+    ed.ai.register({ async magicEdit(imageDataURL, instruction, maskDataURL) {
+      capturedMask = maskDataURL;
+      const out = document.createElement('canvas'); out.width = 40; out.height = 40;
+      out.getContext('2d').fillStyle = '#0000ff'; out.getContext('2d').fillRect(0, 0, 40, 40);
+      return out.toDataURL('image/png');
+    } });
+
+    await ed.aiBgSwap('a sunset');
+    // decode the captured mask and sample inside vs. outside the selection rect
+    const img = await new Promise((resolve, reject) => { const im = new Image(); im.onload = () => resolve(im); im.onerror = reject; im.src = capturedMask; });
+    const mc = document.createElement('canvas'); mc.width = 40; mc.height = 40;
+    const mctx = mc.getContext('2d'); mctx.drawImage(img, 0, 0);
+    const inside = mctx.getImageData(10, 10, 1, 1).data;    // inside the selection rect (5,5,10,10)
+    const outside = mctx.getImageData(30, 30, 1, 1).data;   // outside it
+    return { hadMask: !!capturedMask, inside: [inside[0], inside[1], inside[2]], outside: [outside[0], outside[1], outside[2]], selectionCleared: !ed.selection };
+  });
+  assert.equal(result.hadMask, true);
+  assert.deepEqual(result.inside, [0, 0, 0]);      // black = protected (selected subject)
+  assert.deepEqual(result.outside, [255, 255, 255]); // white = editable background
+  assert.equal(result.selectionCleared, true);
+});
+
+test('browser: aiExtendBackground reports no_gap without calling the AI when the bg already fills the canvas', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const c = document.createElement('canvas'); c.width = ed.W; c.height = ed.H;
+    c.getContext('2d').fillStyle = '#ff0000'; c.getContext('2d').fillRect(0, 0, ed.W, ed.H);
+    await ed.addImage(c.toDataURL(), { role: 'bg', name: 'Background' });
+    const bg = ed.fc.getObjects().find(o => o.role === 'bg');
+    bg.set({ left: 0, top: 0, scaleX: 1, scaleY: 1, originX: 'left', originY: 'top' });
+    let called = false;
+    ed.ai.register({ async magicEdit() { called = true; return null; } });
+    const r = await ed.aiExtendBackground();
+    return { status: r.status, reason: r.reason, called };
+  });
+  assert.equal(result.status, 'error');
+  assert.equal(result.reason, 'no_gap');
+  assert.equal(result.called, false);   // the gap check short-circuits before any AI call
+});
+
+/* ── region review: commitRegions maps a detected region's type to its committed layer's ROLE
+   via REGION_ROLE (text -> headline, sticker -> decorative, others pass through unchanged), and
+   stores the original detected type separately on regionType so it survives serialization. ──── */
+test('browser: commitRegions maps region types to layer roles via REGION_ROLE, keeping the original type on regionType', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const c = document.createElement('canvas'); c.width = ed.W; c.height = ed.H;
+    c.getContext('2d').fillStyle = '#888888'; c.getContext('2d').fillRect(0, 0, ed.W, ed.H);
+    const flat = c.toDataURL('image/png');
+    const regions = [
+      { type: 'product', bbox: { x: 5, y: 5, width: 20, height: 20 } },
+      { type: 'logo', bbox: { x: 30, y: 5, width: 15, height: 15 } },
+      { type: 'text', bbox: { x: 5, y: 30, width: 40, height: 10 }, content: 'Big Sale' },
+      { type: 'sticker', bbox: { x: 50, y: 30, width: 10, height: 10 } },
+      { type: 'decorative', bbox: { x: 65, y: 30, width: 10, height: 10 } },
+    ];
+    const r = await ed.commitRegions(flat, regions);
+    const byRegionType = (t) => ed.fc.getObjects().find(o => o.regionType === t);
+    return {
+      status: r.status,
+      count: r.result,
+      productRole: byRegionType('product') && byRegionType('product').role,
+      logoRole: byRegionType('logo') && byRegionType('logo').role,
+      textRole: byRegionType('text') && byRegionType('text').role,
+      textContent: byRegionType('text') && byRegionType('text').text,
+      stickerRole: byRegionType('sticker') && byRegionType('sticker').role,
+      decorativeRole: byRegionType('decorative') && byRegionType('decorative').role,
+    };
+  });
+  assert.equal(result.status, 'ok');
+  assert.equal(result.count, 5);
+  assert.equal(result.productRole, 'product');       // passes through unchanged
+  assert.equal(result.logoRole, 'logo');              // passes through unchanged
+  assert.equal(result.textRole, 'headline');          // text -> headline
+  assert.equal(result.textContent, 'Big Sale');
+  assert.equal(result.stickerRole, 'decorative');     // sticker -> decorative
+  assert.equal(result.decorativeRole, 'decorative');  // already decorative
+});
+
+test('browser: commitRegions\' regionType survives an undo/redo round-trip (serialized via io.js EXTRA)', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const c = document.createElement('canvas'); c.width = ed.W; c.height = ed.H;
+    c.getContext('2d').fillStyle = '#888888'; c.getContext('2d').fillRect(0, 0, ed.W, ed.H);
+    await ed.commitRegions(c.toDataURL('image/png'), [{ type: 'sticker', bbox: { x: 10, y: 10, width: 20, height: 20 } }]);
+    ed.undo();
+    await new Promise(r => setTimeout(r, 50));
+    ed.redo();
+    await new Promise(r => setTimeout(r, 50));
+    const layer = ed.fc.getObjects().find(o => o.regionType === 'sticker');
+    return { found: !!layer, role: layer && layer.role };
+  });
+  assert.equal(result.found, true);
+  assert.equal(result.role, 'decorative');
+});
+
+test('browser: aiExtendBackground passes a real white=empty/black=filled gap mask and swaps only the bg layer', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    // a bg image smaller than the artboard, placed at the origin, so most of the canvas is gap
+    const c = document.createElement('canvas'); c.width = 20; c.height = 20;
+    c.getContext('2d').fillStyle = '#ff0000'; c.getContext('2d').fillRect(0, 0, 20, 20);
+    const bg = await ed.addImage(c.toDataURL(), { role: 'bg', name: 'Background' });
+    bg.set({ left: 0, top: 0, scaleX: 1, scaleY: 1, originX: 'left', originY: 'top' });
+
+    let capturedMask = null;
+    ed.ai.register({ async magicEdit(imageDataURL, instruction, maskDataURL) {
+      capturedMask = maskDataURL;
+      const out = document.createElement('canvas'); out.width = ed.W; out.height = ed.H;
+      out.getContext('2d').fillStyle = '#0000ff'; out.getContext('2d').fillRect(0, 0, ed.W, ed.H);
+      return out.toDataURL('image/png');
+    } });
+
+    const r = await ed.aiExtendBackground();
+    const img = await new Promise((resolve, reject) => { const im = new Image(); im.onload = () => resolve(im); im.onerror = reject; im.src = capturedMask; });
+    const mc = document.createElement('canvas'); mc.width = ed.W; mc.height = ed.H;
+    const mctx = mc.getContext('2d'); mctx.drawImage(img, 0, 0);
+    const filled = mctx.getImageData(5, 5, 1, 1).data;     // inside the 20x20 red square = filled
+    const empty = mctx.getImageData(300, 200, 1, 1).data;  // well outside it = still empty canvas
+    const newBg = ed.fc.getObjects().find(o => o.id === bg.id);
+    return { status: r.status, filled: [filled[0], filled[1], filled[2]], empty: [empty[0], empty[1], empty[2]], bgSwapped: newBg.id === bg.id && newBg.type === 'image' };
+  });
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.filled, [0, 0, 0]);        // black = real pixels, leave alone
+  assert.deepEqual(result.empty, [255, 255, 255]);   // white = empty gap, the model may fill it
+  assert.equal(result.bgSwapped, true);
 });

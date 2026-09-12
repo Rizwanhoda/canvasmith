@@ -96,16 +96,29 @@ export class GeminiProvider {
     return this._key;
   }
 
-  async magicEdit(imageDataURL, instruction) {
+  /* maskDataURL is optional — Gemini's image model has no literal pixel-mask input channel (no
+     guaranteed "only touch white-masked pixels"), so a mask is passed as a SECOND image part with
+     explanatory text asking the model to treat it as an editing guide, rather than silently
+     dropping the 3rd argument a caller (Editor#aiBgSwap/#aiExtendBackground) may supply. This is
+     best-effort guidance, not a hard pixel guarantee the way a real inpainting API's mask channel
+     would be — a host that needs pixel-exact masked edits should register a provider backed by a
+     model with true mask support instead. */
+  async magicEdit(imageDataURL, instruction, maskDataURL) {
     const key = this._need();
     const img = dataUrlParts(imageDataURL);
     if (!img) throw new Error('magicEdit needs a dataURL image.');
-    const res = await call(key, IMAGE_MODEL, {
-      contents: [{ parts: [
-        { text: 'Edit this image. Apply exactly this instruction and change nothing else: ' + instruction },
-        { inlineData: { mimeType: img.mime, data: img.b64 } },
-      ] }],
-    });
+    const mask = maskDataURL ? dataUrlParts(maskDataURL) : null;
+    const parts = [
+      { text: 'Edit this image. Apply exactly this instruction and change nothing else: ' + instruction },
+      { inlineData: { mimeType: img.mime, data: img.b64 } },
+    ];
+    if (mask) {
+      parts.push(
+        { text: 'Use this second image as an editing mask: white areas may be changed, black areas must stay pixel-identical to the first image.' },
+        { inlineData: { mimeType: mask.mime, data: mask.b64 } },
+      );
+    }
+    const res = await call(key, IMAGE_MODEL, { contents: [{ parts }] });
     const out = firstImage(res);
     if (!out) throw new Error('The model returned no image (safety filter or refusal).');
     return out;

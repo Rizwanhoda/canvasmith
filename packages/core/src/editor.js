@@ -26,11 +26,22 @@ import { AIRegistry } from './ai/registry.js';
 import { CvEngine, prepImageData } from './cv/client.js';
 import { makeMaskFilterClass, createMaskCanvas, maskStamp, maskLine, serializeMask, deserializeMask, invertMaskCanvas } from './mask.js';
 import { stickerSpec, STICKER_PALETTE } from './stickers.js';
+import { makeCTA, makeBadge, makePrice, makeBrandLockup } from './adtext.js';
+import { buildPromoLayout, buildLayerFromSpec } from './templates.js';
 
-export const SEL_TOOLS = ['marquee', 'marquee-ellipse', 'lasso', 'lasso-poly', 'lasso-mag', 'wand', 'objectselect', 'hoverselect'];
+export const SEL_TOOLS = ['marquee', 'marquee-ellipse', 'lasso', 'lasso-poly', 'lasso-mag', 'wand', 'objectselect-bbox', 'magicwand', 'objectselect', 'hoverselect'];
 export const SHAPE_TOOLS = ['rect', 'ellipse', 'line', 'triangle', 'polygon', 'star'];
 export const ALL_TOOLS = ['select', 'hand', ...PAINT_TOOLS, ...SEL_TOOLS, ...SHAPE_TOOLS, 'type', 'bucket', 'gradient', 'eyedropper', 'crop', 'pen', 'aiinsert'];
 const CLICK_LASSOS = ['lasso-poly', 'lasso-mag'];
+
+/* AI region-detection vocabulary (detectRegions/commitRegions) — the type strings a provider's
+   detectRegions() returns, mapped to the LAYER ROLE a committed region becomes ('text' regions
+   read as headline copy, 'sticker' regions as a decorative shape; product/logo/decorative already
+   match their own final role so they pass through) and, for a host UI drawing region-review
+   overlays (draft boxes during a guided convert step), a distinct accent color per type so a user
+   can tell region types apart at a glance before committing them. */
+export const REGION_ROLE = { product: 'product', logo: 'logo', text: 'headline', sticker: 'decorative', decorative: 'decorative' };
+export const REGION_COLOR = { product: '#d4ff45', logo: '#7cc4ff', text: '#ffd166', sticker: '#ff8fab', decorative: '#b794f6' };
 const SEL_EPS = 0.0022;   // contour fidelity passed to the cv wand — smaller hugs the edge harder
 
 export class Editor {
@@ -105,8 +116,12 @@ export class Editor {
     this._destroyed = false;        // set by destroy() — async continuations check this before touching this.fc
     this._maskEdit = null;           // {layerId} while a mask is being painted — see enterMaskEdit()
     this._maskDrag = null;
+    this._lastActiveId = null;      // last non-bg object the user selected/moved — see selectActiveOrCenter()
+    this._spaceDown = false;        // true while the spacebar is held — see _bindSpacePan()
     this._bindPointer();
     this._bindModified();
+    this._bindLastActive();
+    this._bindSpacePan();
     this._bindProportionalSideScale();
     this.setSnapEnabled(true);
     this.commit('init');
@@ -186,7 +201,7 @@ export class Editor {
       }
       return;
     }
-    if (t === 'hand' || e.spaceKey) {
+    if (t === 'hand' || this._spaceDown) {
       this._drag = { kind: 'pan', x: e.clientX, y: e.clientY };
       this.fc.setCursor('grabbing');
       return;
@@ -240,6 +255,10 @@ export class Editor {
       this.wandPick(pt, { add: e.shiftKey || this.toolOpts.addMode, subtract: e.altKey });
       return;
     }
+    if (t === 'objectselect-bbox') {
+      this.selectActiveOrCenter();
+      return;
+    }
     if (t === 'aiinsert') {
       // Clicking INSIDE an active selection opens region mode: the AI result fills exactly that
       // shape (see aiInsertAt). Otherwise it's a plain insert-at-point. No drag/up handling — the
@@ -249,8 +268,11 @@ export class Editor {
       this._emit('aiinsert', { pt, region });
       return;
     }
-    if (t === 'objectselect' || t === 'hoverselect') {
+    if (t === 'objectselect' || t === 'hoverselect' || t === 'magicwand') {
       const add = e.shiftKey || this.toolOpts.addMode;
+      // magicwand has no hover-preview cache (only objectselect/hoverselect populate one in
+      // setTool) — this.wandPick's own CV hybrid flood+GrabCut is the click-to-grab behavior
+      // either way, cache or not, so magicwand naturally falls through to the same call.
       const cached = this._hoverCache && this._hoverCache.get(this._hoverCellKey(pt));
       if (cached) this._commitPoly(cached, { add, subtract: e.altKey });
       else this.wandPick(pt, { add, subtract: e.altKey });
@@ -283,7 +305,22 @@ export class Editor {
       this.commit('bucket');
       return;
     }
-    if (t === 'gradient') { this._applySelClip(); this._drag = { kind: 'gradient', from: pt }; return; }
+    if (t === 'gradient') {
+      // Dragging onto an active vector object with no pixel selection applies the gradient
+      // directly as that object's own fill (scales/rotates with it, Fabric's native gradient)
+      // instead of painting a raster stripe into the paint layer — same "object gradient" mode
+      // the reference editor's own gradient tool has, just generalized to Canvasmith's multi-stop
+      // gradientStops instead of a hardcoded 2-color pair. bg is excluded unless it's a plain
+      // rect (a bg IMAGE shouldn't silently lose its pixels to a gradient fill), matching the
+      // reference editor's own `o.role !== 'bg' || o.type === 'rect'` condition exactly.
+      // Same _lastActiveId fallback as selectActiveOrCenter() (objectselect-bbox) — setTool()
+      // already discarded Fabric's own active object by the time this click lands, since
+      // 'gradient' is a drawing tool like any other.
+      const active = this.fc.getActiveObject() || (this._lastActiveId && this._byId(this._lastActiveId));
+      const objTarget = active && active.type !== 'activeSelection' && (active.role !== 'bg' || active.type === 'rect') && !this.selection ? active : null;
+      if (objTarget) { this._drag = { kind: 'gradient-obj', from: pt, obj: objTarget }; return; }
+      this._applySelClip(); this._drag = { kind: 'gradient', from: pt }; return;
+    }
     if (t === 'eyedropper') {
       const hex = this.engine.sample(pt);
       if (hex) { this.setToolOptions({ color: hex }); this._emit('eyedropper', hex); }
@@ -352,6 +389,10 @@ export class Editor {
       this.engine.paintGradient(d.from.x, d.from.y, pt.x, pt.y, this.toolOpts.gradientStops, this.toolOpts.gradientType);
       return;
     }
+    if (d.kind === 'gradient-obj') {
+      this._applyObjectGradient(d.obj, d.from, pt);
+      return;
+    }
     if (d.kind === 'crop') {
       this.crop = dragCropRect(this.crop, d.handle, pt.x - d.last.x, pt.y - d.last.y, this.toolOpts.cropRatio || 0);
       d.last = pt;
@@ -368,8 +409,9 @@ export class Editor {
     if (d.kind === 'paint') { this.engine.up(); this.engine.setClip(null); this.commit('stroke'); }
     if (d.kind === 'sel' || d.kind === 'resize-sel') { this.selection = finalizeSelection(this.selection); this._emit('selection', this.selection); }
     if (d.kind === 'gradient') { this.engine.setClip(null); this.commit('gradient'); }
+    if (d.kind === 'gradient-obj') { this.commit('gradient-fill'); }
     if (d.kind === 'shape') { this.commit('shape'); this.setTool('select'); this.fc.setActiveObject(d.obj); }
-    if (d.kind === 'pan' && this.tool === 'hand') this.fc.setCursor('grab');
+    if (d.kind === 'pan' && (this.tool === 'hand' || this._spaceDown)) this.fc.setCursor('grab');
   }
 
   clearSelection() { this.selection = null; this._polyBuild = null; this._emit('selection', null); this.fc.renderAll(); }
@@ -384,6 +426,28 @@ export class Editor {
   invertSelection() {
     if (!this.selection) { this.selection = { kind: 'rect', x: 0, y: 0, w: this.W, h: this.H }; }
     else this.selection.invert = !this.selection.invert;
+    this._emit('selection', this.selection);
+    this.fc.renderAll();
+  }
+
+  /* The 'objectselect-bbox' tool (reference editor: "Object / magic select", key W) — a trivial,
+     non-CV click: select the active object's own bounding box as a rect selection, or (nothing
+     active) a fixed center region of the artboard. No pixel analysis at all — this is deliberately
+     the lightweight sibling of `magicwand`/`objectselect`'s real CV-backed picking, matching the
+     reference editor's own near-stub behavior for this exact tool/key.
+     Reads getActiveObject() first, but falls back to _lastActiveId — setTool() has already
+     discarded the live Fabric selection by the time any drawing-tool click reaches here (this
+     tool is not 'select'), so getActiveObject() alone would see nothing on every click and always
+     fall through to the center region. Mirrors the reference editor's own active()/lastUpdatedRef. */
+  selectActiveOrCenter() {
+    const o = this.fc.getActiveObject() || (this._lastActiveId && this._byId(this._lastActiveId));
+    if (o && o.type !== 'activeSelection') {
+      o.setCoords();
+      const b = o.getBoundingRect(true);
+      this.selection = { kind: 'rect', x: b.left, y: b.top, w: b.width, h: b.height };
+    } else {
+      this.selection = { kind: 'rect', x: this.W * 0.18, y: this.H * 0.18, w: this.W * 0.64, h: this.H * 0.64 };
+    }
     this._emit('selection', this.selection);
     this.fc.renderAll();
   }
@@ -673,6 +737,54 @@ export class Editor {
   _bindModified() {
     this.fc.on('object:modified', (opt) => this._onModified(opt));
     this.fc.on('text:changed', () => this._soon());
+  }
+
+  /* Tracks the last non-bg object the user selected or moved, independent of Fabric's own
+     getActiveObject() — which setTool() discards the instant a drawing tool (anything but
+     'select') is picked (see setTool's `if (drawing) this.fc.discardActiveObject()`), so by the
+     time a drawing-tool click actually lands there is normally no active object left to read.
+     Mirrors the reference editor's own lastUpdatedRef/active() fallback pattern; currently the
+     sole consumer is selectActiveOrCenter() (the 'objectselect-bbox' tool). */
+  _bindLastActive() {
+    // selection:created/selection:updated carry the newly-active object(s) in `selected` (an
+    // array), NOT `target` — object:modified is the opposite (`target`, no `selected`) — so this
+    // needs both read shapes rather than one shared `opt.target` read.
+    const trackSelected = (opt) => { const t = opt && opt.selected && opt.selected[0]; if (t && t.role !== 'bg' && t.id) this._lastActiveId = t.id; };
+    const trackTarget = (opt) => { const t = opt && opt.target; if (t && t.role !== 'bg' && t.id) this._lastActiveId = t.id; };
+    this.fc.on('selection:created', trackSelected);
+    this.fc.on('selection:updated', trackSelected);
+    this.fc.on('object:modified', trackTarget);
+  }
+
+  /* Spacebar-hold pan (Photoshop/Figma convention): held while any tool is active, drag-panning
+     works the same as the Hand tool without switching away from — and back to — whatever tool was
+     selected. Tracked as real keydown/keyup state on document (there is no such thing as a
+     MouseEvent.spaceKey; _down's own `t === 'hand' || e.spaceKey` check further down is reading a
+     property that literally does not exist on a mouse event, so this state is what actually makes
+     that condition true). Skips the same isTypingTarget-style targets keybindings.js guards, so
+     holding Space to type an actual space character in a text field or a layer-rename input never
+     gets hijacked into a pan gesture. */
+  _bindSpacePan() {
+    if (typeof document === 'undefined') return;
+    const isTyping = () => {
+      const tag = document.activeElement && document.activeElement.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      const active = this.fc.getActiveObject();
+      return !!(active && active.isEditing);
+    };
+    this._onSpaceDown = (e) => {
+      if (e.code !== 'Space' && e.key !== ' ') return;
+      if (isTyping()) return;
+      if (!this._spaceDown) { this._spaceDown = true; if (this.tool !== 'hand') this.fc.defaultCursor = 'grab'; }
+      e.preventDefault();
+    };
+    this._onSpaceUp = (e) => {
+      if (e.code !== 'Space' && e.key !== ' ') return;
+      this._spaceDown = false;
+      if (this.tool !== 'hand') this.fc.defaultCursor = this.tool === 'select' ? 'default' : 'crosshair';
+    };
+    document.addEventListener('keydown', this._onSpaceDown);
+    document.addEventListener('keyup', this._onSpaceUp);
   }
 
   /* Option/Alt+drag duplicate: mirrors the delta the object actually moved onto a fresh clone
@@ -980,6 +1092,15 @@ export class Editor {
   _pixelSourceLayer() {
     const a = this.fc.getActiveObject();
     if (a && a.type !== 'activeSelection') return a;
+    // No live Fabric active object — most commonly because a drawing tool (marquee/lasso/wand,
+    // any non-'select' tool) already discarded it via setTool()'s own discardActiveObject() call,
+    // exactly when a pixel-selection op like this is actually invoked. _lastActiveId (tracked
+    // independently of Fabric's own selection state — see _bindLastActive) recovers "the layer
+    // the user was last working on" the same way selectActiveOrCenter/the gradient tool's
+    // object-local mode already do, rather than only ever falling back to the topmost image/paint
+    // layer regardless of what the user actually had selected.
+    const last = this._lastActiveId && this._byId(this._lastActiveId);
+    if (last) return last;
     const objs = this.fc.getObjects();
     for (let i = objs.length - 1; i >= 0; i--) { if (objs[i].type === 'image' || objs[i].role === 'paint') return objs[i]; }
     return null;
@@ -1026,8 +1147,13 @@ export class Editor {
     return floatImg.id;
   }
 
+  /* Same _lastActiveId fallback as _pixelSourceLayer/selectActiveOrCenter/the gradient tool's
+     object-local mode: this is invoked from Delete/Backspace (see keybindings.js) while a
+     marquee/lasso/wand drawing tool is active, at which point setTool() has already discarded
+     Fabric's own active object even though the user very much still has a layer "active" in the
+     sense that matters here. */
   cutSelectionFromLayer() {
-    const o = this.fc.getActiveObject();
+    const o = this.fc.getActiveObject() || (this._lastActiveId && this._byId(this._lastActiveId));
     if (!o) return;
     if (!this.selection) { this.fc.remove(o); this.fc.discardActiveObject(); this.commit('remove'); return; }
     const clip = selectionClipObject(this.fabric, this.selection);
@@ -1042,8 +1168,13 @@ export class Editor {
      pixel data, position, or size — clearLayerClip() (or drawing a new selection and re-clipping)
      fully reverses it. Unlike the Crop tool, this doesn't resize the artboard or re-origin every
      other layer; it only affects the one layer currently selected. */
+  /* Same _lastActiveId fallback as cutSelectionFromLayer/_pixelSourceLayer/selectActiveOrCenter
+     and the gradient tool's object-local mode: a pixel selection normally exists while a drawing
+     tool (marquee/lasso/wand) is active, and setTool() has already discarded Fabric's own active
+     object by the time a host UI's "Clip layer to selection" button gets clicked — without this
+     fallback, that click would always hit the "nothing active" branch below and silently no-op. */
   clipLayerToSelection() {
-    const o = this.fc.getActiveObject();
+    const o = this.fc.getActiveObject() || (this._lastActiveId && this._byId(this._lastActiveId));
     if (!o || !this.selection) return;
     const clip = selectionClipObject(this.fabric, this.selection);
     if (!clip) return;
@@ -1054,9 +1185,10 @@ export class Editor {
   }
 
   /* Removes whatever clipPath is on the active layer — undoes clipLayerToSelection (or any other
-     clip) without needing to remember what the clip shape was. */
+     clip) without needing to remember what the clip shape was. Same _lastActiveId fallback as
+     clipLayerToSelection above, for the same reason. */
   clearLayerClip() {
-    const o = this.fc.getActiveObject();
+    const o = this.fc.getActiveObject() || (this._lastActiveId && this._byId(this._lastActiveId));
     if (!o || !o.clipPath) return;
     o.clipPath = null; o.dirty = true;
     this.fc.renderAll();
@@ -1170,6 +1302,49 @@ export class Editor {
     this.commit('sticker');
     return obj.id;
   }
+
+  /* ── ad-copy layers (adtext.js): CTA pill, badge chip, price group, brand lockup ───────────
+     Same click-to-place/default-to-center convention as addSticker() above — `pt` defaults to the
+     artboard center, `opts` is the same shape toolOpts already carries (size/fill/color) plus each
+     factory's own fields (text/current/original/save/accent/font/ink). Each returns the new
+     object's id, or null if the factory itself declined (none currently do, but this mirrors
+     addSticker's own null-on-failure contract for a host that checks the return value). */
+  addCTA(pt, opts = {}) { return this._addAdText(makeCTA, pt, opts, 'cta'); }
+  addBadge(pt, opts = {}) { return this._addAdText(makeBadge, pt, opts, 'badge'); }
+  addPrice(pt, opts = {}) { return this._addAdText(makePrice, pt, opts, 'price'); }
+  addBrandLockup(pt, opts = {}) { return this._addAdText(makeBrandLockup, pt, opts, 'brand'); }
+  _addAdText(factory, pt, opts, label) {
+    const center = pt || { x: this.W / 2, y: this.H / 2 };
+    const o = factory(this.fabric, center, { ...this.toolOpts, ...opts });
+    if (!o) return null;
+    this.fc.add(o);
+    this.fc.setActiveObject(o);
+    this.commit(label);
+    return o.id;
+  }
+
+  /* Replaces the whole composition with a hero/sale/centered promotional layout (templates.js) —
+     background + brand lockup + headline/subhead + CTA + optional badge + a product image or
+     placeholder. Same "replace the composition, keep history" contract as openImageResult/
+     commitRegions: undo returns to whatever was on the canvas before. `spec` is
+     buildPromoLayout()'s own input shape (layout/palette/head/sub/cta/badge/brand/productImg/
+     font/uiFont), every field optional. Loads spec.productImg (if given) once up front so every
+     'image'-kind layer spec in the layout can synchronously build off the same decoded element. */
+  async applyPromoLayout(spec = {}) {
+    const layout = buildPromoLayout(spec, this.W, this.H);
+    const imgEl = spec.productImg ? await loadImageEl(spec.productImg) : null;
+    if (this._destroyed) return null;
+    this.fc.getObjects().slice().forEach(o => this.fc.remove(o));
+    layout.layers.forEach(ls => {
+      const obj = buildLayerFromSpec(this.fabric, ls, ls.kind === 'image' ? imgEl : null);
+      this.fc.add(obj);
+    });
+    this.fc.discardActiveObject();
+    this.fc.renderAll();
+    this.commit('promo-layout');
+    return layout;
+  }
+
   setAdjustmentParams(id, patch) {
     const o = this._byId(id); if (!o || o.role !== 'adjustment') return;
     o.adj = { ...FX_DEFAULTS, ...o.adj, ...patch };
@@ -1391,6 +1566,29 @@ export class Editor {
     this.commit('stroke-style');
   }
 
+  /* Object-local gradient mode's shared apply step (called live on every drag tick from _move,
+     and once more implicitly via the same drag state on _up) — maps the scene-space drag line
+     (from, to) into `obj`'s own local coordinate space via toLocalPoint(...,'center','center')
+     then divides by scale (fabric.Gradient's gradientUnits:'pixels' coords are unscaled
+     object-space, so a scaled object needs the drag line un-scaled back into that space first,
+     exactly like the reference editor's own applyCustomGradient). Always linear (a drag defines a
+     two-point AXIS, which a radial gradient — center + radius, no axis — has no use for; radial
+     object gradients go through setShapeGradient's angle-based mode instead). */
+  _applyObjectGradient(obj, from, to) {
+    const p1 = obj.toLocalPoint(new this.fabric.Point(from.x, from.y), 'center', 'center');
+    const p2 = obj.toLocalPoint(new this.fabric.Point(to.x, to.y), 'center', 'center');
+    const sx = obj.scaleX || 1, sy = obj.scaleY || 1;
+    const norm = normalizeGradientStops(this.toolOpts.gradientStops);
+    const colorStops = norm.map(s => ({ offset: s.offset, color: s.color }));
+    obj.set('fill', new this.fabric.Gradient({
+      type: 'linear', gradientUnits: 'pixels',
+      coords: { x1: p1.x / sx, y1: p1.y / sy, x2: p2.x / sx, y2: p2.y / sy },
+      colorStops,
+    }));
+    obj.dirty = true;
+    this.fc.renderAll();
+  }
+
   /* Gradient fill for a vector shape (rect/ellipse/triangle/polygon/star/text) — Fabric's own
      fabric.Gradient, so it scales/rotates with the object for free (coords are in the OBJECT's own
      bounding-box space, not scene space, per Fabric's convention: 0,0 is the object's top-left).
@@ -1538,19 +1736,120 @@ export class Editor {
     this.commit('ai');
   }
 
-  /* AI background replacement: magicEdit the flattened artboard, optionally masked so any active
-     selection's subject is protected (black = keep, white = the AI may repaint) — without a
-     selection the instruction alone asks the model to keep the main subject. Swaps the result
-     back in as a single new layer, same as aiEdit. */
+  /* Resolves "the background layer" the same priority order the reference editor's own bgGapInfo/
+     submitBgSwap use: an explicit role:'bg' image first, else the bottom-most image layer (an
+     opened photo with no separate bg layer) — excluding paint layers, which are never a
+     background swap's target. Returns null if there's no image at all to operate on. */
+  _bgLayer() {
+    const objs = this.fc.getObjects();
+    return objs.find(o => o.role === 'bg' && o.type === 'image') || objs.find(o => o.type === 'image' && o.role !== 'paint') || null;
+  }
+
+  /* Renders `layer` alone (not the flattened scene) to an artboard-size canvas via its own
+     render(ctx) — the same "one layer's own pixels, ignoring everything above/below it in the
+     stack" primitive pixels.js's renderSelectedPixels uses for a pixel-selection lift/copy. */
+  _renderLayerAlone(layer) {
+    const c = document.createElement('canvas'); c.width = this.W; c.height = this.H;
+    try { layer.render(c.getContext('2d')); } catch (e) { /* not renderable — caller sees a blank canvas */ }
+    return c;
+  }
+
+  /* White-where-transparent alpha mask of `layer` alone — the reference editor's bgGapInfo mask,
+     used by aiExtendBackground to tell magicEdit exactly which pixels are still empty canvas
+     (white = the model may fill it in, black = real pixels to leave alone). Returns
+     {canvas, maskCanvas, gapFraction} or null if the layer isn't renderable. */
+  _gapMaskFromLayer(layer) {
+    const canvas = this._renderLayerAlone(layer);
+    const ctx = canvas.getContext('2d');
+    let data;
+    try { data = ctx.getImageData(0, 0, this.W, this.H).data; } catch (e) { return null; }
+    const maskCanvas = document.createElement('canvas'); maskCanvas.width = this.W; maskCanvas.height = this.H;
+    const mctx = maskCanvas.getContext('2d');
+    const md = mctx.createImageData(this.W, this.H);
+    let gap = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const empty = data[i + 3] < 8;
+      if (empty) gap++;
+      md.data[i] = md.data[i + 1] = md.data[i + 2] = empty ? 255 : 0;
+      md.data[i + 3] = 255;
+    }
+    mctx.putImageData(md, 0, 0);
+    return { canvas, maskCanvas, gapFraction: gap / (this.W * this.H) };
+  }
+
+  /* Selection-derived protect mask: white = the current pixel selection's shape (the AI may
+     repaint it), black = everywhere else (kept pixel-identical) — the inverse of a normal
+     selection clip, since here white means "editable" rather than "selected region to act on".
+     Returns a full-artboard canvas (never null; a null/absent selection just means an
+     all-white — everything editable — mask, matching aiBgSwap's own contract of "no selection ⇒
+     the model may repaint the whole background"). */
+  _selectionEditMask() {
+    const c = document.createElement('canvas'); c.width = this.W; c.height = this.H;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, this.W, this.H);
+    if (this.selection) {
+      const path = selectionToPath2D(this.selection, this.W, this.H);
+      if (path) { ctx.fillStyle = '#000000'; ctx.fill(path, selectionFillRule(this.selection)); }
+    }
+    return c;
+  }
+
+  /* Swaps `oldLayer`'s pixels for a freshly-loaded image, in place: same id/role/name/locked
+     identity, same z-index, full-bleed at the artboard's own W×H — everything else in the stack
+     is untouched. This is what makes aiExtendBackground/aiBgSwap non-destructive (unlike
+     openImageResult, which replaces the WHOLE composition) — undo still returns to the exact
+     prior pixels, but every other layer survives an AI background edit unchanged. */
+  async _swapLayerImage(oldLayer, dataURL) {
+    const img = await new Promise((resolve, reject) => {
+      this.fabric.Image.fromURL(dataURL, (im) => { im && im.width ? resolve(im) : reject(new Error('Could not load the AI result image.')); }, { crossOrigin: 'anonymous' });
+    });
+    if (this._destroyed) return null;
+    const idx = this.fc.getObjects().indexOf(oldLayer);
+    img.set({
+      id: oldLayer.id || uid(), role: oldLayer.role || 'bg', name: oldLayer.name || 'Background', locked: !!oldLayer.locked,
+      left: 0, top: 0, originX: 'left', originY: 'top', angle: 0,
+      scaleX: this.W / img.width, scaleY: this.H / img.height,
+    });
+    if (oldLayer.locked) img.set({ selectable: false, evented: false, hasControls: false });
+    this.fc.remove(oldLayer);
+    this.fc.add(img);
+    if (idx >= 0) { this.fc.remove(img); this.fc.insertAt(img, idx, false); }
+    if (img.role === 'bg') this.fc.sendToBack(img);
+    return img;
+  }
+
+  /* AI background replacement: targets the background layer specifically (see _bgLayer) and
+     swaps only its pixels — every other layer in the composition survives untouched, unlike
+     openImageResult's whole-composition replacement. With an active pixel selection, builds a
+     real mask (white = background the model may repaint, black = the selected subject, kept
+     pixel-identical) and passes it to magicEdit's optional 3rd argument when the registered
+     provider reads it (AIRegistry#run forwards whatever args are given; a provider that ignores
+     the mask still gets a usable result via the instruction text alone, same as before). Falls
+     back to the old whole-scene openImageResult behavior when there's no image layer to target at
+     all (nothing to swap in place). */
   async aiBgSwap(instruction) {
-    const flat = this.exportPNG();
-    if (!this.selection) return this.ai.run('magicEdit', flat, instruction).then(async r => { if (r.status === 'ok') await this.openImageResult(r.result); return r; });
-    /* Selection present but magicEdit's contract here is single-image-in/out — no separate mask
-       channel — so fold the protected-subject framing into the instruction text; a host wanting
-       true mask-based inpainting should call ai.run('magicEdit', ...) directly with its own
-       provider extension. */
-    const r = await this.ai.run('magicEdit', flat, instruction + ' Keep the selected subject pixel-identical; only change the background.');
-    if (r.status === 'ok') await this.openImageResult(r.result);
+    const bg = this._bgLayer();
+    if (!bg) {
+      const flat = this.exportPNG();
+      const r = await this.ai.run('magicEdit', flat, instruction + (this.selection ? ' Keep the selected subject pixel-identical; only change the background.' : ''));
+      if (r.status === 'ok') await this.openImageResult(r.result);
+      return r;
+    }
+    const flat = this._renderLayerAlone(bg).toDataURL('image/png');
+    const hasSel = !!this.selection;
+    const maskURL = hasSel ? this._selectionEditMask().toDataURL('image/png') : null;
+    const text = hasSel
+      ? instruction + ' Replace the background (the white regions of the mask) with this. Keep every black-masked subject pixel EXACTLY unchanged — same colours, edges and position. Blend the new background\'s lighting and shadows naturally around the subject.'
+      : instruction + ' Keep the main subject exactly as it is — same position, scale, colours and details. Integrate lighting and shadows naturally.';
+    const r = maskURL ? await this.ai.run('magicEdit', flat, text, maskURL) : await this.ai.run('magicEdit', flat, text);
+    if (this._destroyed) return r;
+    if (r.status === 'ok') {
+      await this._swapLayerImage(bg, r.result);
+      if (this._destroyed) return r;
+      this.clearSelection();
+      this.fc.renderAll();
+      this.commit('ai-bg-swap');
+    }
     return r;
   }
 
@@ -1573,17 +1872,34 @@ export class Editor {
     }).catch(() => 0);
   }
 
-  /* AI outpaint: fills whatever part of the canvas is still empty by describing the gap to
-     magicEdit and asking it to continue the existing image into that space — the registry's
-     magicEdit contract is text-instruction + single image in/out with no separate mask channel
-     (see ai/registry.js), so "outpaint" here is framed as an instruction rather than a true
-     inpainting mask call; a host with a mask-capable backend can call ai.run('magicEdit', ...)
-     directly for pixel-precise control. Same replace-the-composition contract as aiEdit. */
+  /* AI outpaint: targets the background layer specifically (see _bgLayer) and asks magicEdit to
+     fill exactly its transparent gap, guided by a real white-where-empty mask (_gapMaskFromLayer)
+     — pixel-precise, not just an instruction hoping the model infers the gap shape from the flat
+     PNG. Swaps only that layer's pixels in place; every other layer survives untouched, same
+     non-destructive contract as aiBgSwap. Falls back to the old whole-scene instruction-only
+     behavior when there's no image layer to target (nothing to build a per-layer mask from). */
   async aiExtendBackground() {
-    const flat = this.exportPNG();
-    const r = await this.ai.run('magicEdit', flat,
-      'Extend and continue this image to fill the entire canvas — fill in any transparent or empty areas by naturally continuing the existing background, lighting, and style. Do not add new subjects.');
-    if (r.status === 'ok') await this.openImageResult(r.result);
+    const bg = this._bgLayer();
+    if (!bg) {
+      const flat = this.exportPNG();
+      const r = await this.ai.run('magicEdit', flat,
+        'Extend and continue this image to fill the entire canvas — fill in any transparent or empty areas by naturally continuing the existing background, lighting, and style. Do not add new subjects.');
+      if (r.status === 'ok') await this.openImageResult(r.result);
+      return r;
+    }
+    const info = this._gapMaskFromLayer(bg);
+    if (!info) return { status: 'error', reason: 'no_image' };
+    if (!info.gapFraction) return { status: 'error', reason: 'no_gap', message: 'Background already fills the canvas.' };
+    const r = await this.ai.run('magicEdit', info.canvas.toDataURL('image/png'),
+      'Extend the background to fill the empty areas. Do not generate any text, letters, numbers or logos in the extended areas.',
+      info.maskCanvas.toDataURL('image/png'));
+    if (this._destroyed) return r;
+    if (r.status === 'ok') {
+      await this._swapLayerImage(bg, r.result);
+      if (this._destroyed) return r;
+      this.fc.renderAll();
+      this.commit('ai-extend-bg');
+    }
     return r;
   }
 
@@ -1708,9 +2024,10 @@ export class Editor {
       const x = (bbox.x || 0) / 100 * this.W, y = (bbox.y || 0) / 100 * this.H;
       const w = (bbox.width || 0) / 100 * this.W, h = (bbox.height || 0) / 100 * this.H;
       if (w < 1 || h < 1) continue;
+      const role = REGION_ROLE[rg.type] || rg.type || 'image';
       if (rg.type === 'text') {
         const txt = makeText(this.fabric, { x, y }, { text: rg.content || 'Text', fontSize: Math.max(12, Math.round(h * 0.6)) });
-        txt.set({ name: (rg.content || 'Text').slice(0, 24) });
+        txt.set({ role, regionType: rg.type, name: (rg.content || 'Text').slice(0, 24) });
         this.fc.add(txt);
       } else {
         const sx = src.naturalWidth / this.W, sy = src.naturalHeight / this.H;
@@ -1718,7 +2035,7 @@ export class Editor {
         const c = document.createElement('canvas'); c.width = cw; c.height = ch;
         c.getContext('2d').drawImage(src, Math.round(x * sx), Math.round(y * sy), cw, ch, 0, 0, cw, ch);
         const img = new this.fabric.Image(c, { left: x, top: y, originX: 'left', originY: 'top' });
-        img.set({ id: uid(), role: rg.type || 'image', name: (rg.type || 'Layer')[0].toUpperCase() + (rg.type || 'layer').slice(1) });
+        img.set({ id: uid(), role, regionType: rg.type, name: (rg.type || 'Layer')[0].toUpperCase() + (rg.type || 'layer').slice(1) });
         this.fc.add(img);
       }
     }
@@ -1739,6 +2056,10 @@ export class Editor {
   destroy() {
     this._destroyed = true;
     if (this._frameHandles) Object.keys(this._frameHandles).forEach(key => this._cancelFrameJob(key));
+    if (typeof document !== 'undefined') {
+      if (this._onSpaceDown) document.removeEventListener('keydown', this._onSpaceDown);
+      if (this._onSpaceUp) document.removeEventListener('keyup', this._onSpaceUp);
+    }
     this.fc.dispose();
     this._listeners = {};
     if (this.cv) this.cv.destroy();

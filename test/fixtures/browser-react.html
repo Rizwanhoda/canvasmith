@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>React shell browser-test fixture</title>
+<!-- Minimal harness for react.browser.test.mjs — mounts the real, built standalone bundle
+     (the same artifact a non-bundler consumer loads via one <script> tag per the README's own
+     quick-start), not the raw .jsx source, so these tests exercise what actually ships. Requires
+     `npm run build` to have produced packages/react/dist/standalone.js first. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+<script src="/packages/react/dist/standalone.js"></script>
+</head>
+<body>
+<div id="editor" style="height:100vh"></div>
+<script>
+  window.__mounted = Canvasmith.mount('#editor', { width: 400, height: 300 });
+</script>
+</body>
+</html>

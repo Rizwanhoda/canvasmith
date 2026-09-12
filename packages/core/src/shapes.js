@@ -105,6 +105,10 @@ export function layerLabel(o) {
   if (o.role === 'paint') return o.name || 'Paint';
   if (o.role === 'adjustment') return o.name || 'Adjustments';
   if (o.role === 'bg') return 'Background';
+  // cta/badge/price/brand (adtext.js) are Fabric Groups too, so this must be checked before the
+  // generic `type === 'group'` branch below — otherwise every ad-copy layer would show its child
+  // count ("3 layers") instead of its own name.
+  if (o.role === 'cta' || o.role === 'badge' || o.role === 'price' || o.role === 'brand') return o.name || 'Layer';
   if (o.type === 'i-text' || o.type === 'text' || o.type === 'textbox') return (o.text || 'Text').slice(0, 24);
   if (o.type === 'image') return o.name || 'Image';
   if (o.type === 'group') return (o._objects ? o._objects.length : '?') + ' layers';
