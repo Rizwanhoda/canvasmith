@@ -9,11 +9,16 @@
      ed.ai.register(new DittoProvider(window.DittoAPI));
 
    Capability mapping (Canvasmith -> DittoAPI):
-     magicEdit        -> magicEdit({ imageDataURL, instruction })
+     magicEdit        -> magicEdit({ imageDataURL, instruction, maskDataURL? })
      generateImage    -> generateObject({ prompt })
      detectRegions    -> detectRegions({ imageDataURL })
      removeBackground -> segmentRegions with one full-frame product region
      describe         -> (not exposed by DittoAPI today — capability simply absent)
+
+   magicEdit's optional 3rd argument (a mask dataURL — white = the model may repaint, black = keep
+   pixel-identical) is forwarded as DittoAPI's own `maskDataURL` field whenever the Canvasmith
+   caller supplies one (Editor#aiBgSwap/#aiExtendBackground do, for a masked background edit) —
+   the field is simply omitted otherwise, matching every other optional-field call here. */
 
    MIGRATION PATH for the platform, when ready:
      1. Ship @canvasmith/core alongside fabricEditor.jsx (no conflict — different globals).
@@ -30,8 +35,8 @@ export class DittoProvider {
     this.api = api;
   }
 
-  async magicEdit(imageDataURL, instruction) {
-    const r = await this.api.magicEdit({ imageDataURL, instruction });
+  async magicEdit(imageDataURL, instruction, maskDataURL) {
+    const r = await this.api.magicEdit(maskDataURL ? { imageDataURL, instruction, maskDataURL } : { imageDataURL, instruction });
     const b64 = r && (r.image_base64 || r.edited_base64);
     if (!b64) throw new Error((r && r.error) || 'Magic edit returned no image.');
     return 'data:image/png;base64,' + b64;

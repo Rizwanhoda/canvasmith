@@ -1,9 +1,15 @@
-/* Selection model — marquee (rect/ellipse), freehand lasso, polygon lasso, and a magic wand.
+/* Selection model — marquee (rect/ellipse), freehand lasso, click-to-place polygon lasso (with an
+   optional magnetic edge-snap), a plain-JS magic wand, and selection composition (add/subtract/
+   expand/contract as polygon lists).
 
    A selection is plain data: {kind:'rect'|'ellipse'|'poly'|'multipoly', ...geometry, invert?}.
    toPath2D() turns it into a clip path the PaintEngine (and any canvas) can use directly; an
    inverted selection is expressed with an evenodd outer rect. Everything except toPath2D() is
-   pure data-in/data-out, so the geometry is unit-testable without a DOM. */
+   pure data-in/data-out, so the geometry is unit-testable without a DOM.
+
+   The boolean-accurate polygon ops (true union/expand/contract/subtract) live behind the OpenCV
+   worker (see cv/client.js) because pure-JS polygon clipping is its own rabbit hole; this module's
+   composition helpers (addPolyToSelection et al.) are the always-available, no-cv fallback. */
 
 export function startSelection(tool, pt) {
   if (tool === 'lasso') return { kind: 'poly', pts: [pt] };
@@ -114,4 +120,199 @@ export function wandSelect(flatCanvas, pt, tol = 32) {
   if (!r) return null;
   if (r.pts) return { kind: 'poly', pts: r.pts };
   return { kind: 'rect', ...r.rect };
+}
+
+/* ── polygon lasso (click-to-place) ──────────────────────────────────────────────────────
+   A running build state ({pts:[]}) distinct from `selection` — the Editor shows it live via
+   previewPolyBuild() while the user is still clicking, and only writes `selection` once closed. */
+export function startPolyBuild() {
+  return { pts: [] };
+}
+
+/* Add a vertex; closes the loop (returns {pts, closed:true}) if the click lands near the first
+   point — mirrors a double-click-to-close polygon tool. `closeDist` is in scene px. */
+export function polyBuildAdd(build, pt, closeDist = 12) {
+  if (!build) return build;
+  if (build.pts.length > 2) {
+    const f = build.pts[0];
+    if (Math.hypot(pt.x - f.x, pt.y - f.y) < closeDist) return { pts: build.pts.slice(), closed: true };
+  }
+  return { pts: build.pts.concat([pt]) };
+}
+
+/* Live preview while the pointer moves but hasn't clicked yet — the polygon plus a trailing point. */
+export function polyBuildPreview(build, pt) {
+  if (!build) return null;
+  return { kind: 'poly', pts: build.pts.concat([pt]), building: true };
+}
+
+/* Finish an in-progress polygon build into a real selection, or null if cancelled/too short. */
+export function finishPolyBuild(build, cancel) {
+  if (cancel || !build || build.pts.length < 3) return null;
+  return { kind: 'poly', pts: build.pts.slice() };
+}
+
+/* ── magnetic lasso: edge map + snap ─────────────────────────────────────────────────────
+   buildEdgeMap() runs a cheap Sobel gradient once over a downscaled copy of the source image;
+   snapToEdge() then pulls a drag point onto the strongest nearby edge pixel. Both are pure
+   data-in/data-out: the map is {grad, ew, eh, sx, sy} and carries its own scene<->grid scale. */
+export function buildEdgeMapFromImageData(imgData, W, H) {
+  const ew = imgData.width, eh = imgData.height, d = imgData.data;
+  const gray = new Float32Array(ew * eh);
+  for (let i = 0; i < ew * eh; i++) gray[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  const grad = new Uint8ClampedArray(ew * eh);
+  for (let y = 1; y < eh - 1; y++) for (let x = 1; x < ew - 1; x++) {
+    const gx = gray[y * ew + x + 1] - gray[y * ew + x - 1], gy = gray[(y + 1) * ew + x] - gray[(y - 1) * ew + x];
+    grad[y * ew + x] = Math.min(255, Math.hypot(gx, gy));
+  }
+  return { grad, ew, eh, sx: W / ew, sy: H / eh };
+}
+
+/* Snap a scene point to the strongest nearby edge; returns pt unchanged if nothing strong is close. */
+export function snapToEdge(edgeMap, pt, radius = 9, minStrength = 20) {
+  if (!edgeMap) return pt;
+  const e = edgeMap;
+  const gx = pt.x / e.sx, gy = pt.y / e.sy;
+  let best = -1, bx = gx, by = gy;
+  for (let dy = -radius; dy <= radius; dy++) for (let dx = -radius; dx <= radius; dx++) {
+    const x = Math.round(gx + dx), y = Math.round(gy + dy);
+    if (x < 1 || y < 1 || x >= e.ew - 1 || y >= e.eh - 1) continue;
+    const w = e.grad[y * e.ew + x] - Math.hypot(dx, dy) * 2;   // strong + close edges win
+    if (w > best) { best = w; bx = x; by = y; }
+  }
+  return best < minStrength ? pt : { x: bx * e.sx, y: by * e.sy };
+}
+
+/* ── selection composition: shift-click add / alt-click subtract / expand/contract ────────
+   These operate on plain polygon LISTS (arrays of {x,y}[] rings), the shared currency between a
+   `poly`/`multipoly`/`rect` selection and the cv-worker's union/morph/subtract ops. Pure geometry;
+   no OpenCV needed to normalize/compose — only the boolean-accurate union/morph/subtract do. */
+
+/* Normalize any selection into its constituent polygon rings (rect becomes a 4-point ring). */
+export function selectionPolys(sel) {
+  if (!sel) return null;
+  if (sel.kind === 'multipoly') return sel.polys;
+  if (sel.kind === 'poly') return [sel.pts];
+  if (sel.kind === 'rect' || sel.kind === 'ellipse') {
+    const steps = sel.kind === 'ellipse' ? 32 : 4;
+    if (sel.kind === 'rect') return [[{ x: sel.x, y: sel.y }, { x: sel.x + sel.w, y: sel.y }, { x: sel.x + sel.w, y: sel.y + sel.h }, { x: sel.x, y: sel.y + sel.h }]];
+    const cx = sel.x + sel.w / 2, cy = sel.y + sel.h / 2, rx = Math.abs(sel.w / 2), ry = Math.abs(sel.h / 2);
+    const pts = []; for (let i = 0; i < steps; i++) { const a = (i / steps) * Math.PI * 2; pts.push({ x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) }); }
+    return [pts];
+  }
+  return null;
+}
+
+/* Wrap 1+ polygon rings back into a selection (poly if one ring, multipoly if several). */
+export function polysToSelection(polys) {
+  if (!polys || !polys.length) return null;
+  return polys.length === 1 ? { kind: 'poly', pts: polys[0] } : { kind: 'multipoly', polys };
+}
+
+/* Shift-click add, WITHOUT a boolean union — just accumulates rings into a multipoly. A true
+   union (merging overlapping outlines into one clean contour) needs the cv worker; see
+   CvEngine#union for that upgrade path. This is the always-available fallback. */
+export function addPolyToSelection(sel, poly) {
+  const cur = selectionPolys(sel) || [];
+  return polysToSelection(cur.concat([poly]));
+}
+
+/* Bounding box (scene px) of a selection, or the full WxH canvas if there is none. */
+export function selectionBounds(sel, W, H) {
+  if (!sel) return { x: 0, y: 0, w: W, h: H };
+  if (sel.kind === 'poly' || sel.kind === 'multipoly') {
+    const all = sel.kind === 'multipoly' ? [].concat(...sel.polys) : sel.pts;
+    if (!all.length) return { x: 0, y: 0, w: 0, h: 0 };
+    const xs = all.map(p => p.x), ys = all.map(p => p.y);
+    const x = Math.min(...xs), y = Math.min(...ys);
+    return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+  }
+  return { x: sel.x, y: sel.y, w: sel.w, h: sel.h };
+}
+
+/* Hit-test a rect/ellipse selection's 8 resize handles (corners + edge midpoints) plus its
+   interior, same geometry as crop.js's getCropHandle — a marquee selection is grabbable exactly
+   like a crop rect once it exists, so dragging it can resize or move it instead of only ever
+   starting a fresh drag-to-select. `tol` shrinks with zoom so handles stay a constant screen size. */
+export function getSelectionHandle(sel, pt, z) {
+  if (!sel || (sel.kind !== 'rect' && sel.kind !== 'ellipse')) return null;
+  const tol = 12 / z;
+  const cx = sel.x, cy = sel.y, cw = sel.w, ch = sel.h;
+  const mx = cx + cw / 2, my = cy + ch / 2;
+  const rx = cx + cw, ry = cy + ch;
+  if (Math.hypot(pt.x - cx, pt.y - cy) < tol) return 'tl';
+  if (Math.hypot(pt.x - rx, pt.y - cy) < tol) return 'tr';
+  if (Math.hypot(pt.x - cx, pt.y - ry) < tol) return 'bl';
+  if (Math.hypot(pt.x - rx, pt.y - ry) < tol) return 'br';
+  if (Math.hypot(pt.x - mx, pt.y - cy) < tol) return 't';
+  if (Math.hypot(pt.x - mx, pt.y - ry) < tol) return 'b';
+  if (Math.hypot(pt.x - cx, pt.y - my) < tol) return 'l';
+  if (Math.hypot(pt.x - rx, pt.y - my) < tol) return 'r';
+  if (pt.x >= cx && pt.x <= rx && pt.y >= cy && pt.y <= ry) return 'move';
+  return null;
+}
+
+/* Drag a selection handle: same math as crop.js's dragCropRect, but with no aspect-ratio lock
+   (crop's is a UI toggle; selections don't have one), and a 1px floor instead of crop's 24px so a
+   selection can still shrink down almost to nothing mid-drag — finalizeSelection is what throws
+   away a too-small result once the drag ends.
+
+   Handles that anchor the OPPOSITE edge (tl/tr/bl/l/t move x/y alongside w/h) must flip that
+   anchor once a dimension crosses zero, or the box would freeze pinned to its pre-crossing edge
+   instead of continuing to track the pointer — e.g. dragging 'r' at x=100,w=50 past x=100 (dx=
+   -100) should end with the box's LEFT edge at the pointer, not stuck 1px wide at the old x=100. */
+export function dragSelectionRect(sel, handle, dx, dy) {
+  let { x, y, w, h } = sel;
+  const apply = {
+    move: () => { x += dx; y += dy; },
+    tl: () => { x += dx; y += dy; w -= dx; h -= dy; },
+    tr: () => { y += dy; w += dx; h -= dy; },
+    bl: () => { x += dx; w -= dx; h += dy; },
+    br: () => { w += dx; h += dy; },
+    t: () => { y += dy; h -= dy; },
+    b: () => { h += dy; },
+    l: () => { x += dx; w -= dx; },
+    r: () => { w += dx; },
+  }[handle];
+  if (!apply) return sel;
+  apply();
+  // Normalize a flipped box (w/h gone negative past the opposite edge) back to a positive-size
+  // rect with x/y at the true top-left, rather than just clamping the magnitude — a clamp alone
+  // would leave x/y pinned to the pre-flip edge and freeze the box instead of letting it continue
+  // to track the pointer past the crossover.
+  if (w < 0) { x += w; w = -w; }
+  if (h < 0) { y += h; h = -h; }
+  if (w < 1) w = 1;
+  if (h < 1) h = 1;
+  return { ...sel, x, y, w, h };
+}
+
+/* ── hover-preview cache ──────────────────────────────────────────────────────────────────
+   A true LRU keyed by grid cell, backed by a Map's insertion order: get() re-inserts its key so
+   it becomes the most-recently-used entry, and put()'s eviction (the map's first/oldest key) then
+   always removes the least-recently-USED entry, not just the least-recently-inserted one — a hot
+   cell that's re-hovered repeatedly near the cap survives instead of being evicted anyway.
+   Pure and dependency-free so it's unit-testable without touching the Editor's async plumbing. */
+export class HoverCache {
+  constructor(cap = 400) {
+    this.cap = cap;
+    this._map = new Map();
+  }
+  get(key) {
+    if (!this._map.has(key)) return null;
+    const value = this._map.get(key);
+    this._map.delete(key);
+    this._map.set(key, value);   // move to the most-recently-used end
+    return value;
+  }
+  put(key, value) {
+    if (this._map.has(key)) this._map.delete(key);
+    else if (this._map.size >= this.cap) {
+      const oldest = this._map.keys().next().value;
+      this._map.delete(oldest);
+    }
+    this._map.set(key, value);
+  }
+  clear() { this._map.clear(); }
+  get size() { return this._map.size; }
 }

@@ -10,7 +10,12 @@
    All methods are async and speak dataURLs in, dataURLs out. */
 
 export const CAPABILITIES = [
-  'magicEdit',        // (imageDataURL, instruction) -> imageDataURL   free-text edit of the artboard
+  'magicEdit',        // (imageDataURL, instruction, maskDataURL?) -> imageDataURL   free-text edit,
+                       //   optionally mask-guided (white = the model may repaint, black = keep
+                       //   pixel-identical) — the 3rd argument is optional and additive: a provider
+                       //   that only reads (imageDataURL, instruction) keeps working unchanged, it
+                       //   just ignores the mask a caller passes. AIRegistry#run forwards whatever
+                       //   args a caller supplies, so no registry change was needed to add this.
   'generateImage',    // (prompt, opts)              -> imageDataURL   text-to-image insert
   'removeBackground', // (imageDataURL)              -> imageDataURL   subject cutout with alpha
   'detectRegions',    // (imageDataURL)              -> [{type,bbox:{x,y,width,height in %},content?}]

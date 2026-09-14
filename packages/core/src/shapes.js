@@ -5,6 +5,29 @@
 let _uid = 0;
 export const uid = () => 'o' + (Date.now().toString(36)) + (_uid++).toString(36);
 
+/* Curated font list for the typography panel: web-safe system fonts (render offline, no network
+   dependency) plus a small set of popular Google Fonts loaded via a <link> tag a host page adds
+   itself (see FONT_STYLESHEET_URL) — picking one of the Google fonts before that stylesheet has
+   loaded just falls back to the family's own generic (serif/sans-serif/monospace) until it does.
+   Grouped so a host UI can render section headers; the value is the exact CSS font-family string
+   to set on a text object. */
+export const FONT_GROUPS = [
+  { label: 'System', fonts: [
+    ['System UI', 'system-ui, sans-serif'], ['Arial', 'Arial, Helvetica, sans-serif'],
+    ['Georgia', 'Georgia, serif'], ['Times New Roman', '"Times New Roman", Times, serif'],
+    ['Courier New', '"Courier New", Courier, monospace'], ['Verdana', 'Verdana, sans-serif'],
+    ['Trebuchet MS', '"Trebuchet MS", sans-serif'],
+  ] },
+  { label: 'Google Fonts', fonts: [
+    ['Inter', 'Inter, sans-serif'], ['Roboto', 'Roboto, sans-serif'], ['Poppins', 'Poppins, sans-serif'],
+    ['Playfair Display', '"Playfair Display", serif'], ['Merriweather', 'Merriweather, serif'],
+    ['Roboto Mono', '"Roboto Mono", monospace'], ['Bebas Neue', '"Bebas Neue", sans-serif'],
+  ] },
+];
+export const GOOGLE_FONT_FAMILIES = ['Inter', 'Roboto', 'Poppins', 'Playfair+Display', 'Merriweather', 'Roboto+Mono', 'Bebas+Neue'];
+export const FONT_STYLESHEET_URL = 'https://fonts.googleapis.com/css2?' +
+  GOOGLE_FONT_FAMILIES.map(f => `family=${f}:wght@400;500;600;700`).join('&') + '&display=swap';
+
 export function starPoints(cx, cy, outer, inner, n) {
   const pts = [];
   for (let i = 0; i < n * 2; i++) {
@@ -19,7 +42,7 @@ const BASE = { originX: 'left', originY: 'top' };
 
 export function makeShape(fabric, tool, pt, o = {}) {
   const size = o.size || 160;
-  const fill = o.fill || '#d4ff45';
+  const fill = o.fill || '#ef6a2d';
   const stroke = o.stroke || null;
   const strokeWidth = o.strokeWidth || 0;
   const common = { ...BASE, left: pt.x - size / 2, top: pt.y - size / 2, fill, stroke, strokeWidth };
@@ -33,6 +56,35 @@ export function makeShape(fabric, tool, pt, o = {}) {
   if (!obj) return null;
   obj.set({ id: uid(), role: 'shape', name: tool[0].toUpperCase() + tool.slice(1) });
   return obj;
+}
+
+/* Resize a shape made by makeShape() to span two drag points, keeping it live during mouse:move.
+   Mirrors makeShape's own per-type geometry so a click-drag ends up exactly where a click-release
+   would place a shape of that size. With `square` (held Shift), the drag point is clamped so
+   width and height grow together from `from`, matching the marquee-select square constraint. */
+export function resizeShapeTo(obj, tool, from, to, o = {}) {
+  if (o.square && tool !== 'line') {
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const s = Math.max(Math.abs(dx), Math.abs(dy));
+    to = { x: from.x + (dx < 0 ? -s : s), y: from.y + (dy < 0 ? -s : s) };
+  }
+  const x = Math.min(from.x, to.x), y = Math.min(from.y, to.y);
+  const w = Math.max(1, Math.abs(to.x - from.x)), h = Math.max(1, Math.abs(to.y - from.y));
+  if (tool === 'rect' || tool === 'triangle') {
+    obj.set({ left: x, top: y, width: w, height: h });
+  } else if (tool === 'ellipse') {
+    obj.set({ left: x, top: y, rx: w / 2, ry: h / 2 });
+  } else if (tool === 'line') {
+    obj.set({ x1: from.x, y1: from.y, x2: to.x, y2: to.y });
+  } else if (tool === 'polygon' || tool === 'star') {
+    const cx = x + w / 2, cy = y + h / 2;
+    const pts = tool === 'polygon'
+      ? starPoints(cx, cy, w / 2, h / 2, 6).filter((_, i) => i % 2 === 0)
+      : starPoints(cx, cy, w / 2, h / 4, 5);
+    obj.set({ points: pts, left: x, top: y, width: w, height: h });
+    obj.setCoords();
+  }
+  obj.setCoords();
 }
 
 export function makeText(fabric, pt, o = {}) {
@@ -51,7 +103,12 @@ export function makeText(fabric, pt, o = {}) {
 export function layerLabel(o) {
   if (o.renamed && o.name) return o.name;
   if (o.role === 'paint') return o.name || 'Paint';
+  if (o.role === 'adjustment') return o.name || 'Adjustments';
   if (o.role === 'bg') return 'Background';
+  // cta/badge/price/brand (adtext.js) are Fabric Groups too, so this must be checked before the
+  // generic `type === 'group'` branch below — otherwise every ad-copy layer would show its child
+  // count ("3 layers") instead of its own name.
+  if (o.role === 'cta' || o.role === 'badge' || o.role === 'price' || o.role === 'brand') return o.name || 'Layer';
   if (o.type === 'i-text' || o.type === 'text' || o.type === 'textbox') return (o.text || 'Text').slice(0, 24);
   if (o.type === 'image') return o.name || 'Image';
   if (o.type === 'group') return (o._objects ? o._objects.length : '?') + ' layers';

@@ -54,18 +54,27 @@ const firstText = (res) => {
   return '';
 };
 
+/* Some browser contexts (blocked third-party storage, certain privacy/incognito modes, sandboxed
+   iframes) throw on ANY access to `localStorage`, not just typeof — `typeof localStorage` alone
+   still throws in those cases, so every read/write here goes through a try/catch that treats a
+   throw the same as "storage unavailable" instead of letting it crash the caller (module init, a
+   key paste, ...). */
+function safeStorageGet(k) { try { return typeof localStorage !== 'undefined' ? localStorage.getItem(k) : null; } catch (e) { return null; } }
+function safeStorageSet(k, v) { try { if (typeof localStorage !== 'undefined') localStorage.setItem(k, v); } catch (e) { /* storage unavailable — key just won't persist */ } }
+function safeStorageRemove(k) { try { if (typeof localStorage !== 'undefined') localStorage.removeItem(k); } catch (e) { /* storage unavailable */ } }
+
 export class GeminiProvider {
   /* key: pass explicitly, or omit to read/persist from localStorage (personal use). */
   constructor({ key, persist = true } = {}) {
     this._persist = persist;
-    this._key = key || (persist && typeof localStorage !== 'undefined' ? localStorage.getItem(STORE_KEY) : null) || null;
+    this._key = key || (persist ? safeStorageGet(STORE_KEY) : null) || null;
   }
 
   setKey(key) {
     this._key = key || null;
-    if (this._persist && typeof localStorage !== 'undefined') {
-      if (key) localStorage.setItem(STORE_KEY, key);
-      else localStorage.removeItem(STORE_KEY);
+    if (this._persist) {
+      if (key) safeStorageSet(STORE_KEY, key);
+      else safeStorageRemove(STORE_KEY);
     }
   }
 
@@ -87,16 +96,29 @@ export class GeminiProvider {
     return this._key;
   }
 
-  async magicEdit(imageDataURL, instruction) {
+  /* maskDataURL is optional — Gemini's image model has no literal pixel-mask input channel (no
+     guaranteed "only touch white-masked pixels"), so a mask is passed as a SECOND image part with
+     explanatory text asking the model to treat it as an editing guide, rather than silently
+     dropping the 3rd argument a caller (Editor#aiBgSwap/#aiExtendBackground) may supply. This is
+     best-effort guidance, not a hard pixel guarantee the way a real inpainting API's mask channel
+     would be — a host that needs pixel-exact masked edits should register a provider backed by a
+     model with true mask support instead. */
+  async magicEdit(imageDataURL, instruction, maskDataURL) {
     const key = this._need();
     const img = dataUrlParts(imageDataURL);
     if (!img) throw new Error('magicEdit needs a dataURL image.');
-    const res = await call(key, IMAGE_MODEL, {
-      contents: [{ parts: [
-        { text: 'Edit this image. Apply exactly this instruction and change nothing else: ' + instruction },
-        { inlineData: { mimeType: img.mime, data: img.b64 } },
-      ] }],
-    });
+    const mask = maskDataURL ? dataUrlParts(maskDataURL) : null;
+    const parts = [
+      { text: 'Edit this image. Apply exactly this instruction and change nothing else: ' + instruction },
+      { inlineData: { mimeType: img.mime, data: img.b64 } },
+    ];
+    if (mask) {
+      parts.push(
+        { text: 'Use this second image as an editing mask: white areas may be changed, black areas must stay pixel-identical to the first image.' },
+        { inlineData: { mimeType: mask.mime, data: mask.b64 } },
+      );
+    }
+    const res = await call(key, IMAGE_MODEL, { contents: [{ parts }] });
     const out = firstImage(res);
     if (!out) throw new Error('The model returned no image (safety filter or refusal).');
     return out;

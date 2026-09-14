@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>React shell (with image prop) browser-test fixture</title>
+<!-- Same harness as browser-react.html, but mounts with an `image` prop set — the asset-tray
+     test needs a real openImage() call to exercise CanvasmithEditor's trackAsset() wiring, and
+     that's the one production code path Playwright can drive without a native file-picker dialog. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+<script src="/packages/react/dist/standalone.js"></script>
+</head>
+<body>
+<div id="editor" style="height:100vh"></div>
+<script>
+  const c = document.createElement('canvas');
+  c.width = 20; c.height = 20;
+  c.getContext('2d').fillStyle = '#ff00ff';
+  c.getContext('2d').fillRect(0, 0, 20, 20);
+  window.__mounted = Canvasmith.mount('#editor', { width: 400, height: 300, image: c.toDataURL() });
+</script>
+</body>
+</html>
