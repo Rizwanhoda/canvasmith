@@ -61,7 +61,13 @@ export class PaintEngine {
     this.cv.width = this.W;
     this.cv.height = this.H;
     this.ctx = this.cv.getContext('2d');
-    const img = new this.fabric.Image(this.cv, { left: 0, top: 0, originX: 'left', originY: 'top', selectable: true, evented: true });
+    // Created mid-stroke while a drawing tool is active, so it must start out non-selectable/
+    // non-evented like every other object under a drawing tool (see Editor#setTool) — otherwise
+    // Fabric's own mousedown-on-target logic latches a drag transform onto this brand-new layer
+    // at the same point the stroke begins, and the whole layer visibly slides under the paint
+    // (worst with clone/heal, whose source-offset math also depends on the layer staying put).
+    // Editor#setTool('select') flips it back to selectable/evented like everything else later.
+    const img = new this.fabric.Image(this.cv, { left: 0, top: 0, originX: 'left', originY: 'top', selectable: false, evented: false });
     img.set({
       id: 'o' + Math.random().toString(36).slice(2, 7),
       role: 'paint',

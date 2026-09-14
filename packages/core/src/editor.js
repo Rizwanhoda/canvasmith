@@ -21,11 +21,11 @@ import { getCropHandle, dragCropRect, applyCrop } from './crop.js';
 import { alignDelta, snapDelta } from './layout.js';
 import { EXTRA, serialize, restore, exportImage, addImageLayer, artboardForImage, loadImageEl } from './io.js';
 import { selectionClipObject, renderSelectedPixels } from './pixels.js';
-import { recolorPixels, fxToFilterSpecs, FX_DEFAULTS, normalizeGradientStops, splitGradientStopColor } from './color.js';
+import { recolorPixels, fxToFilterSpecs, FX_DEFAULTS, normalizeGradientStops, splitGradientStopColor, relLum, hexRgb } from './color.js';
 import { AIRegistry } from './ai/registry.js';
 import { CvEngine, prepImageData } from './cv/client.js';
 import { makeMaskFilterClass, createMaskCanvas, maskStamp, maskLine, serializeMask, deserializeMask, invertMaskCanvas } from './mask.js';
-import { stickerSpec, STICKER_PALETTE } from './stickers.js';
+import { stickerSpec, STICKER_PALETTE, STICKER_DEFAULT_LABEL } from './stickers.js';
 import { makeCTA, makeBadge, makePrice, makeBrandLockup } from './adtext.js';
 import { buildPromoLayout, buildLayerFromSpec } from './templates.js';
 
@@ -42,10 +42,54 @@ const CLICK_LASSOS = ['lasso-poly', 'lasso-mag'];
    can tell region types apart at a glance before committing them. */
 export const REGION_ROLE = { product: 'product', logo: 'logo', text: 'headline', sticker: 'decorative', decorative: 'decorative' };
 export const REGION_COLOR = { product: '#d4ff45', logo: '#7cc4ff', text: '#ffd166', sticker: '#ff8fab', decorative: '#b794f6' };
+export const REGION_NAME = { product: 'Product', logo: 'Logo', text: 'Text', sticker: 'Sticker', decorative: 'Decoration' };
 const SEL_EPS = 0.0022;   // contour fidelity passed to the cv wand — smaller hugs the edge harder
 
+/* Local connected-component blob detection over `src` (a loaded <img> OR a <canvas>/other
+   CanvasImageSource — detectObjects() passes engine.captureFlat()'s already-rendered <canvas>
+   directly, no need to round-trip it through a data URL) — no OpenCV worker, no backend, just a
+   background-colour-distance threshold + dilation + flood-fill on the main thread. Guarantees
+   detectObjects() always returns SOMETHING even when the cv worker hasn't loaded/failed/found no
+   contours (a genuinely blank OpenCV response otherwise leaves auto-detect/convert-to-layers with
+   nothing to show). Returns scene-px boxes ({x,y,w,h}), sorted largest-first, capped at 40. */
+async function detectBlobsLocal(src, region) {
+  try {
+    const iw = src.naturalWidth || src.width, ih = src.naturalHeight || src.height;
+    const maxd = 340, scale = Math.min(1, maxd / Math.max(iw, ih));
+    const ew = Math.max(1, Math.round(iw * scale)), eh = Math.max(1, Math.round(ih * scale));
+    const cv = document.createElement('canvas'); cv.width = ew; cv.height = eh;
+    cv.getContext('2d').drawImage(src, 0, 0, ew, eh);
+    const d = cv.getContext('2d').getImageData(0, 0, ew, eh).data;
+    const corners = [[0, 0], [ew - 1, 0], [0, eh - 1], [ew - 1, eh - 1]].map(([x, y]) => { const i = (y * ew + x) * 4; return [d[i], d[i + 1], d[i + 2]]; });
+    const bg = [0, 1, 2].map(k => Math.round(corners.reduce((s, c) => s + c[k], 0) / 4));
+    const raw = new Uint8Array(ew * eh);
+    for (let i = 0; i < ew * eh; i++) { const dist = Math.abs(d[i * 4] - bg[0]) + Math.abs(d[i * 4 + 1] - bg[1]) + Math.abs(d[i * 4 + 2] - bg[2]); raw[i] = (d[i * 4 + 3] > 40 && dist > 45) ? 1 : 0; }
+    const r = Math.max(2, Math.round(maxd * 0.012)), tmp = new Uint8Array(ew * eh), fg = new Uint8Array(ew * eh);
+    for (let y = 0; y < eh; y++) for (let x = 0; x < ew; x++) { let v = 0; for (let k = -r; k <= r; k++) { const xx = x + k; if (xx >= 0 && xx < ew && raw[y * ew + xx]) { v = 1; break; } } tmp[y * ew + x] = v; }
+    for (let y = 0; y < eh; y++) for (let x = 0; x < ew; x++) { let v = 0; for (let k = -r; k <= r; k++) { const yy = y + k; if (yy >= 0 && yy < eh && tmp[yy * ew + x]) { v = 1; break; } } fg[y * ew + x] = v; }
+    const seen = new Uint8Array(ew * eh), stack = [], boxes = [], minArea = ew * eh * 0.0012;
+    for (let s0 = 0; s0 < ew * eh; s0++) {
+      if (!fg[s0] || seen[s0]) continue;
+      let minx = s0 % ew, maxx = minx, miny = (s0 / ew) | 0, maxy = miny, cnt = 0;
+      stack.push(s0); seen[s0] = 1;
+      while (stack.length) {
+        const p = stack.pop(), px = p % ew, py = (p / ew) | 0; cnt++;
+        if (px < minx) minx = px; if (px > maxx) maxx = px; if (py < miny) miny = py; if (py > maxy) maxy = py;
+        if (px > 0 && fg[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack.push(p - 1); }
+        if (px < ew - 1 && fg[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack.push(p + 1); }
+        if (py > 0 && fg[p - ew] && !seen[p - ew]) { seen[p - ew] = 1; stack.push(p - ew); }
+        if (py < eh - 1 && fg[p + ew] && !seen[p + ew]) { seen[p + ew] = 1; stack.push(p + ew); }
+      }
+      const bw = maxx - minx + 1, bh = maxy - miny + 1;
+      if (cnt >= minArea && bw > 6 && bh > 6) boxes.push({ minx, miny, bw, bh, cnt });
+    }
+    const kx = region.width / ew, ky = region.height / eh;
+    return boxes.sort((a, b) => b.cnt - a.cnt).slice(0, 40).map(b => ({ x: region.left + b.minx * kx, y: region.top + b.miny * ky, w: b.bw * kx, h: b.bh * ky }));
+  } catch (e) { return []; }
+}
+
 export class Editor {
-  constructor({ fabric, canvasEl, width = 1080, height = 1080, background = '#ffffff', openCvUrl } = {}) {
+  constructor({ fabric, canvasEl, width = 1080, height = 1080, background = '#ffffff', voidColor = '#0a0a0c', openCvUrl } = {}) {
     if (!fabric) throw new Error('Pass fabric (v5) into the Editor — it is a peer dependency.');
     this.fabric = fabric;
     // MaskFilter (see mask.js) only implements Fabric's Canvas2D filter path (applyTo2d), not a
@@ -56,6 +100,15 @@ export class Editor {
     // correctness-first path — images here are already capped to 1600px on import, so the perf
     // cost of Canvas2D over WebGL is small in practice.
     fabric.enableGLFiltering = false;
+    // W/H are the ARTBOARD's logical size — the "page" a design lives on and what exports crop
+    // to. They are deliberately NOT the same thing as fc's own DOM width/height: the fabric
+    // <canvas> element is sized to whatever the host's stage/container measures (it fills the
+    // available viewport, like Photoshop/Figma's canvas), while the artboard is just a W×H region
+    // drawn inside it via viewportTransform pan/zoom — same split as the reference editor's
+    // fitView. A host that never bothers to fit a viewport still gets a sane 1:1 canvas the size
+    // of the artboard (set below); one that DOES manage a stage should call fc.setDimensions() to
+    // its own container size + fit the viewport on mount and on every 'resize' event this class
+    // emits (resizeCanvas/applyCrop/openImage change W/H without ever touching fc's DOM size).
     this.W = width; this.H = height;
     this._listeners = {};
     this.fc = new fabric.Canvas(canvasEl, {
@@ -71,7 +124,66 @@ export class Editor {
       // classic Illustrator/Photoshop convention puts skew on Alt/Option instead, freeing Shift
       // for the proportional-resize behaviour _bindProportionalSideScale implements below.
       altActionKey: 'altKey',
+      // Draw selection handles ABOVE the off-canvas vignette below, so a handle sitting past the
+      // artboard edge (dragging/resizing a layer that overflows) stays crisp and grabbable
+      // instead of getting dimmed along with the content underneath it.
+      controlsAboveOverlay: true,
     });
+    this._voidColor = voidColor;   // see setVoidColor() / the off-canvas mask below
+    // fabric.Canvas's OWN _renderBackground paints fc.backgroundColor across (0,0)-(fc.width,
+    // fc.height) — fc's own DOM size, i.e. the host's stage — not the artboard, so it paints the
+    // wrong region entirely once those two diverge (see the W/H comment above: a small artboard
+    // in a big stage-sized canvas would otherwise get a giant mis-scaled white patch instead of
+    // its own true page). Neutered here and replaced by the 'before:render' hook below, which
+    // paints the SAME fc.backgroundColor (still the normal, live, real property — setBackground-
+    // Color()/direct assignment/gradients/patterns all keep working exactly as before, including
+    // 'transparent' for backgroundGapFraction's AI-extend-bg gap detection) but clipped to the
+    // TRUE W×H artboard region instead.
+    this.fc._renderBackground = () => {};
+    this.fc.on('before:render', (opt) => {
+      const bg = this.fc.backgroundColor;
+      if (!bg) return;
+      // Use the ctx fabric actually fired with, NOT fc.getContext() — that always returns the
+      // main ON-SCREEN context, but exportPNG/exportJPEG (toCanvasElement) temporarily calls
+      // renderCanvas against a throwaway export canvas's context instead; getContext() would
+      // paint this fill onto the wrong canvas and leave the export transparent/blank where the
+      // page should be filled.
+      const ctx = (opt && opt.ctx) || this.fc.getContext();
+      const v = this.fc.viewportTransform;
+      ctx.save();
+      ctx.transform(v[0], v[1], v[2], v[3], v[4], v[5]);
+      ctx.fillStyle = bg.toLive ? bg.toLive(ctx, this.fc) : bg;
+      ctx.fillRect(0, 0, this.W, this.H);
+      ctx.restore();
+    });
+    // Photoshop-style off-canvas mask: a layer dragged/sized PAST the artboard edge keeps its
+    // full pixels (this never touches data, purely a render-time cover) but the overflow is
+    // hidden under an OPAQUE fill matching the stage's own void colour — same as Photoshop's
+    // pasteboard, which fully covers spill-over rather than tinting it translucent (a
+    // semi-transparent wash over saturated layer content reads muddy, not clean). Implemented by
+    // taking over fc's OVERLAY slot directly — renderCanvas calls this._renderOverlay(ctx) at
+    // exactly the "after objects, before controls" moment (see controlsAboveOverlay: true above),
+    // so it covers content but never the selection handles drawn afterward. Gated on
+    // this.fc.interactive, which fabric itself flips to false during toCanvasElement's temporary
+    // render (exportPNG/exportJPEG) — so the exported image is never affected, only the live
+    // on-screen view is.
+    this.fc._renderOverlay = (ctx) => {
+      if (!this.fc.interactive || !this._voidColor) return;
+      const v = this.fc.viewportTransform;
+      ctx.save();
+      // Everything outside the artboard, in STAGE (untransformed) space — cheaper and simpler
+      // than transforming an inverted scene-space path, and correct regardless of zoom/pan since
+      // it's defined directly in canvas pixels.
+      ctx.beginPath();
+      ctx.rect(0, 0, this.fc.width, this.fc.height);
+      const tl = fabric.util.transformPoint({ x: 0, y: 0 }, v);
+      const br = fabric.util.transformPoint({ x: this.W, y: this.H }, v);
+      ctx.rect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+      ctx.clip('evenodd');
+      ctx.fillStyle = this._voidColor;
+      ctx.fillRect(0, 0, this.fc.width, this.fc.height);
+      ctx.restore();
+    };
     // Themed selection handles: circular accent-colored corners instead of Fabric's stock plain
     // white squares + light-blue border — applied per-object on 'object:added' rather than
     // mutating the shared fabric.Object.prototype globally, so multiple Editor instances on one
@@ -112,6 +224,13 @@ export class Editor {
     this._lastWandSeed = null;      // last object-select click, scene px — feeds selectSimilar()
     this._hoverSeq = 0;             // monotonic token so a stale async hover preview can't land late
     this._wandSeq = 0;              // monotonic token so an out-of-order wandPick RPC can't land late
+    this._objBoxes = [];            // detected object boxes (scene px) for objectselect/hoverselect
+    this._objRegion = null;         // {left,top,width,height} the scene rect _objSrc represents
+    this._objSrc = null;            // <canvas>/<img> detection + click grabCut refine run against
+    this._objCycle = null;          // {x,y,i} — repeated clicks near the same spot cycle nested candidates
+    this._objSeq = 0;               // monotonic token guarding detectObjectBoxes against overlap
+    this.objCount = 0;              // # of detected boxes, for a host UI's "N objects" readout
+    this.multiCount = 0;            // # of polygons accumulated in an objectselect multipoly (before Merge)
     this._edgeMapSeq = 0;           // monotonic token so an in-flight buildMagneticEdgeMap can't land after a resize/crop
     this._destroyed = false;        // set by destroy() — async continuations check this before touching this.fc
     this._maskEdit = null;           // {layerId} while a mask is being painted — see enterMaskEdit()
@@ -157,6 +276,15 @@ export class Editor {
     else this.crop = null;
     if (t === 'lasso-mag' && !this._edgeMap) this.buildMagneticEdgeMap();
     if ((t === 'objectselect' || t === 'hoverselect') && !this._hoverCache) this._hoverCache = new HoverCache(400);
+    // Entering Object select / Hover select (from a different tool) (re)runs detection so the click
+    // handler has fresh boxes to test against — matches the reference editor running its own
+    // detectObjectsLocal() on the same transition. Re-entering the SAME tool (e.g. a host re-calling
+    // setTool('objectselect') on every render) must not re-detect on every call.
+    if ((t === 'objectselect' || t === 'hoverselect') && prev !== t) this.detectObjectBoxes(true);
+    // Leaving objectselect/hoverselect drops the last hover point so a stale in-flight hover RPC
+    // (an async cv.wand call started before the switch) can't land after the fact and emit a
+    // 'hover' event a host UI would otherwise keep drawing forever with no tool active to clear it.
+    if ((prev === 'objectselect' || prev === 'hoverselect') && t !== prev) { this._hoverPt = null; this._objCycle = null; }
     if (drawing) this.fc.discardActiveObject();
     this.fc.renderAll();
     this._emit('tool', t);
@@ -230,7 +358,7 @@ export class Editor {
       // only way to nudge a selection's edge would be to redraw the whole thing from scratch.
       if (t !== 'lasso' && this.selection && (this.selection.kind === 'rect' || this.selection.kind === 'ellipse')) {
         const handle = getSelectionHandle(this.selection, pt, this.fc.getZoom());
-        if (handle) { this._drag = { kind: 'resize-sel', handle, last: pt }; return; }
+        if (handle) { this._drag = { kind: 'resize-sel', handle, last: pt, down: pt }; return; }
       }
       this.selection = startSelection(t, pt);
       this._drag = { kind: 'sel' };
@@ -268,11 +396,23 @@ export class Editor {
       this._emit('aiinsert', { pt, region });
       return;
     }
-    if (t === 'objectselect' || t === 'hoverselect' || t === 'magicwand') {
+    if (t === 'objectselect' || t === 'hoverselect') {
       const add = e.shiftKey || this.toolOpts.addMode;
-      // magicwand has no hover-preview cache (only objectselect/hoverselect populate one in
-      // setTool) — this.wandPick's own CV hybrid flood+GrabCut is the click-to-grab behavior
-      // either way, cache or not, so magicwand naturally falls through to the same call.
+      // Set unconditionally, even on a cache-hit that skips selectObjectAt (the click's own seed
+      // setter) — selectSimilar() reads this, so a click landing on an already-hovered/cached mask
+      // must still update it, or Similar would search from a stale earlier click point.
+      this._lastWandSeed = pt;
+      // A second click landing near the same spot as the last one cycles through nested candidate
+      // boxes (smallest already won the first click; this lets a click reach the bigger object
+      // underneath it) instead of just re-picking the same innermost object every time.
+      const cyc = !!(this._objCycle && Math.abs(this._objCycle.x - pt.x) < 10 && Math.abs(this._objCycle.y - pt.y) < 10);
+      const cached = !cyc && this._hoverCache && this._hoverCache.get(this._hoverCellKey(pt));
+      if (cached) this._commitObjectPoly(cached, { add, subtract: e.altKey });
+      else this.selectObjectAt(pt, { add, subtract: e.altKey, cycle: true });
+      return;
+    }
+    if (t === 'magicwand') {
+      const add = e.shiftKey || this.toolOpts.addMode;
       const cached = this._hoverCache && this._hoverCache.get(this._hoverCellKey(pt));
       if (cached) this._commitPoly(cached, { add, subtract: e.altKey });
       else this.wandPick(pt, { add, subtract: e.altKey });
@@ -407,14 +547,29 @@ export class Editor {
     const d = this._drag; this._drag = null;
     if (!d) return;
     if (d.kind === 'paint') { this.engine.up(); this.engine.setClip(null); this.commit('stroke'); }
-    if (d.kind === 'sel' || d.kind === 'resize-sel') { this.selection = finalizeSelection(this.selection); this._emit('selection', this.selection); }
+    if (d.kind === 'sel') { this.selection = finalizeSelection(this.selection); this._emit('selection', this.selection); }
+    if (d.kind === 'resize-sel') {
+      // A plain click (no real drag) on the marquee's own interior/handles is a no-op resize —
+      // Ditto has no grab-to-move for marquees at all, so the same click there just restarts a
+      // fresh 0-size selection that finalizeSelection then discards. Mirror that outcome here: a
+      // click that moved the handle by less than a couple px clears the selection instead of
+      // silently leaving it unchanged, so clicking an existing marquee again deselects it like it
+      // does everywhere else in the app.
+      const dx = d.last.x - d.down.x, dy = d.last.y - d.down.y;
+      if (Math.hypot(dx, dy) < 2) this.selection = null;
+      else this.selection = finalizeSelection(this.selection);
+      this._emit('selection', this.selection);
+    }
     if (d.kind === 'gradient') { this.engine.setClip(null); this.commit('gradient'); }
     if (d.kind === 'gradient-obj') { this.commit('gradient-fill'); }
     if (d.kind === 'shape') { this.commit('shape'); this.setTool('select'); this.fc.setActiveObject(d.obj); }
     if (d.kind === 'pan' && (this.tool === 'hand' || this._spaceDown)) this.fc.setCursor('grab');
   }
 
-  clearSelection() { this.selection = null; this._polyBuild = null; this._emit('selection', null); this.fc.renderAll(); }
+  clearSelection() {
+    this.selection = null; this._polyBuild = null; this.multiCount = 0; this._objCycle = null;
+    this._emit('selection', null); this._emit('multicount', 0); this.fc.renderAll();
+  }
   /* Whole-artboard pixel selection (⌘A) — the same full-canvas rect invertSelection() falls back
      to when nothing is selected yet, but as its own explicit entry point rather than a side effect
      of inverting. */
@@ -605,8 +760,11 @@ export class Editor {
       const res = await this.cv.subtract(Math.round(this.W * sc), Math.round(this.H * sc), base.map(S), [S(poly)]);
       if (this._destroyed) return { status: 'error', reason: 'destroyed' };
       if (res == null) return { status: 'error', reason: 'cv_unavailable' };
-      this.selection = polysToSelection(res.map(pl => pl.map(p => ({ x: p.x / sc, y: p.y / sc }))));
+      const out = res.map(pl => pl.map(p => ({ x: p.x / sc, y: p.y / sc })));
+      this.selection = polysToSelection(out);
+      this.multiCount = out.length;
       this._emit('selection', this.selection);
+      this._emit('multicount', this.multiCount);
       this.fc.renderAll();
       return { status: 'ok' };
     } catch (e) { return { status: 'error', reason: 'cv_failed', message: String(e && e.message || e) }; }
@@ -626,8 +784,11 @@ export class Editor {
         polys.map(pl => pl.map(p => ({ x: p.x * sc, y: p.y * sc }))), Math.max(1, Math.abs(delta) * sc) * Math.sign(delta));
       if (this._destroyed) return { status: 'error', reason: 'destroyed' };
       if (res == null) return { status: 'error', reason: 'cv_unavailable' };
-      this.selection = polysToSelection(res.map(pl => pl.map(p => ({ x: p.x / sc, y: p.y / sc }))));
+      const out = res.map(pl => pl.map(p => ({ x: p.x / sc, y: p.y / sc })));
+      this.selection = polysToSelection(out);
+      this.multiCount = out.length;
       this._emit('selection', this.selection);
+      this._emit('multicount', this.multiCount);
       this.fc.renderAll();
       return { status: 'ok' };
     } catch (e) { return { status: 'error', reason: 'cv_failed', message: String(e && e.message || e) }; }
@@ -648,8 +809,11 @@ export class Editor {
       if (this._destroyed) return { status: 'error', reason: 'destroyed' };
       if (polys == null) return { status: 'error', reason: 'cv_unavailable' };
       if (!polys.length) return { status: 'error', reason: 'no_match' };
-      this.selection = polysToSelection(polys.map(pl => pl.map(p => ({ x: p.x / kx, y: p.y / ky }))));
+      const out = polys.map(pl => pl.map(p => ({ x: p.x / kx, y: p.y / ky })));
+      this.selection = polysToSelection(out);
+      this.multiCount = out.length;
       this._emit('selection', this.selection);
+      this._emit('multicount', this.multiCount);
       this.fc.renderAll();
       return { status: 'ok' };
     } catch (e) { return { status: 'error', reason: 'cv_failed', message: String(e && e.message || e) }; }
@@ -669,10 +833,16 @@ export class Editor {
       const kx = imgd.width / this.W, ky = imgd.height / this.H;
       const r = await this.cv.detect({ data: imgd.data, width: imgd.width, height: imgd.height }, { text });
       if (this._destroyed) return { status: 'error', reason: 'destroyed' };
-      if (r == null) return { status: 'error', reason: 'cv_unavailable' };
       const toScene = (b) => ({ x: b.x / kx, y: b.y / ky, w: b.w / kx, h: b.h / ky });
-      const boxes = (r.boxes || []).map(toScene);
-      const textBoxes = r.textBoxes ? r.textBoxes.map(toScene) : null;
+      let boxes = r ? (r.boxes || []).map(toScene) : [];
+      const textBoxes = r && r.textBoxes ? r.textBoxes.map(toScene) : null;
+      // cv unavailable, or a genuine "found nothing" response — either way, fall back to a cheap
+      // local blob detector (background-colour-distance + connected components) so callers always
+      // get SOMETHING to show/adjust rather than a bare error, same as the reference editor.
+      if (!boxes.length && !(textBoxes && textBoxes.length)) {
+        boxes = await detectBlobsLocal(flat, { left: 0, top: 0, width: this.W, height: this.H });
+        if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+      }
       if (!boxes.length && !(textBoxes && textBoxes.length)) return { status: 'error', reason: 'no_match' };
       return { status: 'ok', result: { boxes, textBoxes } };
     } catch (e) { return { status: 'error', reason: 'cv_failed', message: String(e && e.message || e) }; }
@@ -687,6 +857,143 @@ export class Editor {
     this.selection = finalizeSelection(sel);
     this._emit('selection', this.selection);
     this.fc.renderAll();
+  }
+
+  /* ── objectselect/hoverselect: detect object boxes to click against ──────────────────────
+     Populates this._objBoxes with the instant local heuristic immediately (so the tool is usable
+     right away), then upgrades in place with real OpenCV detection once the worker resolves —
+     same two-phase pattern as the reference editor's detectObjectsLocal(). A click (_down) tests
+     the clicked point against these boxes (smallest containing box wins) before falling back to a
+     plain radius-seeded grabCut; this is what makes objectselect land on the actual object under
+     the cursor instead of flood-filling from the exact clicked pixel. `quiet` skips the 'objcount'
+     ping-style event for the instant phase (still emitted once real boxes are known) — used when
+     switching tools, where a host doesn't need two rapid readout updates. */
+  async detectObjectBoxes(quiet) {
+    const seq = ++this._objSeq;
+    this.engine.captureFlat();
+    const flat = this.engine._flat;
+    if (!flat) return;
+    this._objSrc = flat;
+    this._objRegion = { left: 0, top: 0, width: this.W, height: this.H };
+    if (this._hoverCache) this._hoverCache.clear();
+    this._objCycle = null;
+    this._objBoxes = await detectBlobsLocal(flat, this._objRegion);
+    if (this._destroyed || seq !== this._objSeq) return;
+    this.objCount = this._objBoxes.length;
+    if (!quiet) this._emit('objcount', this.objCount);
+    try {
+      const imgd = prepImageData(flat, 520);
+      const kx = imgd.width / this.W, ky = imgd.height / this.H;
+      const r = await this.cv.detect({ data: imgd.data, width: imgd.width, height: imgd.height }, {});
+      if (this._destroyed || seq !== this._objSeq) return;
+      if ((this.tool !== 'objectselect' && this.tool !== 'hoverselect') || !r || !r.boxes || !r.boxes.length) return;
+      this._objBoxes = r.boxes.map(b => ({ x: b.x / kx, y: b.y / ky, w: b.w / kx, h: b.h / ky }));
+      this.objCount = this._objBoxes.length;
+      if (this._hoverCache) this._hoverCache.clear();
+      this._emit('objcount', this.objCount);
+    } catch (e) { /* keep the local heuristic */ }
+  }
+
+  /* Smallest detected box containing pt — a click should land on the most specific/nested object,
+     not the first (usually largest, e.g. a background) box that happens to contain the point. */
+  _objBoxAt(pt) {
+    let best = null;
+    this._objBoxes.forEach(b => {
+      if (pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h && (!best || b.w * b.h < best.w * best.h)) best = b;
+    });
+    return best;
+  }
+
+  /* Click-to-select for objectselect/hoverselect: resolve the box under the click (cycling through
+     nested candidates on a repeated click near the same spot, smallest-first), then grabCut-refine
+     within that box for a precise polygon instead of just using its rectangle. Falls back to a
+     generic radius-seeded grabCut when no box contains the click (e.g. detection found nothing).
+     Mirrors the reference editor's selectObjectAt(); this is what actually fixes "clicking selects
+     the wrong region" — wandPick's plain colour-flood from the exact pixel had no concept of
+     detected object boxes at all. */
+  async selectObjectAt(pt, { add = false, subtract = false, cycle = false } = {}) {
+    this._lastWandSeed = pt;
+    const cands = this._objBoxes
+      .filter(b => pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h)
+      .sort((a, b) => a.w * a.h - b.w * b.h);
+    let cycleI = 0;
+    if (cycle && this._objCycle && Math.abs(this._objCycle.x - pt.x) < 10 && Math.abs(this._objCycle.y - pt.y) < 10) {
+      cycleI = this._objCycle.i + 1;
+    }
+    this._objCycle = { x: pt.x, y: pt.y, i: cycleI };
+    const box = cands.length ? cands[cycleI % cands.length] : null;
+    const seq = ++this._wandSeq;
+    if (this._objSrc && this._objRegion && typeof Worker !== 'undefined') {
+      try {
+        const region = this._objRegion;
+        let work = (box && box.w * box.h < region.width * region.height * 0.45) ? box : null;
+        if (!work) { const d = Math.min(region.width, region.height) * 0.45; work = { x: pt.x - d / 2, y: pt.y - d / 2, w: d, h: d }; }
+        const imgd = prepImageData(this._objSrc, 768);
+        const kx = imgd.width / region.width, ky = imgd.height / region.height;
+        const seed = { cx: Math.round((pt.x - region.left) * kx), cy: Math.round((pt.y - region.top) * ky) };
+        const wk = { x: Math.max(0, Math.round((work.x - region.left) * kx)), y: Math.max(0, Math.round((work.y - region.top) * ky)), w: Math.round(work.w * kx), h: Math.round(work.h * ky) };
+        // Colour-flood seeded from the clicked pixel first (fast, exact for a flat-colour object);
+        // only fall to the slower box-scoped grabCut once that fails. Skipped when cycling through
+        // nested candidates — the flood would just re-find the same innermost object every time.
+        let pts = null;
+        if (!cycleI) pts = await this.cv.wand({ data: imgd.data, width: imgd.width, height: imgd.height }, seed, this.toolOpts.tolerance, SEL_EPS);
+        if (!pts || pts.length < 3) {
+          const imgd2 = prepImageData(this._objSrc, 768);
+          pts = await this.cv.grabcut({ data: imgd2.data, width: imgd2.width, height: imgd2.height }, seed, wk);
+        }
+        if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+        if (seq === this._wandSeq && pts && pts.length >= 3) {
+          const sx = region.width / imgd.width, sy = region.height / imgd.height;
+          const poly = pts.map(p => ({ x: region.left + p.x * sx, y: region.top + p.y * sy }));
+          return this._commitObjectPoly(poly, { add, subtract });
+        }
+      } catch (e) { /* fall through to the plain box rect below */ }
+    }
+    if (box && !subtract) { this.selection = { kind: 'rect', x: box.x, y: box.y, w: box.w, h: box.h }; this.multiCount = 1; this._emit('selection', this.selection); this._emit('multicount', 1); this.fc.renderAll(); return { status: 'ok' }; }
+    if (box && subtract) return this._commitObjectPoly([{ x: box.x, y: box.y }, { x: box.x + box.w, y: box.y }, { x: box.x + box.w, y: box.y + box.h }, { x: box.x, y: box.y + box.h }], { add, subtract });
+    return { status: 'error', reason: 'no_match' };
+  }
+
+  /* Shift-click / Add-mode accumulates polygons into a multipoly WITHOUT unioning them (unlike
+     wandPick's addToSelection) — objectselect deliberately keeps each picked object separate so
+     mergeObjectSelection() has something to combine; auto-unioning here would make Merge a no-op.
+     Alt-click still does a real boolean subtract via the cv worker, same as everywhere else. */
+  async _commitObjectPoly(poly, { add, subtract } = {}) {
+    if (subtract) return this.subtractFromSelection(poly);
+    if (add) {
+      const cur = selectionPolys(this.selection);
+      const polys = (cur || []).concat([poly]);
+      this.selection = polysToSelection(polys);
+      this.multiCount = polys.length;
+    } else {
+      this.selection = { kind: 'poly', pts: poly };
+      this.multiCount = 1;
+    }
+    this._emit('selection', this.selection);
+    this._emit('multicount', this.multiCount);
+    this.fc.renderAll();
+    return { status: 'ok' };
+  }
+
+  /* Merge every polygon accumulated by objectselect's Shift-click/Add mode into clean combined
+     outline(s) via the cv worker's boolean union — the deliberate second step Shift-click alone
+     doesn't take (see _commitObjectPoly). cv-only, like every other boolean selection op. */
+  async mergeObjectSelection() {
+    const polys = selectionPolys(this.selection);
+    if (!polys || !polys.length) return { status: 'error', reason: 'no_selection' };
+    try {
+      const sc = Math.min(1, 1600 / Math.max(this.W, this.H));
+      const merged = await this.cv.union(Math.round(this.W * sc), Math.round(this.H * sc), polys.map(pl => pl.map(p => ({ x: p.x * sc, y: p.y * sc }))));
+      if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+      if (!merged || !merged.length) return { status: 'error', reason: 'no_match' };
+      const out = merged.map(pl => pl.map(p => ({ x: p.x / sc, y: p.y / sc })));
+      this.selection = polysToSelection(out);
+      this.multiCount = out.length;
+      this._emit('selection', this.selection);
+      this._emit('multicount', this.multiCount);
+      this.fc.renderAll();
+      return { status: 'ok' };
+    } catch (e) { return { status: 'error', reason: 'cv_failed', message: String(e && e.message || e) }; }
   }
 
   /* ── hover-preview object select: debounced, cancellable, grid-cell cached ───────────────
@@ -812,7 +1119,7 @@ export class Editor {
 
   commit(label) {
     this._recomputeAdjustmentLayers();
-    if (this.history.push(serialize(this.fc))) {
+    if (this.history.push(serialize(this.fc, this.W, this.H))) {
       this._emit('history', this.history.depth());
       this._emit('change', { label });
     }
@@ -991,6 +1298,14 @@ export class Editor {
     a.setCoords();
     this.fc.renderAll();
     this.commit('align');
+  }
+
+  /* The off-canvas mask's fill colour (see the constructor) — a host should call this whenever
+     its own stage background changes (e.g. a light/dark theme toggle) so the mask keeps matching
+     the surrounding chrome instead of showing a mismatched patch around the artboard. */
+  setVoidColor(color) {
+    this._voidColor = color;
+    this.fc.requestRenderAll();
   }
 
   /* ── snap-while-dragging: object edges/centers snap to the artboard and to other layers, and
@@ -1281,20 +1596,47 @@ export class Editor {
     this.commit('add-adjustment');
     return img.id;
   }
+  /* Builds one base sticker primitive (circle/rect/polygon/path) from a stickers.js spec, in the
+     shape's own 0-100 local coordinate space (not yet placed on the canvas) — shared by addSticker
+     (places it directly, centered at `pt`) and its 'group' branch (nests it under a text label via
+     fabric.Group, which needs the child un-positioned/un-scaled so the group's own transform is the
+     only one that applies). `props` overrides originX/originY/left/top/scaleX/scaleY as needed. */
+  _buildStickerShape(spec, fill, props = {}) {
+    if (spec.kind === 'circle') return new this.fabric.Circle({ radius: spec.r, left: spec.cx, top: spec.cy, originX: 'center', originY: 'center', fill, ...props });
+    if (spec.kind === 'rect') return new this.fabric.Rect({ width: spec.w, height: spec.h, rx: spec.rx, ry: spec.rx, left: spec.x, top: spec.y, fill, ...props });
+    if (spec.kind === 'polygon') return new this.fabric.Polygon(spec.points.split(' ').map(p => { const [x, y] = p.split(',').map(Number); return { x, y }; }), { left: 0, top: 0, fill, ...props });
+    if (spec.kind === 'path') return new this.fabric.Path(spec.d, { left: 0, top: 0, fill: spec.stroke ? null : fill, stroke: spec.stroke ? fill : null, strokeWidth: spec.stroke ? 10 : 0, fillRule: spec.fillRule || 'nonzero', ...props });
+    return null;
+  }
+
   /* Decorative sticker: a recolorable vector shape from the built-in library (stickers.js), added
      centered at `pt` (default: artboard center) at a fixed 160px nominal size — same size/role
      convention as makeShape(), so it behaves exactly like any other vector shape layer (Fill
-     colour swatch recolors it, Transform resizes/rotates it, etc.) once placed. */
+     colour swatch recolors it, Transform resizes/rotates it, etc.) once placed. A `kind: 'group'`
+     spec (badgeText/tagBannerText/burstText/priceTagText — the ad-generator reference's baked-text
+     badge/tag/banner/burst stickers) nests its named base shape under a centered, auto-contrast
+     IText label (STICKER_DEFAULT_LABEL) in a fabric.Group instead — same placement/role/commit
+     contract, and the text is a normal editable IText child once placed (double-click to retype),
+     so renaming the sticker's own promo copy needs no dedicated UI. */
   addSticker(key, pt, size = 160) {
     const spec = stickerSpec(key); if (!spec) return null;
     const center = pt || { x: this.W / 2, y: this.H / 2 };
     const fill = STICKER_PALETTE[0];
     const common = { originX: 'center', originY: 'center', left: center.x, top: center.y, scaleX: size / 100, scaleY: size / 100 };
     let obj = null;
-    if (spec.kind === 'circle') obj = new this.fabric.Circle({ ...common, radius: spec.r, fill });
-    else if (spec.kind === 'rect') obj = new this.fabric.Rect({ ...common, width: spec.w, height: spec.h, rx: spec.rx, ry: spec.rx, fill });
-    else if (spec.kind === 'polygon') obj = new this.fabric.Polygon(spec.points.split(' ').map(p => { const [x, y] = p.split(',').map(Number); return { x, y }; }), { ...common, fill });
-    else if (spec.kind === 'path') obj = new this.fabric.Path(spec.d, { ...common, fill: spec.stroke ? null : fill, stroke: spec.stroke ? fill : null, strokeWidth: spec.stroke ? 10 : 0, fillRule: spec.fillRule || 'nonzero' });
+    if (spec.kind === 'group') {
+      const baseSpec = stickerSpec(spec.shape); if (!baseSpec) return null;
+      const shape = this._buildStickerShape(baseSpec, fill, { originX: 'center', originY: 'center', left: 50, top: 50 });
+      if (!shape) return null;
+      const ink = relLum(hexRgb(fill)) > 0.6 ? '#0c0c0e' : '#ffffff';
+      const label = new this.fabric.IText(STICKER_DEFAULT_LABEL, {
+        left: 50, top: 50, originX: 'center', originY: 'center',
+        fontFamily: 'system-ui, sans-serif', fontWeight: 800, fontSize: STICKER_DEFAULT_LABEL.length > 4 ? 14 : 19, fill: ink,
+      });
+      obj = new this.fabric.Group([shape, label], { ...common });
+    } else {
+      obj = this._buildStickerShape(spec, fill, common);
+    }
     if (!obj) return null;
     obj.set({ id: uid(), role: 'shape', name: 'Sticker' });
     this.fc.add(obj);
@@ -1651,12 +1993,14 @@ export class Editor {
 
   /* Resizes the artboard boundary itself (Photoshop's "Canvas Size", not "Image Size") — existing
      layers keep their absolute position and scale, so growing the canvas adds blank space and
-     shrinking it can clip content rather than rescaling everything to fit. */
+     shrinking it can clip content rather than rescaling everything to fit. This is a purely
+     LOGICAL resize: W/H are the artboard's own size, independent of fc's own DOM dimensions
+     (which stay whatever the host's stage measures them at — see the constructor comment). The
+     'resize' event below is the host's cue to re-fit its viewport transform around the new W/H. */
   resizeCanvas(width, height) {
     const w = Math.max(1, Math.round(width)), h = Math.max(1, Math.round(height));
     if (w === this.W && h === this.H) return;
     this.W = w; this.H = h;
-    this.fc.setDimensions({ width: w, height: h });
     this.engine.W = w; this.engine.H = h;
     // The magnetic-lasso edge map, the last wand seed, and every cached hover-preview polygon are
     // all scene-space coordinates measured against the OLD artboard size/origin — stale (and
@@ -1676,7 +2020,6 @@ export class Editor {
     if (!this.crop) return;
     const dim = applyCrop(this.fc, this.crop, this.engine);
     this.W = dim.width; this.H = dim.height;
-    this.fc.setDimensions(dim);
     this.crop = null;
     // Same reasoning as resizeCanvas(): the artboard origin just shifted (every object was
     // re-based by -x,-y) so any cached scene-space geometry from before the crop is stale.
@@ -1695,7 +2038,6 @@ export class Editor {
       const dim = await artboardForImage(src);
       if (this._destroyed) return null;
       this.W = dim.width; this.H = dim.height;
-      this.fc.setDimensions(dim);
       this.engine.W = dim.width; this.engine.H = dim.height;
       this._emit('resize', dim);
     }
@@ -1713,8 +2055,8 @@ export class Editor {
     this.fc.renderAll();
     return this.fc.toSVG({ width: this.W, height: this.H, viewBox: { x: 0, y: 0, width: this.W, height: this.H } });
   }
-  toJSON() { return serialize(this.fc); }
-  loadJSON(json) { restore(this.fc, json, { engine: this.engine, history: this.history, onDone: () => this.commit('load') }); }
+  toJSON() { return serialize(this.fc, this.W, this.H); }
+  loadJSON(json) { restore(this.fc, json, { engine: this.engine, history: this.history, onDone: (w, h) => { this._afterRestore(w, h); this.commit('load'); } }); }
 
   /* ── AI conveniences (thin sugar over the registry) ───────────────────────────────────── */
   async aiEdit(instruction) {
@@ -1994,55 +2336,331 @@ export class Editor {
      ({type, bbox:{x,y,width,height in %}, content?}) plus the flattened source image a host UI can
      show as a review step (adjust/delete/add boxes, retype a region) before calling
      commitRegions() with the (possibly edited) array. detectRegionsToLayers() below is the
-     one-shot convenience that skips review entirely. */
+     one-shot convenience that skips review entirely.
+
+     Also runs the free local CV detector (detectObjects) IN PARALLEL with the AI call — matching
+     the reference editor's own hybrid detect (startGuidedConvert): the local edge/contour + text
+     pass catches objects the AI provider sometimes misses (or every object, if there's no AI key/
+     the AI call fails) at zero cost, so its finds are merged in wherever they don't already
+     overlap something the AI found (>30% IoU = "AI already found it", dropped as a near-duplicate).
+     Never lets a local-detect failure block the AI result — same never-throws contract as the rest
+     of the AI-detect surface. */
   async detectRegions() {
     const flat = this.exportPNG();
-    const r = await this.ai.run('detectRegions', flat);
+    const [r, local] = await Promise.all([
+      this.ai.run('detectRegions', flat),
+      this.detectObjects({ text: true }).catch(() => ({ status: 'error' })),
+    ]);
     if (this._destroyed) return r;
-    if (r.status !== 'ok') return r;
-    const regions = Array.isArray(r.result) ? r.result : [];
+    if (r.status !== 'ok' && (!local || local.status !== 'ok')) return r;
+    const regions = (r.status === 'ok' && Array.isArray(r.result)) ? r.result.slice() : [];
+    if (local && local.status === 'ok') {
+      const iou = (a, b) => {
+        const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+        const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+        const inter = ix * iy;
+        return inter / Math.max(1, a.w * a.h + b.w * b.h - inter);
+      };
+      const known = regions.map(rg => {
+        const bb = rg.bbox || {};
+        return { x: (bb.x || 0) / 100 * this.W, y: (bb.y || 0) / 100 * this.H, w: (bb.width || 0) / 100 * this.W, h: (bb.height || 0) / 100 * this.H };
+      });
+      const candidates = [
+        ...(local.result.boxes || []).map(b => ({ b, type: 'product' })),
+        ...((local.result.textBoxes || [])).map(b => ({ b, type: 'text' })),
+      ];
+      for (const { b, type } of candidates) {
+        if (b.w * b.h > this.W * this.H * 0.6) continue;   // whole-canvas blobs are noise
+        if (known.some(k => iou(b, k) > 0.3)) continue;     // the AI already found this one
+        known.push(b);
+        regions.push({ type, bbox: { x: b.x / this.W * 100, y: b.y / this.H * 100, width: b.w / this.W * 100, height: b.h / this.H * 100 } });
+      }
+    }
     if (!regions.length) return { status: 'error', reason: 'no_regions', message: 'No regions detected.' };
     return { status: 'ok', result: { flat, regions } };
   }
 
+  /* Real client-only silhouette cutout for one region box: seeded GrabCut (this.cv.grabcut)
+     constrained to the box's own rect, no color-flood step (a region box has no click point, just
+     an area — unlike wandPick's hybrid flood+grabCut). Returns a scene-px polygon or null on any
+     failure/cv-unavailable, so callers fall back to a plain rectangular crop — same never-throws
+     contract as wandPick/selectSimilar/expandSelection etc. `src` is a loaded <img>/<canvas> (the
+     flattened composition commitRegions/extractRegion already load once and reuse per region).
+     `bgMode` ('auto'/'cheap'/'best', the review UI's "Clean background" picker) scales the working
+     resolution: 'cheap' trades fidelity for speed, 'best' raises the cap for a cleaner silhouette —
+     there's no paid backend tier to switch to locally, so resolution is the one real quality/cost
+     lever this client-only path has. */
+  async cutoutRegion(src, box, bgMode) {
+    if (!this.cv || typeof Worker === 'undefined') return null;
+    try {
+      const res = bgMode === 'cheap' ? 600 : bgMode === 'best' ? 1200 : 900;
+      const imgd = prepImageData(src, res);
+      const kx = imgd.width / this.W, ky = imgd.height / this.H;
+      const work = { x: Math.max(0, Math.round(box.x * kx)), y: Math.max(0, Math.round(box.y * ky)), w: Math.max(4, Math.round(box.w * kx)), h: Math.max(4, Math.round(box.h * ky)) };
+      const seed = { cx: Math.round((box.x + box.w / 2) * kx), cy: Math.round((box.y + box.h / 2) * ky) };
+      const pts = await this.cv.grabcut({ data: imgd.data, width: imgd.width, height: imgd.height }, seed, work);
+      if (this._destroyed || !pts || pts.length < 3) return null;
+      return pts.map(p => ({ x: p.x / kx, y: p.y / ky }));
+    } catch (e) { return null; }
+  }
+
+  /* Same hybrid flood+grabCut wand algorithm as wandPick(), but against an arbitrary STATIC image
+     source instead of the live fc canvas — for a host UI's "click an object to auto-cut it" over a
+     flattened snapshot (e.g. a convert-to-layers review step) where the live canvas has extra
+     non-scene objects (draft/region overlay shapes) on it that would corrupt wandPick's own
+     captureFlat()-based colour read. Returns a scene-px polygon or null, same never-throws
+     contract as cutoutRegion/wandPick. The whole artboard is the source here (not a small live-
+     canvas click), so this uses a higher resolution cap (820 vs the usual 768) for a cleaner mask,
+     and — when the colour wand finds nothing (a low-contrast subject/background) — falls back to a
+     box-seeded GrabCut centered on the click before giving up, same as the reference editor. */
+  async objectPickInImage(src, pt, tolerance) {
+    if (!this.cv || typeof Worker === 'undefined') return null;
+    try {
+      const MAXD = Math.max(768, 820);
+      const imgd = prepImageData(src, MAXD);
+      const kx = imgd.width / this.W, ky = imgd.height / this.H;
+      const seed = { cx: Math.max(1, Math.min(imgd.width - 2, Math.round(pt.x * kx))), cy: Math.max(1, Math.min(imgd.height - 2, Math.round(pt.y * ky))) };
+      const tol = tolerance != null ? tolerance : this.toolOpts.tolerance;
+      let pts = await this.cv.wand({ data: imgd.data, width: imgd.width, height: imgd.height }, seed, tol, SEL_EPS);
+      if (this._destroyed) return null;
+      if (!pts || pts.length < 3) {
+        const d = Math.min(this.W, this.H) * 0.4;
+        const work = {
+          x: Math.max(0, Math.round((pt.x - d / 2) * kx)),
+          y: Math.max(0, Math.round((pt.y - d / 2) * ky)),
+          w: Math.round(d * kx), h: Math.round(d * ky),
+        };
+        pts = await this.cv.grabcut({ data: imgd.data, width: imgd.width, height: imgd.height }, seed, work);
+        if (this._destroyed) return null;
+      }
+      if (!pts || pts.length < 3) return null;
+      return pts.map(p => ({ x: p.x / kx, y: p.y / ky }));
+    } catch (e) { return null; }
+  }
+
+  /* Builds one region's layer (text layer for `text`, image layer otherwise) and adds it to `fc`.
+     Shared by commitRegions (wipe+rebuild, every region) and extractRegion (additive, one region)
+     so the two never drift. `opts.cutout` (default true) tries cutoutRegion() first for a true
+     silhouette clipPath on non-text regions, falling back to today's plain rectangular crop when
+     the cv cutout is unavailable/fails — text regions are unaffected (no pixels to segment).
+     Returns { layer, holePoly } — holePoly is the scene-px polygon (silhouette when cutout
+     succeeded, else the plain bbox rect) the caller should punch out of the background so the
+     region isn't left rendered twice: the flattened source (`src`/`flat`) has this region's pixels
+     baked in — product/logo/etc. as an image, but a text region JUST AS MUCH as rasterized glyph
+     pixels — so the bbox rect is punched for text too, or the old flattened text is left showing
+     through/behind the new live text layer at the same spot (doubled text, no cutout available:
+     there's no silhouette to segment for text, so it's always the plain bbox). */
+  async _buildRegionLayer(fc, src, rg, opts = {}) {
+    const { W = this.W, H = this.H, cutout = true, bgMode } = opts;
+    const bbox = rg.bbox || {};
+    const x = (bbox.x || 0) / 100 * W, y = (bbox.y || 0) / 100 * H;
+    const w = (bbox.width || 0) / 100 * W, h = (bbox.height || 0) / 100 * H;
+    if (w < 1 || h < 1) return null;
+    const role = REGION_ROLE[rg.type] || rg.type || 'image';
+    if (rg.type === 'text') {
+      // rg.style (captured on the review region as `rstyle` — see makeRegionRectObj/regionToPayload
+      // in the React host) carries the detected/edited typography for this text region; apply it
+      // when present instead of always falling back to makeText's plain defaults, same mapping the
+      // reference editor's addTextRegionLayer uses.
+      const st = rg.style || {};
+      const scale = W / 1080;
+      const txt = makeText(this.fabric, { x, y }, {
+        text: rg.content || 'Text',
+        fontSize: st.fontSize ? Math.max(12, Math.round(st.fontSize * scale)) : Math.max(12, Math.round(h * 0.6)),
+        fill: st.color || undefined,
+        fontWeight: st.fontWeight ? ((st.fontWeight === 'bold' || st.fontWeight >= 700) ? 700 : 400) : undefined,
+      });
+      if (st.textAlign) txt.set('textAlign', st.textAlign);
+      txt.set({ role, regionType: rg.type, rstyle: rg.style || null, name: (rg.content || 'Text').slice(0, 24) });
+      fc.add(txt);
+      const holePoly = [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
+      return { layer: txt, holePoly };
+    }
+    const sx = src.naturalWidth / W, sy = src.naturalHeight / H;
+    const cw = Math.max(1, Math.round(w * sx)), ch = Math.max(1, Math.round(h * sy));
+    const c = document.createElement('canvas'); c.width = cw; c.height = ch;
+    c.getContext('2d').drawImage(src, Math.round(x * sx), Math.round(y * sy), cw, ch, 0, 0, cw, ch);
+    const img = new this.fabric.Image(c, { left: x, top: y, originX: 'left', originY: 'top' });
+    img.set({ id: uid(), role, regionType: rg.type, name: (rg.type || 'Layer')[0].toUpperCase() + (rg.type || 'layer').slice(1) });
+    let holePoly = [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
+    // A region drawn by hand (lasso/polygon/magnetic-lasso/object-click, see selection.js's
+    // startPolyBuild/finishPolyBuild and Editor#objectPickInImage) already IS an exact silhouette
+    // the user traced or a hybrid wand/grabCut already computed against the live image — re-running
+    // cutoutRegion() here would throw that away and re-segment from scratch, constrained only to
+    // the region's bbox, which is both wasteful and typically LOWER quality than what the user
+    // already had (a bbox-seeded grabCut has less context than the original whole-canvas trace).
+    // Use the given polygon as-is whenever the caller supplied one.
+    if (Array.isArray(rg.polygon) && rg.polygon.length >= 3) {
+      const poly = rg.polygon;
+      const clip = new this.fabric.Polygon(poly.map(p => ({ x: p.x - x, y: p.y - y })), { absolutePositioned: false });
+      img.clipPath = clip;
+      holePoly = poly;
+    } else if (cutout) {
+      const poly = await this.cutoutRegion(src, { x, y, w, h }, bgMode);
+      if (poly && poly.length >= 3 && !this._destroyed) {
+        const clip = new this.fabric.Polygon(poly.map(p => ({ x: p.x - x, y: p.y - y })), { absolutePositioned: false });
+        img.clipPath = clip;
+        holePoly = poly;
+      }
+    }
+    fc.add(img);
+    return { layer: img, holePoly };
+  }
+
+  /* Punches `holes` (scene-px polygons, from _buildRegionLayer's holePoly) out of a background
+     image element, returning a new <canvas> with those areas made transparent. Used by
+     commitRegions/extractRegion so a region promoted to its own layer isn't ALSO still visible,
+     duplicated, in the flattened background layer underneath it — ditto's reference editor gets
+     the same result server-side via true segmentation/inpainting; this is the client-only
+     equivalent for regions cut locally (cutoutRegion's silhouette, or a plain bbox rect). */
+  _punchBackground(src, W, H, holes) {
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(src, 0, 0, W, H);
+    ctx.globalCompositeOperation = 'destination-out';
+    for (const poly of holes) {
+      if (!poly || poly.length < 3) continue;
+      ctx.beginPath();
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    return c;
+  }
+
   /* Explode `regions` (same shape as detectRegions()' result.regions, in percent-of-canvas bbox
-     coordinates) into real editable layers over a background image built from `flat` — a text
-     region becomes a text layer (using `content` as the string), everything else an image layer
-     cropped from `flat` at that bbox. Replaces the current composition, same history contract as
+     coordinates, PLUS an optional `polygon` — scene-px points, from a hand-drawn lasso/magnetic-
+     lasso/object-click region a host UI's review step already traced) into real editable layers
+     over a background image built from `flat` — a text region becomes a text layer (using
+     `content` as the string), everything else an image layer cropped from `flat` at that bbox
+     (silhouette-clipped to `rg.polygon` when given, else via _buildRegionLayer's cutoutRegion pass
+     when the cv worker is available). Replaces the current composition, same history contract as
      openImageResult. Pure layer-building — no AI call of its own, so a review UI can call this
-     however many times the user wants after adjusting boxes returned by detectRegions(). */
-  async commitRegions(flat, regions) {
+     however many times the user wants after adjusting boxes returned by detectRegions(). `bgMode`
+     ('auto'/'cheap'/'best') is forwarded to _buildRegionLayer/cutoutRegion to control the local
+     cutout's working resolution — see cutoutRegion's docstring. */
+  async commitRegions(flat, regions, bgMode) {
     if (!Array.isArray(regions) || !regions.length) return { status: 'error', reason: 'no_regions', message: 'No regions to commit.' };
     const src = await loadImageEl(flat);
     if (this._destroyed) return { status: 'error', reason: 'destroyed' };
-    this.fc.getObjects().slice().forEach(o => this.fc.remove(o));
-    const bg = await addImageLayer(this.fabric, this.fc, flat, { W: this.W, H: this.H, name: 'Background', role: 'bg', fit: 'cover' });
+    // Only clear the old background and any leftover review-box overlays (role:'region', drawn by
+    // a host UI's review step on top of the live canvas) — every OTHER layer the user already had
+    // (hand-placed text, stickers, logos, previous extractions) must survive a convert, since `flat`
+    // was rendered from the whole composition including them. Wiping unconditionally here used to
+    // destroy all of it the moment commitRegions ran.
+    this.fc.getObjects().slice().forEach(o => { if (o.role === 'bg' || o.role === 'region') this.fc.remove(o); });
+    // Build every region's layer FIRST (against a throwaway holding canvas) so we know each one's
+    // hole polygon before the background image is ever added — the background is then painted with
+    // those areas already punched out, instead of laying the full original image underneath the
+    // very regions that just became their own layers (which is what showed the region doubled: once
+    // in the flattened bg, once in its new cutout layer — see the "layer duplicated over its own
+    // background" report this fixes).
+    const built = [];
+    for (const rg of regions) {
+      const b = await this._buildRegionLayer(this.fc, src, rg, { bgMode });
+      if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+      if (b) built.push(b);
+    }
+    const holes = built.map(b => b.holePoly).filter(Boolean);
+    const bgSrc = holes.length ? this._punchBackground(src, this.W, this.H, holes).toDataURL('image/png') : flat;
+    const bg = await addImageLayer(this.fabric, this.fc, bgSrc, { W: this.W, H: this.H, name: 'Background', role: 'bg', fit: 'cover' });
     if (this._destroyed) return { status: 'error', reason: 'destroyed' };
     bg.set({ selectable: false, evented: false, locked: true });
-    for (const rg of regions) {
-      const bbox = rg.bbox || {};
-      const x = (bbox.x || 0) / 100 * this.W, y = (bbox.y || 0) / 100 * this.H;
-      const w = (bbox.width || 0) / 100 * this.W, h = (bbox.height || 0) / 100 * this.H;
-      if (w < 1 || h < 1) continue;
-      const role = REGION_ROLE[rg.type] || rg.type || 'image';
-      if (rg.type === 'text') {
-        const txt = makeText(this.fabric, { x, y }, { text: rg.content || 'Text', fontSize: Math.max(12, Math.round(h * 0.6)) });
-        txt.set({ role, regionType: rg.type, name: (rg.content || 'Text').slice(0, 24) });
-        this.fc.add(txt);
-      } else {
-        const sx = src.naturalWidth / this.W, sy = src.naturalHeight / this.H;
-        const cw = Math.max(1, Math.round(w * sx)), ch = Math.max(1, Math.round(h * sy));
-        const c = document.createElement('canvas'); c.width = cw; c.height = ch;
-        c.getContext('2d').drawImage(src, Math.round(x * sx), Math.round(y * sy), cw, ch, 0, 0, cw, ch);
-        const img = new this.fabric.Image(c, { left: x, top: y, originX: 'left', originY: 'top' });
-        img.set({ id: uid(), role, regionType: rg.type, name: (rg.type || 'Layer')[0].toUpperCase() + (rg.type || 'layer').slice(1) });
-        this.fc.add(img);
-      }
-    }
+    this.fc.sendToBack(bg);
     this.fc.discardActiveObject();
     this.fc.renderAll();
     this.commit('regions-to-layers');
+    this.animateLayersIn(this.fc.getObjects().slice());
     return { status: 'ok', result: regions.length };
+  }
+
+  /* Add ONE region as a new layer on top of the current composition, without touching anything
+     else already on the canvas — the additive counterpart to commitRegions' full-replace. Used by
+     a review UI's "Extract" action (one box → one layer) so extracting doesn't wipe boxes the user
+     hasn't dealt with yet. `flat` is the same flattened-source data URL commitRegions takes.
+     Also punches the extracted region's silhouette out of the existing `bg` layer (if any) so the
+     same pixels aren't left doubled underneath the freshly extracted layer. `bgMode` — see
+     commitRegions/cutoutRegion. */
+  async extractRegion(flat, region, bgMode) {
+    if (!region) return { status: 'error', reason: 'no_region', message: 'No region to extract.' };
+    const src = await loadImageEl(flat);
+    if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+    const built = await this._buildRegionLayer(this.fc, src, region, { bgMode });
+    if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+    if (!built) return { status: 'error', reason: 'empty_region', message: 'Region is too small to extract.' };
+    const { layer, holePoly } = built;
+    if (holePoly) {
+      const bg = this.fc.getObjects().find(o => o.role === 'bg');
+      if (bg) {
+        // Flatten the bg's own drawn appearance (respecting its current fit/scale/position) into a
+        // W×H canvas first — its backing _element is the ORIGINAL unfit source image, not W×H, so
+        // punching holes directly against it would target the wrong pixels once the bg has been
+        // scaled/cropped to fit (e.g. commitRegions' 'cover' fit).
+        const bgCanvas = this._renderLayerAlone(bg);
+        const punched = this._punchBackground(bgCanvas, this.W, this.H, [holePoly]);
+        await new Promise(res => bg.setSrc(punched.toDataURL(), () => res(), { crossOrigin: 'anonymous' }));
+        if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+        bg.set({ left: 0, top: 0, originX: 'left', originY: 'top', scaleX: 1, scaleY: 1 });
+        bg.setCoords();
+      }
+    }
+    this.fc.discardActiveObject();
+    this.fc.setActiveObject(layer);
+    this.fc.renderAll();
+    this.commit('extract-region');
+    return { status: 'ok', result: { id: layer.id } };
+  }
+
+  /* Snap any in-flight layer-reveal animation to its final state — called before a new reveal
+     starts, and from destroy(), so timers/animate loops never touch a disposed canvas. */
+  _finishReveal() {
+    const r = this._reveal;
+    if (!r || r.aborted) return;
+    r.aborted = true;
+    (r.timers || []).forEach(clearTimeout);
+    r.timers = [];
+    (r.items || []).forEach(({ o, op, top }) => { o.set({ opacity: op, top, shadow: null }); o.dirty = true; if (o.setCoords) o.setCoords(); });
+    if (!this._destroyed) { this.fc.calcOffset(); this.fc.requestRenderAll(); }
+  }
+
+  /* Staggered "layer reveal" after commitRegions/extractRegion: each new layer rises + fades in
+     with a brief accent-color glow as it lands, background first then each region in turn — purely
+     visual (runs AFTER commit(), so undo/redo/history already hold the final state) and respects
+     prefers-reduced-motion. Mirrors the reference editor's animateLayersIn/finishReveal so a
+     convert-to-layers result reads as "here's what just got created" instead of popping in all at
+     once with no feedback tying each layer to the region it came from. */
+  animateLayersIn(objs) {
+    const fc = this.fc, fabric = this.fabric;
+    if (this._destroyed || !fc || !fabric || !objs || !objs.length) return;
+    this._finishReveal();
+    const reduce = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce || !fabric.util || !fabric.util.animate) { fc.requestRenderAll(); return; }
+    const ease = fabric.util.ease && fabric.util.ease.easeOutCubic;
+    const r = { aborted: false, timers: [], items: [] };
+    this._reveal = r;
+    const abort = () => r.aborted;
+    let n = 0;
+    objs.forEach((o) => {
+      const op = (o.opacity == null ? 1 : o.opacity);
+      const base = o.role === 'bg';
+      const top = o.top, drift = base ? 0 : 18;
+      r.items.push({ o, op, top });
+      o.set({ opacity: 0, top: top + drift }); o.dirty = true;
+      const delay = base ? 0 : (340 + n * 180); if (!base) n++;
+      const t = setTimeout(() => {
+        if (this._destroyed || r.aborted) return;
+        fabric.util.animate({ startValue: 0, endValue: op, duration: 820, easing: ease, abort, onChange: (v) => { o.set('opacity', v); fc.requestRenderAll(); } });
+        fabric.util.animate({ startValue: top + drift, endValue: top, duration: 940, easing: ease, abort, onChange: (v) => { o.set('top', v); fc.requestRenderAll(); }, onComplete: () => { if (o.setCoords) o.setCoords(); } });
+        if (!base) {
+          o.set('shadow', new fabric.Shadow({ color: 'rgba(212,255,69,0.85)', blur: 30, offsetX: 0, offsetY: 0 }));
+          fabric.util.animate({ startValue: 30, endValue: 0, duration: 1040, abort, onChange: (v) => { if (o.shadow) { o.shadow.blur = v; fc.requestRenderAll(); } }, onComplete: () => { o.set('shadow', null); fc.requestRenderAll(); } });
+        }
+      }, delay);
+      r.timers.push(t);
+    });
+    fc.requestRenderAll();
   }
 
   /* One-shot convenience: detect + commit immediately with no review step (what the AI panel's
@@ -2054,6 +2672,7 @@ export class Editor {
   }
 
   destroy() {
+    if (this._reveal && !this._reveal.aborted) { this._reveal.aborted = true; (this._reveal.timers || []).forEach(clearTimeout); this._reveal.timers = []; }
     this._destroyed = true;
     if (this._frameHandles) Object.keys(this._frameHandles).forEach(key => this._cancelFrameJob(key));
     if (typeof document !== 'undefined') {

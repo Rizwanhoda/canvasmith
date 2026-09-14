@@ -107,9 +107,10 @@
   .tabs { display:flex; flex-wrap:wrap; gap:2px; margin-bottom:16px; padding:3px; background:var(--bg); border-radius:9px; border:1px solid var(--line-soft) }
   .tabs button { display:flex; align-items:center; justify-content:center; gap:6px; flex:1 1 auto; min-width:calc(33% - 4px); width:auto; padding:7px 8px; border-radius:7px; font-size:12px; font-weight:600; color:var(--dim); white-space:nowrap; transition:background .12s,color .12s,box-shadow .12s }
   .tabs button:hover { color:var(--ink) } .tabs button[data-on=true] { background:var(--panel-2); color:var(--ink); box-shadow:var(--shadow-sm) }
-  .collapse-btn { position:absolute; top:50%; width:16px; height:52px; padding:0; transform:translateY(-50%);
-    border:1px solid var(--line); background:var(--panel-2); color:var(--dim); cursor:pointer; display:flex; align-items:center; justify-content:center; z-index:2; transition:left .18s cubic-bezier(.4,0,.2,1), right .18s cubic-bezier(.4,0,.2,1), color .12s, border-color .12s; box-shadow:var(--shadow-sm) }
-  .collapse-btn:hover { color:var(--ink); border-color:var(--dim-2) }
+  .collapse-btn { position:absolute; top:50%; width:20px; height:60px; padding:0; transform:translateY(-50%);
+    border:1px solid var(--line); background:var(--panel-2); color:var(--dim-2); cursor:pointer; display:flex; align-items:center; justify-content:center; z-index:2; transition:left .18s cubic-bezier(.4,0,.2,1), right .18s cubic-bezier(.4,0,.2,1), color .12s, border-color .12s, background .12s, width .12s; box-shadow:var(--shadow-sm) }
+  .collapse-btn:hover { color:var(--accent-ink); border-color:var(--accent); background:var(--accent); width:22px }
+  .collapse-btn:focus-visible { outline:none; box-shadow:var(--ring) }
   #collapse-left { border-radius:0 8px 8px 0; border-left:none }
   #collapse-right { border-radius:8px 0 0 8px; border-right:none }
   .collapse-btn[data-flip=true] svg { transform:rotate(180deg) }
@@ -153,23 +154,30 @@
   #aiinsert-popover input[type=text] { width:100%; margin-top:8px; box-sizing:border-box }
   #aiinsert-popover .act { width:100%; margin-top:8px; justify-content:center }
 
-  /* ── guided "convert to layers" region review ────────────────────────────────────────────── */
-  #review-overlay { position:absolute; inset:0; z-index:18 }
-  #review-overlay[hidden] { display:none }
-  /* Per-type border/fill color comes from REGION_COLOR (editor.js) via an inline style on each
-     box — not a CSS[data-type=] rule — so the 5 region types (product/logo/text/sticker/
-     decorative) share one color source with commitRegions' own REGION_ROLE mapping instead of
-     duplicating the palette here and risking drift. */
-  .review-box { position:absolute; border:2px dashed; border-radius:5px; cursor:move; box-sizing:border-box }
-  .review-tag { position:absolute; top:-24px; left:-2px; display:flex; align-items:center; gap:4px; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:2px 4px; box-shadow:var(--shadow-sm) }
-  .review-tag select { all:unset; font-size:10.5px; font-weight:600; color:var(--ink); cursor:pointer; padding:1px 3px }
-  .review-tag button { all:unset; box-sizing:border-box; cursor:pointer; width:16px; height:16px; display:flex; align-items:center; justify-content:center; border-radius:4px; color:var(--dim) }
-  .review-tag button:hover { background:var(--bg); color:var(--danger) }
-  .review-handle { position:absolute; width:9px; height:9px; background:var(--accent); border:1.5px solid var(--panel); border-radius:50%; right:-5px; bottom:-5px; cursor:nwse-resize }
-  #review-toolbar { position:absolute; bottom:16px; left:50%; transform:translateX(-50%); z-index:19; display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px 10px; box-shadow:var(--shadow-lg) }
-  #review-toolbar[hidden] { display:none }
-  #review-toolbar .sp { width:1px; height:20px; background:var(--line) }
-  #review-count { font-size:11.5px; color:var(--dim); font-weight:600; padding:0 4px; white-space:nowrap }
+  /* ── guided "convert to layers" region review — right-panel UI (Ditto parity) ────────────────
+     Region boxes themselves are real Fabric.js objects on the live canvas (role:'region', styled
+     via REGION_COLOR inline on the fabric object, not CSS) — only the PANEL chrome lives here. */
+  #review-panel { position:absolute; inset:0; background:var(--panel); z-index:5; display:flex; flex-direction:column }
+  #review-panel[hidden] { display:none }
+  #review-panel-head { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--line); flex:none }
+  #review-panel-body { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:8px }
+  #review-panel-foot { flex:none; padding:12px; border-top:1px solid var(--line); display:flex; gap:8px }
+  .review-eyebrow { font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--dim-2); margin-top:6px }
+  .review-grid2 { display:grid; grid-template-columns:1fr 1fr; gap:6px }
+  .review-handbtn { all:unset; box-sizing:border-box; cursor:pointer; display:flex; align-items:center; gap:6px; padding:7px 9px; border-radius:8px; border:1px solid var(--line); font-size:11.5px; font-weight:600; color:var(--ink) }
+  .review-handbtn:hover { border-color:var(--dim-2); background:var(--panel-2) }
+  .review-handbtn[data-on=true] { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) }
+  .review-type-grid { display:grid; grid-template-columns:1fr 1fr; gap:5px }
+  /* Per-type accent colour comes from REGION_COLOR (editor.js) via inline style on each button —
+     not a CSS[data-type=] rule — so the 5 region types share one colour source with
+     commitRegions'/REGION_ROLE's own mapping instead of duplicating the palette here. */
+  .review-type-btn { all:unset; box-sizing:border-box; cursor:pointer; display:flex; align-items:center; gap:5px; padding:6px 8px; border-radius:8px; font-size:11px; font-weight:600; color:var(--ink); border:1px solid var(--line); text-transform:capitalize }
+  .review-type-btn .dot { width:8px; height:8px; border-radius:50%; flex:none }
+  .review-bgmode { display:flex; gap:3px; background:var(--panel-2); border-radius:999px; padding:3px }
+  .review-bgmode button { all:unset; box-sizing:border-box; cursor:pointer; padding:4px 10px; border-radius:999px; font-size:11px; font-weight:600; color:var(--dim) }
+  .review-bgmode button[data-on=true] { background:var(--panel); color:var(--ink); box-shadow:var(--shadow-sm) }
+  #review-hover-preview { position:absolute; pointer-events:none; z-index:17 }
+  #review-hover-preview[hidden] { display:none }
 
   /* ── ⌘K command palette ─────────────────────────────────────────────────────────────────── */
   #cmdk-backdrop { position:fixed; inset:0; z-index:200; background:rgba(8,8,12,.5); display:flex; align-items:flex-start; justify-content:center; padding-top:14vh }
@@ -315,7 +323,7 @@
 </head>
 <body>
 <header>
-  <b>Canvasmith</b><span class="note">vanilla shell on the headless core — every control is a public API call</span>
+  <b>Canvasmith</b><span class="note" title="Every control on this page is a public Editor API call — no framework, no build step.">vanilla shell on the headless core</span>
   <span class="hdiv"></span>
   <button class="act" id="openfile"><span id="openfile-icon"></span>Open image…</button>
   <input type="file" id="file" accept="image/*" hidden>
@@ -450,14 +458,7 @@
       <span id="zoom-div"></span>
       <button id="zoom-fit" title="Fit to screen (0)"></button>
     </div>
-    <div id="review-overlay" hidden></div>
-    <div id="review-toolbar" hidden>
-      <span id="review-count"></span>
-      <span class="sp"></span>
-      <button class="act" id="review-add-box" style="width:auto">+ Add box</button>
-      <button class="act" id="review-cancel" style="width:auto">Cancel</button>
-      <button class="act" id="review-commit" style="width:auto"></button>
-    </div>
+    <svg id="review-hover-preview" hidden width="1" height="1"><polygon fill="rgba(212,255,69,.28)" stroke="#d4ff45" stroke-width="2"></polygon></svg>
   </div>
   <button class="collapse-btn" id="collapse-left" title="Hide side panel"></button>
   <button class="collapse-btn" id="collapse-right" title="Hide Properties panel"></button>
@@ -658,6 +659,55 @@
       <div class="note">Auto-detect everything, or draw one box yourself — adjust, add or remove boxes, then create layers.</div>
     </div>
     <div id="right-scroll-cue"></div>
+
+    <!-- "Review regions" — takes over the whole right panel while a guided convert-to-layers is in
+         progress, matching ditto's right-panel review UI 1:1 (screenshot-verified layout). -->
+    <div id="review-panel" hidden>
+      <div id="review-panel-head">
+        <span style="display:flex;align-items:center;gap:6px;font-weight:700;font-size:13px"><span id="review-head-icon" style="color:var(--accent);display:flex"></span>Review regions</span>
+        <span class="tag mono" id="review-count">0 boxes</span>
+      </div>
+      <div id="review-panel-body">
+        <button class="review-handbtn" id="review-autodetect" style="justify-content:flex-start"></button>
+        <div class="review-eyebrow">Select by hand</div>
+        <div class="review-grid2" id="review-handtools"></div>
+        <div id="review-object-opts" style="display:none;flex-direction:column;gap:8px;padding:10px;background:var(--panel-2);border-radius:10px">
+          <span class="dim" style="font-size:11px">Click an object on the canvas to capture it.<span id="review-object-multi-hint"></span></span>
+          <span class="dim" id="review-object-msg" style="font-size:11px;color:var(--accent);display:none"></span>
+          <div class="slider-row">Colour match <input type="range" id="review-object-tolerance" min="4" max="96"></div>
+          <div style="display:flex;gap:6px">
+            <button class="chip" id="review-object-add"></button>
+            <button class="act act-accent" id="review-merge-objects" style="flex:1;justify-content:center"></button>
+          </div>
+        </div>
+        <button class="act act-accent" id="review-finish-shape" style="display:none;justify-content:center"></button>
+        <div id="review-selected" style="display:none;flex-direction:column;gap:8px;margin-top:6px;padding-top:12px;border-top:1px solid var(--line)">
+          <div class="review-eyebrow" style="margin-top:0">Selected region</div>
+          <input type="text" id="review-name" placeholder="Region name" style="font-size:12px;padding:6px 9px">
+          <span class="dim" style="font-size:11px">Type</span>
+          <div class="review-type-grid" id="review-type-grid"></div>
+          <div style="display:flex;gap:6px">
+            <button class="act" id="review-extract" style="flex:1;justify-content:center"></button>
+            <button class="icon-btn" id="review-delete" title="Delete region" style="color:var(--danger)"></button>
+          </div>
+        </div>
+      </div>
+      <div style="flex:none;padding:10px 12px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span class="dim" style="font-size:11px;font-weight:600">Clean background</span>
+          <div class="review-bgmode" id="review-bgmode">
+            <button data-mode="auto">Auto</button>
+            <button data-mode="cheap">Cheap</button>
+            <button data-mode="best">Best</button>
+          </div>
+        </div>
+        <span class="dim" style="font-size:10.5px" id="review-bgmode-note"></span>
+      </div>
+      <div id="review-panel-foot">
+        <button class="act" id="review-cancel" style="flex:1;justify-content:center">Cancel</button>
+        <button class="act act-accent" id="review-commit" style="flex:1.4;justify-content:center"></button>
+      </div>
+    </div>
   </div>
 </main>
 
@@ -691,10 +741,17 @@
 </div>
 
 <script type="module">
-import { Editor, GeminiProvider, installBridge, installDropImport, selectionToPath2D, selectionPolys, makeShape, makeText, installKeybindings, TOOL_KEYS, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, stickerSpec, REGION_COLOR }
+import { Editor, GeminiProvider, installBridge, installDropImport, selectionToPath2D, selectionPolys, makeShape, makeText, installKeybindings, TOOL_KEYS, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, stickerSpec, STICKER_DEFAULT_LABEL, REGION_COLOR, REGION_NAME,
+  startSelection, updateSelection, finalizeSelection, startPolyBuild, polyBuildAdd, polyBuildPreview, finishPolyBuild,
+  snapToEdge, selectionBounds, uid }
   from '../../packages/core/src/index.js';
 
-const ed = new Editor({ fabric: window.fabric, canvasEl: document.getElementById('cv'), width: 960, height: 640 });
+/* The fabric <canvas> element is sized to fill the STAGE (like the reference editor's fitView),
+   not the artboard — 960×640 here is only the artboard's starting logical size (ed.W/ed.H).
+   fitToScreen()/the ResizeObserver below (installed right after Editor construction) own fc's
+   actual DOM dimensions from this point on. */
+const stageVoidColor = () => getComputedStyle(document.documentElement).getPropertyValue('--stage').trim();
+const ed = new Editor({ fabric: window.fabric, canvasEl: document.getElementById('cv'), width: 960, height: 640, voidColor: stageVoidColor() });
 window.ed = ed;   // poke at the API from the console
 
 /* Google Fonts stylesheet for the typography panel's non-system fonts — added as a real <link>
@@ -792,6 +849,9 @@ const ICON_PATHS = {
   pen: 'M12 3l7 7-9 9-5 1 1-5 6-6 2 2M11 6l4 4',
   search: 'circle:11,11,7|M21 21l-4.35-4.35',
   tag: 'M20.6 12.2 12.8 20a2 2 0 0 1-2.8 0l-6-6a2 2 0 0 1 0-2.8L11.8 3.4a2 2 0 0 1 1.4-.6H19a2 2 0 0 1 2 2v5.8a2 2 0 0 1-.4 1.6z M16.5 7a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1z',
+  square: 'M4 4h16v16H4z',                                                   // "Box" select-by-hand button (ditto's box icon already reused for Group/layerstab elsewhere)
+  trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13',                              // region delete
+  check: 'M4 12l5 5L20 6',                                                  // "Finish shape"
 };
 function iconSVG(name, size = 15) {
   const spec = ICON_PATHS[name]; if (!spec) return '';
@@ -813,7 +873,7 @@ ICON_PATHS.eyeOpen = EYE_OPEN; ICON_PATHS.eyeOff = EYE_OFF;
 
 /* ── theme toggle: swaps the light/dark palette via a data-mode attribute ── */
 const themeBtn = document.getElementById('theme-toggle');
-const applyMode = m => { document.documentElement.dataset.mode = m; themeBtn.innerHTML = iconSVG(m === 'dark' ? 'sun' : 'moon'); };
+const applyMode = m => { document.documentElement.dataset.mode = m; themeBtn.innerHTML = iconSVG(m === 'dark' ? 'sun' : 'moon'); ed.setVoidColor(stageVoidColor()); };
 applyMode(document.documentElement.dataset.mode || 'dark');
 themeBtn.onclick = () => applyMode(document.documentElement.dataset.mode === 'dark' ? 'light' : 'dark');
 
@@ -1288,6 +1348,14 @@ csPreset.onchange = () => {
 };
 csBtn.onclick = () => {
   csW.value = ed.W; csH.value = ed.H; csRatio = ed.W / ed.H; csPreset.value = '';
+  // position:fixed at the button's own screen rect, NOT the default position:absolute-in-header —
+  // header has overflow:hidden (to keep its own toolbar row from spilling), which was silently
+  // clipping this popover to invisible (0 height of visible content) every time it opened, even
+  // though its computed styles/layout box were otherwise completely correct.
+  const r = csBtn.getBoundingClientRect();
+  csPop.style.position = 'fixed';
+  csPop.style.top = (r.bottom + 8) + 'px';
+  csPop.style.right = (window.innerWidth - r.right) + 'px';
   csPop.hidden = !csPop.hidden;
 };
 csW.oninput = () => { csPreset.value = ''; if (csLock.checked) csH.value = Math.round(+csW.value / csRatio) || ''; };
@@ -1305,10 +1373,12 @@ png.onclick = () => { const a = document.createElement('a'); a.href = ed.exportP
 jpg.onclick = () => { const a = document.createElement('a'); a.href = ed.exportJPEG(); a.download = 'canvasmith.jpg'; a.click(); };
 
 /* ── zoom pill + dimension badge ──────────────────────────────────────────────────────────
-   Fabric's canvas element keeps its DOM size fixed at W×H; "zoom" is purely the viewport
-   transform's scale, applied around the stage's own center — same model as the reference
-   editor's floating zoom bar. Fit-to-screen picks the largest scale that keeps the whole
-   artboard inside the stage (minus a little breathing room), then re-centers the pan. */
+   Matches the reference editor's model exactly: fc's own DOM size always fills the STAGE
+   (resized by the ResizeObserver below, independent of the artboard), and "zoom" is purely the
+   viewport transform's scale/pan applied on top — the artboard is just a W×H region drawn
+   somewhere inside that stage-sized canvas. Fit-to-screen resizes fc to the current stage box,
+   THEN picks the largest scale that keeps the whole artboard inside it (minus breathing room)
+   and re-centers the pan — same two-step contract as the reference's fitView. */
 const stageEl = document.getElementById('stage');
 const zoomPctBtn = document.getElementById('zoom-pct');
 document.getElementById('zoom-out').innerHTML = iconSVG('minus', 14);
@@ -1322,6 +1392,8 @@ function setZoomAtCenter(z) {
   refreshZoomUI();
 }
 function fitToScreen() {
+  if (!stageEl.clientWidth || !stageEl.clientHeight) return false;
+  ed.fc.setDimensions({ width: stageEl.clientWidth, height: stageEl.clientHeight });
   const pad = 48;
   const availW = Math.max(50, stageEl.clientWidth - pad), availH = Math.max(50, stageEl.clientHeight - pad);
   const z = Math.min(2, Math.max(0.05, Math.min(availW / ed.W, availH / ed.H)));
@@ -1330,9 +1402,24 @@ function fitToScreen() {
   vpt[4] = (stageEl.clientWidth - ed.W * z) / 2;
   vpt[5] = (stageEl.clientHeight - ed.H * z) / 2;
   ed.fc.setViewportTransform(vpt);
+  ed.fc.calcOffset();
   ed.fc.requestRenderAll();
   refreshZoomUI();
+  return true;
 }
+// Keeps fc's DOM size in lockstep with the stage's box WITHOUT re-fitting the artboard on every
+// pixel of a window resize — only the very first successful measurement fits/centers; after that,
+// a resize just grows/shrinks the canvas element and re-anchors the offset, same as the reference
+// editor's resize observer (a live re-fit on every resize would fight a user's manual zoom/pan).
+let fitted = false;
+const tryFit = () => { if (!fitted && fitToScreen()) fitted = true; };
+new ResizeObserver(() => {
+  if (!fitted) { tryFit(); return; }
+  if (!stageEl.clientWidth) return;
+  ed.fc.setDimensions({ width: stageEl.clientWidth, height: stageEl.clientHeight });
+  ed.fc.calcOffset();
+  ed.fc.requestRenderAll();
+}).observe(stageEl);
 function refreshZoomUI() {
   zoomPctBtn.textContent = Math.round((ed.fc.getZoom() || 1) * 100) + '%';
   document.getElementById('dim-badge').textContent = ed.W + '×' + ed.H;
@@ -1343,8 +1430,7 @@ document.getElementById('zoom-fit').onclick = fitToScreen;
 zoomPctBtn.onclick = fitToScreen;
 ed.on('zoom', refreshZoomUI);
 ed.on('resize', () => { fitToScreen(); });
-window.addEventListener('resize', () => refreshZoomUI());
-requestAnimationFrame(fitToScreen);
+tryFit(); setTimeout(tryFit, 60); setTimeout(tryFit, 220);
 document.addEventListener('keydown', e => {
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -1980,7 +2066,7 @@ document.getElementById('add-circle').onclick = () => {
   const o = makeShape(ed.fabric, 'ellipse', centerPt(), ed.toolOpts);
   if (o) { ed.fc.add(o); ed.fc.setActiveObject(o); ed.commit('shape'); ed.setTool('select'); }
 };
-document.getElementById('add-image').onclick = () => file.click();
+document.getElementById('add-image').onclick = () => { file.dataset.mode = 'add'; file.click(); };
 document.getElementById('add-paint').onclick = () => ed.setTool('brush');
 document.getElementById('add-adjustment').onclick = () => { ed.addAdjustmentLayer(); };
 
@@ -2041,16 +2127,29 @@ designFillImageBtn.onclick = () => {
 /* ── stickers: category chips + a 4-col grid of recolorable vector shapes (see stickers.js) ──
    Each grid cell renders the SAME spec the core uses to build the placed layer, so the preview
    always matches what clicking it actually adds — no separate "icon" asset to keep in sync. */
-function stickerPreviewSVG(key) {
-  const spec = stickerSpec(key); if (!spec) return '';
-  let inner = '';
-  if (spec.kind === 'circle') inner = `<circle cx="50" cy="50" r="${spec.r}" fill="currentColor"/>`;
-  else if (spec.kind === 'rect') inner = `<rect x="${spec.x}" y="${spec.y}" width="${spec.w}" height="${spec.h}" rx="${spec.rx}" fill="currentColor"/>`;
-  else if (spec.kind === 'polygon') inner = `<polygon points="${spec.points}" fill="currentColor"/>`;
-  else if (spec.kind === 'path') inner = spec.stroke
+function stickerShapeSVGInner(spec) {
+  if (spec.kind === 'circle') return `<circle cx="50" cy="50" r="${spec.r}" fill="currentColor"/>`;
+  if (spec.kind === 'rect') return `<rect x="${spec.x}" y="${spec.y}" width="${spec.w}" height="${spec.h}" rx="${spec.rx}" fill="currentColor"/>`;
+  if (spec.kind === 'polygon') return `<polygon points="${spec.points}" fill="currentColor"/>`;
+  if (spec.kind === 'path') return spec.stroke
     ? `<path d="${spec.d}" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>`
     : `<path d="${spec.d}" fill="currentColor" fill-rule="${spec.fillRule || 'nonzero'}"/>`;
-  return `<svg viewBox="0 0 100 100">${inner}</svg>`;
+  return '';
+}
+function stickerPreviewSVG(key) {
+  const spec = stickerSpec(key); if (!spec) return '';
+  if (spec.kind === 'group') {
+    const baseSpec = stickerSpec(spec.shape); if (!baseSpec) return '';
+    const fontSize = STICKER_DEFAULT_LABEL.length > 4 ? 14 : 19;
+    // Every sticker preview here renders in one neutral dim tone via CSS `color` (see
+    // .sticker-thumb svg), not the actual placed fill (unlike React's StickerPreview, which shows
+    // the real STICKER_PALETTE[0] colour and computes real text contrast against it) — the panel's
+    // own background (behind both the shape and the button) reads fine as the label's fill here,
+    // same "cut against what's underneath" effect without a blend-mode that needs a real
+    // compositing/isolation context browsers render inconsistently for inline SVG.
+    return `<svg viewBox="0 0 100 100">${stickerShapeSVGInner(baseSpec)}<text x="50" y="50" font-family="system-ui, sans-serif" font-weight="800" font-size="${fontSize}" fill="var(--bg)" text-anchor="middle" dominant-baseline="central">${STICKER_DEFAULT_LABEL}</text></svg>`;
+  }
+  return `<svg viewBox="0 0 100 100">${stickerShapeSVGInner(spec)}</svg>`;
 }
 let stickerCat = 0;
 const stickerCatsEl = document.getElementById('sticker-cats'), stickerGridEl = document.getElementById('sticker-grid');
@@ -2118,132 +2217,501 @@ ed.on('selection', refreshRightScrollCue);
 refreshRightScrollCue();
 
 /* ── guided "convert to layers": review AI-detected regions as adjustable boxes before committing.
-   Boxes are plain absolutely-positioned <div>s over the canvas (not Fabric objects) — simpler than
-   the reference's Fabric-region-rect approach and avoids ever touching the real scene until Commit
-   is clicked. Canvas-scene ↔ screen mapping uses fc.viewportTransform directly since the canvas
-   element itself never gets CSS-scaled (see fitToScreen/setZoomAtCenter above — only the content
-   inside it moves/scales). Type is the full product/logo/text/sticker/decorative vocabulary
-   REGION_COLOR/REGION_ROLE (editor.js) know about — commitRegions() maps each to its committed
-   layer's role (text -> headline, sticker -> decorative, others pass through unchanged). ───────── */
-const reviewOverlay = document.getElementById('review-overlay'), reviewToolbar = document.getElementById('review-toolbar');
-const reviewCountEl = document.getElementById('review-count'), reviewCommitBtn = document.getElementById('review-commit'), reviewCancelBtn = document.getElementById('review-cancel'), reviewAddBoxBtn = document.getElementById('review-add-box');
+   Boxes are REAL Fabric.js objects on the live canvas (role:'region', styled via REGION_COLOR
+   inline — dashed stroke, translucent fill, coloured round corner handles), matching ditto's own
+   Fabric-region-rect approach: Fabric's native selection/move/resize/multi-select drives box
+   editing, and the "Selected region" panel reads the live active object — no custom div overlay,
+   no manual drag math. Type is the full product/logo/text/sticker/decorative vocabulary
+   REGION_COLOR/REGION_ROLE/REGION_NAME (editor.js) know about — commitRegions()/extractRegion() map
+   each to its committed layer's role (text -> headline, sticker -> decorative, others pass through
+   unchanged). ─────────────────────────────────────────────────────────────────────────────────── */
+const TYPE_LABELS = REGION_NAME;
+const reviewPanel = document.getElementById('review-panel');
+const reviewCountEl = document.getElementById('review-count');
+const reviewAutodetectBtn = document.getElementById('review-autodetect');
+const reviewHandtoolsEl = document.getElementById('review-handtools');
+const reviewObjectOpts = document.getElementById('review-object-opts');
+const reviewObjectTolerance = document.getElementById('review-object-tolerance');
+const reviewObjectAddBtn = document.getElementById('review-object-add');
+const reviewMergeObjectsBtn = document.getElementById('review-merge-objects');
+const reviewFinishShapeBtn = document.getElementById('review-finish-shape');
+const reviewSelectedEl = document.getElementById('review-selected');
+const reviewNameInput = document.getElementById('review-name');
+const reviewTypeGrid = document.getElementById('review-type-grid');
+const reviewExtractBtn = document.getElementById('review-extract');
+const reviewDeleteBtn = document.getElementById('review-delete');
+const reviewBgModeEl = document.getElementById('review-bgmode');
+const reviewBgModeNote = document.getElementById('review-bgmode-note');
+const reviewCancelBtn = document.getElementById('review-cancel');
+const reviewCommitBtn = document.getElementById('review-commit');
+const reviewHoverPreview = document.getElementById('review-hover-preview');
+
+document.getElementById('review-head-icon').innerHTML = iconSVG('layerstab', 15);
+reviewAutodetectBtn.innerHTML = iconSVG('spark', 13) + '<span>Auto-detect all objects</span>';
+reviewObjectAddBtn.innerHTML = iconSVG('spark', 12) + '<span>Add</span>';
+reviewFinishShapeBtn.innerHTML = iconSVG('check', 13) + '<span>Finish shape</span>';
+reviewExtractBtn.innerHTML = iconSVG('duplicate', 13) + '<span>Extract</span>';
+reviewDeleteBtn.innerHTML = iconSVG('trash', 13);
 reviewCommitBtn.textContent = 'Create layers';
-reviewCancelBtn.textContent = 'Cancel';
-reviewAddBoxBtn.textContent = '+ Add box';
-let reviewState = null;   // { flat, boxes: [{id, type, content, x, y, w, h} in scene px] }
-function sceneToScreen(pt) {
-  const v = ed.fc.viewportTransform, canvasRect = document.getElementById('cv').getBoundingClientRect(), stageRect = stageEl.getBoundingClientRect();
-  return { x: canvasRect.left - stageRect.left + pt.x * v[0] + v[4], y: canvasRect.top - stageRect.top + pt.y * v[3] + v[5] };
+
+const HAND_TOOLS = [
+  { mode: 'object', icon: 'spark', label: 'Object' },
+  { mode: 'box', icon: 'square', label: 'Box' },
+  { mode: 'lasso', icon: 'lasso', label: 'Lasso' },
+  { mode: 'polylasso', icon: 'polygon', label: 'Polygon' },
+  { mode: 'maglasso', icon: 'wand', label: 'Magnetic' },
+];
+reviewHandtoolsEl.innerHTML = HAND_TOOLS.map(t => `<button class="review-handbtn" data-mode="${t.mode}">${iconSVG(t.icon, 13)}<span>${t.label}</span></button>`).join('')
+  + `<button class="review-handbtn" id="review-add-box">${iconSVG('plus', 13)}<span>Add box</span></button>`;
+
+const BG_MODE_NOTE = {
+  auto: 'Local silhouette cutout via edge/colour segmentation — same engine as Object select.',
+  cheap: 'Faster — lower-resolution local cutout, good for small/medium objects.',
+  best: 'Same local cutout engine, run at a higher resolution for a cleaner edge (slower).',
+};
+
+/* reviewState: { flat }. Region boxes themselves are NOT tracked here — they're queried live off
+   the Fabric canvas (fc.getObjects().filter(o => o.role === 'region')), same as ditto's own
+   regionCount/activeRegion/selectedRegions() derived-on-render pattern, so there is exactly one
+   source of truth (the canvas) instead of a parallel array that could drift from it. */
+let reviewState = null;   // { flat }
+let regionDraw = null;    // null | 'object' | 'box' | 'lasso' | 'polylasso' | 'maglasso'
+let objMulti = false;
+let bgMode = 'auto';
+let _polyBuild = null;    // in-progress polygon/magnetic click-build ({pts:[]})
+let _polyDraftShape = null;
+let _dragBuild = null;    // in-progress box/lasso drag ({mode, x, y, shape} or {mode, pts, shape})
+
+function regionObjects() { return ed.fc.getObjects().filter(o => o.role === 'region'); }
+function activeRegion() { const o = ed.fc.getActiveObject(); return (reviewState && o && o.role === 'region') ? o : null; }
+function selectedRegions() {
+  const a = ed.fc.getActiveObject(); if (!a) return [];
+  return (a.type === 'activeSelection' ? a.getObjects() : [a]).filter(o => o.role === 'region');
 }
-function screenDeltaToScene(dx, dy) {
-  const v = ed.fc.viewportTransform;
-  return { dx: dx / v[0], dy: dy / v[3] };
-}
-function openReview(flat, regions) {
-  const boxes = regions.map((rg, i) => {
-    const bbox = rg.bbox || {};
-    return {
-      id: 'rv' + i, type: REGION_COLOR[rg.type] ? rg.type : 'decorative', content: rg.content || '',
-      x: (bbox.x || 0) / 100 * ed.W, y: (bbox.y || 0) / 100 * ed.H,
-      w: Math.max(12, (bbox.width || 0) / 100 * ed.W), h: Math.max(12, (bbox.height || 0) / 100 * ed.H),
-    };
+
+function makeRegionRect(rg) {
+  const bbox = rg.bbox || {};
+  const x = (bbox.x || 0) / 100 * ed.W, y = (bbox.y || 0) / 100 * ed.H;
+  const w = Math.max(12, (bbox.width || 0) / 100 * ed.W), h = Math.max(12, (bbox.height || 0) / 100 * ed.H);
+  const rt = REGION_COLOR[rg.type] ? rg.type : 'decorative';
+  const r = new ed.fabric.Rect({
+    left: x, top: y, width: w, height: h,
+    fill: REGION_COLOR[rt] + '1f', stroke: REGION_COLOR[rt], strokeWidth: 2, strokeDashArray: [7, 5],
+    strokeUniform: true, rx: 3, ry: 3, cornerColor: REGION_COLOR[rt], cornerStyle: 'circle', transparentCorners: false, objectCaching: false,
   });
-  reviewState = { flat, boxes };
-  ed.setTool('select');
-  reviewOverlay.hidden = false; reviewToolbar.hidden = false;
-  renderReviewBoxes();
+  r.set({ id: uid(), role: 'region', regionType: rt, rcontent: rg.content || '', rstyle: rg.style || null, name: rg.name || TYPE_LABELS[rt], renamed: !!rg.name });
+  return r;
 }
-function closeReview() {
-  reviewState = null;
-  reviewOverlay.hidden = true; reviewToolbar.hidden = true;
-  reviewOverlay.innerHTML = '';
+function makeFreehandRegion(pts, rg) {
+  rg = rg || {};
+  const poly = new ed.fabric.Polygon(pts.map(p => ({ x: p.x, y: p.y })), {
+    fill: REGION_COLOR.product + '1f', stroke: REGION_COLOR.product, strokeWidth: 2, strokeDashArray: [7, 5],
+    strokeUniform: true, cornerColor: REGION_COLOR.product, cornerStyle: 'circle', transparentCorners: false, objectCaching: false,
+  });
+  poly.set({ id: uid(), role: 'region', regionType: 'product', rcontent: rg.content || '', rstyle: rg.style || null, name: rg.name || TYPE_LABELS.product, renamed: !!rg.name, isFreehand: true });
+  return poly;
+}
+
+/* Absolute scene-space bounding box of a region object (rect or polygon), matching editor.js's own
+   collectRegions()-style bbox math (min/max of aCoords). */
+function regionBBox(o) {
+  o.setCoords();
+  const a = o.aCoords, xs = [a.tl.x, a.tr.x, a.bl.x, a.br.x], ys = [a.tl.y, a.tr.y, a.bl.y, a.br.y];
+  const x = Math.min(...xs), y = Math.min(...ys);
+  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+}
+/* Absolute scene-px outline of a hand-drawn (isFreehand) polygon region, respecting its current
+   transform (move/resize/rotate during review all apply here) — null for a plain rect region,
+   whose bbox alone is enough since it has no traced silhouette to preserve. Shared by
+   regionToPayload (single-region Extract) and the bulk Create-layers payload below, matching
+   ditto's regionPolygonPct/regionAbsPoints. */
+function regionAbsPolygon(o) {
+  if (!o.isFreehand || o.type !== 'polygon' || !o.points) return null;
+  const m = o.calcTransformMatrix(), off = o.pathOffset || { x: 0, y: 0 };
+  return o.points.map(p => ed.fabric.util.transformPoint({ x: p.x - off.x, y: p.y - off.y }, m));
+}
+function regionToPayload(o) {
+  const b = regionBBox(o);
+  return {
+    type: o.regionType, content: o.rcontent || '', style: o.rstyle || undefined, name: o.renamed ? o.name : undefined,
+    polygon: regionAbsPolygon(o) || undefined,
+    bbox: { x: b.x / ed.W * 100, y: b.y / ed.H * 100, width: b.w / ed.W * 100, height: b.h / ed.H * 100 },
+  };
+}
+
+function openReview(flat, regions) {
+  reviewState = { flat, srcImg: null };
+  loadImageElLocal(flat).then(img => { if (reviewState) reviewState.srcImg = img; });
+  regionDraw = null; objMulti = false;
+  ed.setTool('select');
+  regions.forEach(rg => ed.fc.add(makeRegionRect(rg)));
+  ed.fc.discardActiveObject();
+  ed.fc.renderAll();
+  reviewPanel.hidden = false;
+  setRightTab('ai');
+  renderReviewPanel();
+}
+function closeReview(removeBoxes = true) {
+  if (removeBoxes) regionObjects().forEach(o => ed.fc.remove(o));
+  ed.fc.discardActiveObject();
+  ed.fc.renderAll();
+  reviewState = null; regionDraw = null; _polyBuild = null; _dragBuild = null;
+  reviewPanel.hidden = true;
+  hideReviewHover();
   const msgEl = document.getElementById('convert-msg');
   if (msgEl) msgEl.style.display = 'none';
 }
-function renderReviewBoxes() {
+
+function renderReviewPanel() {
   if (!reviewState) return;
-  const v = ed.fc.viewportTransform;
-  reviewCountEl.textContent = reviewState.boxes.length + (reviewState.boxes.length === 1 ? ' region' : ' regions');
-  const TYPE_LABELS = { product: 'Product', logo: 'Logo', text: 'Text', sticker: 'Sticker', decorative: 'Decorative' };
-  reviewOverlay.innerHTML = reviewState.boxes.map(b => {
-    const p = sceneToScreen({ x: b.x, y: b.y });
-    const color = REGION_COLOR[b.type] || REGION_COLOR.decorative;
-    return `<div class="review-box" data-id="${b.id}" data-type="${b.type}" style="left:${p.x}px;top:${p.y}px;width:${b.w * v[0]}px;height:${b.h * v[3]}px;border-color:${color};background:${color}1f">
-      <div class="review-tag" data-drag="tag">
-        <select data-act="type">
-          ${Object.entries(TYPE_LABELS).map(([v, l]) => `<option value="${v}" ${b.type === v ? 'selected' : ''}>${l}</option>`).join('')}
-        </select>
-        <button data-act="del" title="Remove">${iconSVG('close', 10)}</button>
-      </div>
-      <div class="review-handle" data-drag="resize"></div>
-    </div>`;
-  }).join('');
+  const n = regionObjects().length;
+  reviewCountEl.textContent = n + (n === 1 ? ' box' : ' boxes');
+  reviewHandtoolsEl.querySelectorAll('.review-handbtn[data-mode]').forEach(b => { b.dataset.on = String(b.dataset.mode === regionDraw); });
+  reviewObjectOpts.style.display = regionDraw === 'object' ? 'flex' : 'none';
+  reviewObjectTolerance.value = ed.toolOpts.tolerance;
+  reviewObjectAddBtn.dataset.on = String(objMulti);
+  reviewObjectAddBtn.innerHTML = iconSVG('spark', 12) + '<span>Add' + (objMulti ? ' ✓' : '') + '</span>';
+  document.getElementById('review-object-multi-hint').textContent = objMulti ? ' Keep clicking to add more.' : '';
+  const polyRegionCount = regionObjects().filter(o => o.type === 'polygon').length;
+  reviewMergeObjectsBtn.disabled = polyRegionCount < 2;
+  reviewMergeObjectsBtn.innerHTML = iconSVG('layerstab', 13) + '<span>Merge objects' + (polyRegionCount >= 2 ? ' (' + polyRegionCount + ')' : '') + '</span>';
+  reviewFinishShapeBtn.style.display = (regionDraw === 'polylasso' || regionDraw === 'maglasso') && _polyBuild ? 'flex' : 'none';
+
+  const ar = activeRegion();
+  reviewSelectedEl.style.display = ar ? 'flex' : 'none';
+  if (ar) {
+    reviewNameInput.value = ar.renamed ? (ar.name || '') : '';
+    reviewNameInput.placeholder = ar.renamed ? 'Region name' : (ar.name || 'Region name');
+    reviewTypeGrid.innerHTML = Object.keys(REGION_COLOR).map(t => `
+      <button class="review-type-btn" data-type="${t}" style="${ar.regionType === t ? `background:${REGION_COLOR[t]}38;border-color:${REGION_COLOR[t]}` : ''}">
+        <span class="dot" style="background:${REGION_COLOR[t]}"></span>${TYPE_LABELS[t]}
+      </button>`).join('');
+  }
+  const mergeCount = selectedRegions().length;
+  reviewSelectedEl.dataset.mergeHint = mergeCount >= 2 ? String(mergeCount) : '';
+
+  reviewBgModeEl.querySelectorAll('button').forEach(b => { b.dataset.on = String(b.dataset.mode === bgMode); });
+  reviewBgModeNote.textContent = BG_MODE_NOTE[bgMode];
 }
-reviewOverlay.addEventListener('change', e => {
-  const box = e.target.closest('.review-box'); if (!box || e.target.dataset.act !== 'type') return;
-  const b = reviewState.boxes.find(x => x.id === box.dataset.id); if (!b) return;
-  b.type = e.target.value;
-  renderReviewBoxes();
+
+/* ── Select by hand: Box/Lasso reuse the editor's own drag-selection math (startSelection/
+   updateSelection/finalizeSelection); Polygon/Magnetic reuse its click-to-place-vertex math
+   (startPolyBuild/polyBuildAdd/polyBuildPreview/finishPolyBuild) plus the SAME Sobel edge map
+   ed.buildMagneticEdgeMap()/ed._edgeMap already builds for the lasso-mag tool. None of this
+   reimplements selection geometry — it just finalizes into a region Fabric object instead of
+   ed.selection, since setTool() would mark every existing region non-selectable/non-evented
+   (drawing mode) and break editing already-placed boxes mid-review. ─────────────────────────── */
+function setRegionDrawMode(mode) {
+  if (_polyBuild) finishPolyDraw(true);
+  if (_dragBuild) { if (_dragBuild.shape) ed.fc.remove(_dragBuild.shape); _dragBuild = null; }
+  regionDraw = mode;
+  if (mode) ed.fc.discardActiveObject();
+  if (mode === 'maglasso' && !ed._edgeMap) ed.buildMagneticEdgeMap();
+  ed.fc.selection = !mode;
+  ed.fc.defaultCursor = mode ? 'crosshair' : 'default';
+  ed.fc.getObjects().forEach(o => { if (o.role === 'region') { o.selectable = !mode; o.evented = !mode; } });
+  ed.fc.renderAll();
+  renderReviewPanel();
+}
+function finishPolyDraw(cancel) {
+  if (_polyDraftShape) { ed.fc.remove(_polyDraftShape); _polyDraftShape = null; }
+  const build = _polyBuild; _polyBuild = null;
+  const wasDrawing = regionDraw === 'polylasso' || regionDraw === 'maglasso';
+  if (!cancel && build) {
+    const sel = finishPolyBuild(build);
+    if (sel) { const region = makeFreehandRegion(sel.pts); ed.fc.add(region); ed.fc.setActiveObject(region); }
+  }
+  // One-shot: draw a shape, then back to select to adjust it — matches Box/Lasso's reviewCanvasUp.
+  if (wasDrawing) { setRegionDrawMode(null); return; }
+  ed.fc.renderAll();
+  renderReviewPanel();
+}
+function reviewCanvasDown(pt, e) {
+  if (!reviewState || !regionDraw) return;
+  if (regionDraw === 'object') {
+    // Uses objectPickInImage against the STATIC flattened review source (a loaded <img>, not the
+    // raw data URL string), not wandPick against the live fc canvas — the live canvas has our own
+    // region rects/drafts sitting on top of the scene during review, which would corrupt
+    // wandPick's own captureFlat()-based colour read.
+    if (!reviewState.srcImg) return;
+    const msgEl = document.getElementById('review-object-msg');
+    msgEl.style.display = 'none'; msgEl.textContent = '';
+    Promise.resolve(ed.objectPickInImage(reviewState.srcImg, pt, ed.toolOpts.tolerance)).then(poly => {
+      if (!poly) {
+        // Wand + objectPickInImage's own box-seeded GrabCut fallback both failed to find anything
+        // at this point — tell the user instead of leaving the click looking like a no-op.
+        msgEl.textContent = 'No object found here — try again or draw a box.'; msgEl.style.display = '';
+        return;
+      }
+      const region = makeFreehandRegion(poly);
+      ed.fc.add(region); ed.fc.setActiveObject(region); ed.fc.renderAll();
+      if (!objMulti) { setRegionDrawMode(null); }
+      else {
+        const n = regionObjects().filter(o => o.type === 'polygon').length;
+        msgEl.textContent = 'Object added (' + n + ') · click more, or Merge'; msgEl.style.display = '';
+        renderReviewPanel();
+      }
+    });
+    return;
+  }
+  if (regionDraw === 'box' || regionDraw === 'lasso') {
+    _dragBuild = { mode: regionDraw, sel: startSelection(regionDraw === 'box' ? 'marquee' : 'lasso', pt), shape: null };
+    return;
+  }
+  if (regionDraw === 'polylasso' || regionDraw === 'maglasso') {
+    const p = regionDraw === 'maglasso' ? snapToEdgePt(pt) : pt;
+    if (!_polyBuild) _polyBuild = startPolyBuild();
+    const next = polyBuildAdd(_polyBuild, p);
+    if (next.closed) { _polyBuild = next; finishPolyDraw(false); }
+    else { _polyBuild = next; renderReviewPanel(); }
+  }
+}
+function snapToEdgePt(pt) { return ed._edgeMap ? snapToEdge(ed._edgeMap, pt) : pt; }
+function reviewCanvasMove(pt) {
+  if (!reviewState) return;
+  if (regionDraw === 'box' || regionDraw === 'lasso') {
+    if (!_dragBuild) return;
+    updateSelection(_dragBuild.sel, pt);
+    if (_dragBuild.shape) ed.fc.remove(_dragBuild.shape);
+    const s = _dragBuild.sel;
+    _dragBuild.shape = s.kind === 'poly'
+      ? new ed.fabric.Polyline(s.pts, { role: 'draft', excludeFromExport: true, fill: REGION_COLOR.product + '19', stroke: REGION_COLOR.product, strokeWidth: 2, strokeDashArray: [6, 4], strokeUniform: true, selectable: false, evented: false })
+      : new ed.fabric.Rect({ role: 'draft', excludeFromExport: true, left: s.x, top: s.y, width: s.w, height: s.h, fill: REGION_COLOR.product + '19', stroke: REGION_COLOR.product, strokeWidth: 2, strokeDashArray: [6, 4], strokeUniform: true, selectable: false, evented: false });
+    ed.fc.add(_dragBuild.shape);
+    ed.fc.requestRenderAll();
+    return;
+  }
+  if ((regionDraw === 'polylasso' || regionDraw === 'maglasso') && _polyBuild) {
+    const p = regionDraw === 'maglasso' ? snapToEdgePt(pt) : pt;
+    const preview = polyBuildPreview(_polyBuild, p);
+    if (_polyDraftShape) ed.fc.remove(_polyDraftShape);
+    _polyDraftShape = new ed.fabric.Polyline(preview.pts, { role: 'draft', excludeFromExport: true, fill: 'transparent', stroke: REGION_COLOR.product, strokeWidth: 2, strokeDashArray: [6, 4], strokeUniform: true, selectable: false, evented: false });
+    ed.fc.add(_polyDraftShape);
+    ed.fc.requestRenderAll();
+    return;
+  }
+  if (!regionDraw) reviewHoverCanvasMove(pt);
+}
+function reviewCanvasUp() {
+  if (!reviewState || !(regionDraw === 'box' || regionDraw === 'lasso') || !_dragBuild) return;
+  if (_dragBuild.shape) ed.fc.remove(_dragBuild.shape);
+  const sel = finalizeSelection(_dragBuild.sel);
+  _dragBuild = null;
+  if (sel) {
+    const region = sel.kind === 'poly' ? makeFreehandRegion(sel.pts) : makeRegionRect({ type: 'product', bbox: { x: sel.x / ed.W * 100, y: sel.y / ed.H * 100, width: sel.w / ed.W * 100, height: sel.h / ed.H * 100 } });
+    ed.fc.add(region); ed.fc.setActiveObject(region);
+  }
+  setRegionDrawMode(null);
+}
+
+reviewHandtoolsEl.addEventListener('click', e => {
+  const btn = e.target.closest('.review-handbtn'); if (!btn) return;
+  if (btn.id === 'review-add-box') {
+    const r = makeRegionRect({ type: 'product', bbox: { x: 38, y: 42, width: 24, height: 16 } });
+    ed.fc.add(r); ed.fc.setActiveObject(r); ed.fc.renderAll(); renderReviewPanel();
+    return;
+  }
+  const mode = btn.dataset.mode;
+  setRegionDrawMode(regionDraw === mode ? null : mode);
 });
-reviewOverlay.addEventListener('click', e => {
-  const btn = e.target.closest('[data-act=del]'); if (!btn) return;
-  const box = e.target.closest('.review-box');
-  reviewState.boxes = reviewState.boxes.filter(x => x.id !== box.dataset.id);
-  renderReviewBoxes();
-});
-let _reviewDrag = null;
-reviewOverlay.addEventListener('mousedown', e => {
-  const dragType = e.target.closest('[data-drag]')?.dataset.drag;
-  const el = e.target.closest('.review-box'); if (!el) return;
-  const b = reviewState.boxes.find(x => x.id === el.dataset.id); if (!b) return;
-  e.preventDefault();
-  _reviewDrag = { b, el, mode: dragType === 'resize' ? 'resize' : 'move', lastX: e.clientX, lastY: e.clientY };
-});
-/* Update just the dragged box's own inline style during the drag, not a full re-render of every
-   box's innerHTML on every mousemove pixel — a full renderReviewBoxes() rebuild only runs once
-   the drag ends (mouseup), when box count/labels can't have changed anyway. */
-document.addEventListener('mousemove', e => {
-  if (!_reviewDrag) return;
-  const dx = e.clientX - _reviewDrag.lastX, dy = e.clientY - _reviewDrag.lastY;
-  _reviewDrag.lastX = e.clientX; _reviewDrag.lastY = e.clientY;
-  const { dx: sdx, dy: sdy } = screenDeltaToScene(dx, dy);
-  const b = _reviewDrag.b;
-  if (_reviewDrag.mode === 'move') { b.x += sdx; b.y += sdy; }
-  else { b.w = Math.max(12, b.w + sdx); b.h = Math.max(12, b.h + sdy); }
-  const v = ed.fc.viewportTransform, p = sceneToScreen({ x: b.x, y: b.y });
-  _reviewDrag.el.style.left = p.x + 'px'; _reviewDrag.el.style.top = p.y + 'px';
-  _reviewDrag.el.style.width = (b.w * v[0]) + 'px'; _reviewDrag.el.style.height = (b.h * v[3]) + 'px';
-});
-document.addEventListener('mouseup', () => {
-  if (_reviewDrag) { _reviewDrag = null; renderReviewBoxes(); }
-});
-reviewAddBoxBtn.onclick = () => {
-  const b = { id: 'rv' + Date.now(), type: 'decorative', content: '', x: ed.W * 0.35, y: ed.H * 0.35, w: ed.W * 0.3, h: ed.H * 0.3 };
-  reviewState.boxes.push(b);
-  renderReviewBoxes();
+reviewObjectTolerance.oninput = () => ed.setToolOptions({ tolerance: +reviewObjectTolerance.value });
+reviewObjectAddBtn.onclick = () => { objMulti = !objMulti; renderReviewPanel(); };
+reviewMergeObjectsBtn.onclick = async () => {
+  const items = regionObjects().filter(o => o.type === 'polygon');
+  if (items.length < 2) return;
+  ed.fc.discardActiveObject();
+  ed.fc.setActiveObject(new ed.fabric.ActiveSelection(items, { canvas: ed.fc }));
+  await mergeSelectedRegions();
 };
-reviewCancelBtn.onclick = closeReview;
+reviewFinishShapeBtn.onclick = () => finishPolyDraw(false);
+reviewNameInput.addEventListener('input', () => {
+  const o = activeRegion(); if (!o) return;
+  o.set({ name: reviewNameInput.value, renamed: !!reviewNameInput.value.trim() });
+});
+reviewTypeGrid.addEventListener('click', e => {
+  const btn = e.target.closest('.review-type-btn'); if (!btn) return;
+  const o = activeRegion(); if (!o) return;
+  const t = btn.dataset.type;
+  o.set({ regionType: t, stroke: REGION_COLOR[t], fill: REGION_COLOR[t] + '1f', cornerColor: REGION_COLOR[t] });
+  if (!o.renamed) o.set('name', TYPE_LABELS[t]);
+  ed.fc.renderAll();
+  renderReviewPanel();
+});
+reviewDeleteBtn.onclick = () => {
+  const o = activeRegion(); if (!o) return;
+  ed.fc.remove(o); ed.fc.discardActiveObject(); ed.fc.renderAll();
+  renderReviewPanel();
+};
+reviewExtractBtn.onclick = async () => {
+  const regs = selectedRegions();
+  if (regs.length !== 1 || !reviewState) return;
+  const o = regs[0], label = o.name || o.regionType;
+  const original = reviewExtractBtn.innerHTML;
+  reviewExtractBtn.disabled = true; reviewExtractBtn.innerHTML = `<span class="btn-spin"></span><span>Extracting…</span>`;
+  try {
+    const r = await ed.extractRegion(reviewState.flat, regionToPayload(o), bgMode);
+    if (r.status === 'ok') { ed.fc.remove(o); ed.fc.renderAll(); if (!regionObjects().length) closeReview(false); }
+  } finally {
+    reviewExtractBtn.disabled = false; reviewExtractBtn.innerHTML = original;
+    renderReviewPanel();
+  }
+};
+
+/* Merge 2+ selected regions via the cv worker's polygon union (ed.cv.union) — a true merged
+   outline when possible, falling back to a bounding-box union rect if the worker is unavailable. */
+async function mergeSelectedRegions() {
+  const items = selectedRegions(); if (items.length < 2) return;
+  const first = items[0];
+  const hasPoly = items.some(o => o.type === 'polygon');
+  let mergedPolys = null;
+  if (hasPoly && ed.cv) {
+    try {
+      const polys = items.map(o => {
+        if (o.type === 'polygon') { const m = o.calcTransformMatrix(), off = o.pathOffset || { x: 0, y: 0 }; return o.points.map(p => ed.fabric.util.transformPoint(new ed.fabric.Point(p.x - off.x, p.y - off.y), m)); }
+        const b = regionBBox(o); return [{ x: b.x, y: b.y }, { x: b.x + b.w, y: b.y }, { x: b.x + b.w, y: b.y + b.h }, { x: b.x, y: b.y + b.h }];
+      });
+      mergedPolys = await ed.cv.union(ed.W, ed.H, polys);
+    } catch (e) { mergedPolys = null; }
+  }
+  ed.fc.discardActiveObject();
+  items.forEach(o => ed.fc.remove(o));
+  if (mergedPolys && mergedPolys.length) {
+    mergedPolys.forEach((pl, i) => {
+      const r = makeFreehandRegion(pl);
+      r.set({ regionType: first.regionType, rstyle: first.rstyle || null, fill: REGION_COLOR[first.regionType] + '1f', stroke: REGION_COLOR[first.regionType], name: first.renamed ? first.name : TYPE_LABELS[first.regionType], renamed: first.renamed });
+      ed.fc.add(r); if (i === 0) ed.fc.setActiveObject(r);
+    });
+  } else {
+    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+    items.forEach(o => { const b = regionBBox(o); x1 = Math.min(x1, b.x); y1 = Math.min(y1, b.y); x2 = Math.max(x2, b.x + b.w); y2 = Math.max(y2, b.y + b.h); });
+    const merged = makeRegionRect({ type: first.regionType, name: first.renamed ? first.name : undefined, style: first.rstyle || undefined, bbox: { x: x1 / ed.W * 100, y: y1 / ed.H * 100, width: (x2 - x1) / ed.W * 100, height: (y2 - y1) / ed.H * 100 } });
+    ed.fc.add(merged); ed.fc.setActiveObject(merged);
+  }
+  ed.fc.renderAll();
+  renderReviewPanel();
+}
+
+/* ── Auto-detect: free, local, CV-only — ed.detectObjects() (Canny-edge boxes + a text-box pass),
+   no AI key/provider needed. Mirrors ditto's own free local detector used both standalone and
+   merged in behind the paid AI pass at guided-convert start. ──────────────────────────────────── */
+reviewAutodetectBtn.onclick = async () => {
+  if (!reviewState) return;
+  const original = reviewAutodetectBtn.innerHTML;
+  reviewAutodetectBtn.disabled = true; reviewAutodetectBtn.innerHTML = `<span class="btn-spin"></span><span>Detecting…</span>`;
+  try {
+    const r = await ed.detectObjects({ text: true });
+    if (r.status === 'ok') {
+      const { boxes, textBoxes } = r.result;
+      const covered = (t, o) => { const ix = Math.max(0, Math.min(t.x + t.w, o.x + o.w) - Math.max(t.x, o.x)), iy = Math.max(0, Math.min(t.y + t.h, o.y + o.h) - Math.max(t.y, o.y)); return (ix * iy) >= 0.7 * (t.w * t.h); };
+      const txt = (textBoxes || []).filter(t => !boxes.some(o => covered(t, o)));
+      const add = (b, type) => ed.fc.add(makeRegionRect({ type, bbox: { x: b.x / ed.W * 100, y: b.y / ed.H * 100, width: b.w / ed.W * 100, height: b.h / ed.H * 100 } }));
+      boxes.forEach(b => add(b, 'product'));
+      txt.forEach(b => add(b, 'text'));
+      ed.fc.renderAll();
+    }
+  } finally {
+    reviewAutodetectBtn.disabled = false; reviewAutodetectBtn.innerHTML = original;
+    renderReviewPanel();
+  }
+};
+
+reviewBgModeEl.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-mode]'); if (!btn) return;
+  bgMode = btn.dataset.mode;
+  renderReviewPanel();
+});
+let reviewCommitBusy = false;
+reviewCancelBtn.onclick = () => { if (!reviewCommitBusy) closeReview(true); };
 reviewCommitBtn.onclick = async () => {
-  if (!reviewState || !reviewState.boxes.length) { closeReview(); return; }
-  const regions = reviewState.boxes.map(b => ({
-    type: b.type, content: b.content,
-    bbox: { x: b.x / ed.W * 100, y: b.y / ed.H * 100, width: b.w / ed.W * 100, height: b.h / ed.H * 100 },
-  }));
+  if (!reviewState || reviewCommitBusy) return;
+  const regs = regionObjects();
+  if (!regs.length) { closeReview(); return; }
+  const regions = regs.map(regionToPayload);
   const flat = reviewState.flat;
-  closeReview();
-  await ed.commitRegions(flat, regions);
+  // commitRegions does real per-region CV work (grabCut cutouts) and can take a few seconds —
+  // show a spinner and disable the review panel INSTEAD of closing it immediately, so the user
+  // isn't left staring at what looks like a frozen/unresponsive canvas with no boxes and no
+  // feedback while the layers are still being built underneath.
+  const original = reviewCommitBtn.innerHTML;
+  reviewCommitBusy = true;
+  reviewCommitBtn.disabled = true; reviewCancelBtn.disabled = true;
+  reviewCommitBtn.innerHTML = `<span class="btn-spin"></span><span>Creating layers…</span>`;
+  try {
+    await ed.commitRegions(flat, regions, bgMode);
+  } finally {
+    reviewCommitBusy = false;
+    closeReview(true);
+    reviewCommitBtn.disabled = false; reviewCancelBtn.disabled = false;
+    reviewCommitBtn.innerHTML = original;
+  }
 };
-ed.on('zoom', () => renderReviewBoxes());
-window.addEventListener('resize', () => renderReviewBoxes());
+
+/* ── live cutout preview on hover: rest the cursor on a region box to see the exact silhouette
+   Create/Extract will actually cut (ed.cutoutRegion — same call both use), so a bad box gets fixed
+   before spending a cv pass on it for real. Smallest-box-wins hit test, debounced + cached by
+   box id + rounded bbox so re-hovering the same box is instant, mirrors ditto's own
+   reviewRegionAt/computeReviewMask. ──────────────────────────────────────────────────────────── */
+let _reviewHoverTimer = null, _reviewHoverKey = null;
+const _reviewHoverCache = {};
+function reviewRegionAt(pt) {
+  let best = null;
+  regionObjects().forEach(o => {
+    const b = regionBBox(o);
+    if (pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h && (!best || b.w * b.h < best.b.w * best.b.h)) best = { o, b };
+  });
+  return best;
+}
+function hideReviewHover() { reviewHoverPreview.hidden = true; _reviewHoverKey = null; }
+function reviewHoverCanvasMove(pt) {
+  const hit = reviewRegionAt(pt);
+  if (!hit) { clearTimeout(_reviewHoverTimer); hideReviewHover(); return; }
+  const key = hit.o.id + '_' + Math.round(hit.b.x) + '_' + Math.round(hit.b.y) + '_' + Math.round(hit.b.w) + '_' + Math.round(hit.b.h) + '_' + bgMode;
+  clearTimeout(_reviewHoverTimer);
+  const cached = _reviewHoverCache[key];
+  if (cached) { drawReviewHover(cached); return; }
+  _reviewHoverTimer = setTimeout(async () => {
+    if (!reviewState || !reviewState.srcImg) return;
+    const poly = await ed.cutoutRegion(reviewState.srcImg, hit.b, bgMode);
+    if (poly && poly.length >= 3) { _reviewHoverCache[key] = poly; drawReviewHover(poly); }
+  }, 160);
+}
+function loadImageElLocal(src) { return new Promise(res => { const img = new Image(); img.onload = () => res(img); img.src = src; }); }
+function drawReviewHover(poly) {
+  const v = ed.fc.viewportTransform, canvasRect = document.getElementById('cv').getBoundingClientRect(), stageRect = stageEl.getBoundingClientRect();
+  const toScreen = (p) => ({ x: canvasRect.left - stageRect.left + p.x * v[0] + v[4], y: canvasRect.top - stageRect.top + p.y * v[3] + v[5] });
+  const screenPts = poly.map(toScreen);
+  const xs = screenPts.map(p => p.x), ys = screenPts.map(p => p.y);
+  const minX = Math.min(...xs), minY = Math.min(...ys), maxX = Math.max(...xs), maxY = Math.max(...ys);
+  reviewHoverPreview.style.left = minX + 'px'; reviewHoverPreview.style.top = minY + 'px';
+  reviewHoverPreview.setAttribute('width', Math.max(1, maxX - minX));
+  reviewHoverPreview.setAttribute('height', Math.max(1, maxY - minY));
+  reviewHoverPreview.querySelector('polygon').setAttribute('points', screenPts.map(p => (p.x - minX) + ',' + (p.y - minY)).join(' '));
+  reviewHoverPreview.hidden = false;
+}
+
+ed.fc.on('mouse:down', (opt) => { if (reviewState) reviewCanvasDown(ed.fc.getPointer(opt.e), opt.e); });
+ed.fc.on('mouse:move', (opt) => { if (reviewState) reviewCanvasMove(ed.fc.getPointer(opt.e)); });
+ed.fc.on('mouse:up', () => { if (reviewState) reviewCanvasUp(); });
+ed.fc.on('selection:created', () => { if (reviewState) renderReviewPanel(); });
+ed.fc.on('selection:updated', () => { if (reviewState) renderReviewPanel(); });
+ed.fc.on('selection:cleared', () => { if (reviewState) renderReviewPanel(); });
+ed.fc.on('object:modified', () => { if (reviewState) renderReviewPanel(); });
+document.addEventListener('keydown', e => {
+  if (!reviewState) return;
+  if (e.key === 'Enter' && (regionDraw === 'polylasso' || regionDraw === 'maglasso') && _polyBuild) { e.preventDefault(); finishPolyDraw(false); }
+  else if (e.key === 'Escape') { e.preventDefault(); if (reviewCommitBusy) return; if (regionDraw) setRegionDrawMode(null); else closeReview(); }
+});
+ed.on('zoom', () => { if (reviewState) hideReviewHover(); });
+window.addEventListener('resize', () => { if (reviewState) hideReviewHover(); });
 
 /* ── open: file picker, drag/drop+paste, and the cross-platform bridge ── */
 document.getElementById('openfile-icon').innerHTML = iconSVG('folder', 15);
-openfile.onclick = () => file.click();
-/* Every image entry point adds a layer that fits inside the CURRENT artboard — the artboard size
-   never changes underneath you. This matches the reference editor: the canvas is a fixed ad
-   format, not something a dropped-in photo gets to resize. (Editor#openImage's fit-artboard
-   behavior still exists in core for hosts that want "start a document from this photo"; this demo
-   just doesn't use it as the default add-image path.) */
+openfile.onclick = () => { file.dataset.mode = 'open'; file.click(); };
+/* "Open image…" in the header starts a fresh document from the photo: the artboard resizes to
+   match the image (Editor#openImage's fit-artboard behavior), same as the reference editor.
+   Every OTHER image entry point (sidebar "Add image" tool, asset tray, drag/drop) adds a layer
+   that fits inside the CURRENT artboard instead — the canvas size never changes underneath you
+   there, since those are inserting into an existing composition, not starting one. */
 /* ── asset tray: every image source added to the document this session, click or drag back in ──
    Session-only (no localStorage) — a generic library has no "generated ad" / "product photo"
    asset taxonomy of its own, so this tracks exactly what the user has actually brought into THIS
@@ -2289,7 +2757,15 @@ stageEl.addEventListener('drop', e => {
   });
 });
 
-file.onchange = () => { const f = file.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { ed.addImage(r.result); trackAsset(r.result, f.name || 'Image'); }; r.readAsDataURL(f); };
+file.onchange = () => {
+  const f = file.files[0]; if (!f) return;
+  const openAsDocument = file.dataset.mode === 'open';
+  const r = new FileReader();
+  r.onload = () => {
+    (openAsDocument ? ed.openImage(r.result) : ed.addImage(r.result)).then(() => trackAsset(r.result, f.name || 'Image'));
+  };
+  r.readAsDataURL(f);
+};
 installDropImport(document.getElementById('stage'), src => { ed.addImage(src); trackAsset(src, 'Dropped image'); });
 installBridge(src => { ed.addImage(src); trackAsset(src, 'Opened image'); });   // ?image= / #img= / postMessage / localStorage handoff
 
@@ -2475,7 +2951,9 @@ convertDetectBtn.onclick = async () => {
 };
 convertManualBtn.onclick = () => {
   openReview(ed.exportPNG(), []);
-  reviewAddBoxBtn.onclick();
+  const r = makeRegionRect({ type: 'product', bbox: { x: 38, y: 42, width: 24, height: 16 } });
+  ed.fc.add(r); ed.fc.setActiveObject(r); ed.fc.renderAll();
+  renderReviewPanel();
 };
 
 /* ── extend-background nudge: a floating banner that appears once enough of the canvas is still

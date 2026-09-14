@@ -1,7 +1,7 @@
 /* @canvasmith/core — headless image-editor engine on Fabric.js.
    Use the Editor facade for everything, or import the pieces and build your own. */
 
-export { Editor, ALL_TOOLS, SEL_TOOLS, SHAPE_TOOLS, REGION_ROLE, REGION_COLOR } from './editor.js';
+export { Editor, ALL_TOOLS, SEL_TOOLS, SHAPE_TOOLS, REGION_ROLE, REGION_COLOR, REGION_NAME } from './editor.js';
 export { PaintEngine, PAINT_TOOLS, renderObjectsFlat } from './engine.js';
 export { History } from './history.js';
 export {
@@ -26,4 +26,4 @@ export { CvEngine, prepImageData } from './cv/client.js';
 export { cvWorkerBody, cvWorkerSource, DEFAULT_OPENCV_URL } from './cv/worker.js';
 export { installKeybindings, TOOL_KEYS } from './keybindings.js';
 export { makeMaskFilterClass, createMaskCanvas, maskStamp, maskLine } from './mask.js';
-export { STICKER_GROUPS, STICKER_PALETTE, stickerSpec } from './stickers.js';
+export { STICKER_GROUPS, STICKER_PALETTE, stickerSpec, STICKER_DEFAULT_LABEL } from './stickers.js';

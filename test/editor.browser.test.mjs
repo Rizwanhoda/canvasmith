@@ -152,6 +152,21 @@ test('browser: marquee drag sets ed.selection and finalizeSelection accepts it',
   assert.ok(sel.w > 6 && sel.h > 6);
 });
 
+test('browser: clicking inside an existing marquee again clears the selection instead of leaving it unchanged', async () => {
+  await page.evaluate(() => window.__ed.setTool('marquee'));
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.move(canvasBox.x + 40, canvasBox.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 200, canvasBox.y + 160, { steps: 4 });
+  await page.mouse.up();
+  assert.ok(await page.evaluate(() => !!window.__ed.selection));
+  // A plain click on the marquee's own interior (no drag) picks up its move handle first, but with
+  // zero net movement it must still deselect — matching the reference editor, where a marquee click
+  // always restarts a fresh 0-size selection that gets discarded, rather than silently no-opping.
+  await page.mouse.click(canvasBox.x + 100, canvasBox.y + 100);
+  assert.equal(await page.evaluate(() => window.__ed.selection), null);
+});
+
 /* ── addMode: a sticky "keep adding every click" toggle for wand/objectselect/hoverselect, an
    alternative to holding Shift on every click (matches the reference editor's Add-mode chip).
    Stubs wandPick to record its {add,subtract} args instead of waiting on a real cv round-trip —
@@ -172,13 +187,19 @@ test('browser: toolOpts.addMode makes every click add to the selection without h
   calls = await page.evaluate(() => window.__wandCalls);
   assert.equal(calls[1].add, true);   // addMode on → add without Shift
 
-  await page.evaluate(() => window.__ed.setToolOptions({ addMode: false }));
-  await page.evaluate(() => window.__ed.setTool('objectselect'));
+  // objectselect/hoverselect route clicks through the box-aware selectObjectAt (not wandPick) —
+  // stub that instead to check the same addMode/Shift branching on its own {add,subtract} options.
+  await page.evaluate(() => {
+    window.__objCalls = [];
+    window.__ed.selectObjectAt = (pt, opts) => { window.__objCalls.push(opts); return Promise.resolve({ status: 'ok' }); };
+    window.__ed.setToolOptions({ addMode: false });
+    window.__ed.setTool('objectselect');
+  });
   await page.keyboard.down('Shift');
   await page.mouse.click(canvasBox.x + 110, canvasBox.y + 50);
   await page.keyboard.up('Shift');
-  calls = await page.evaluate(() => window.__wandCalls);
-  assert.equal(calls[2].add, true);   // Shift still works independent of addMode, on objectselect too
+  const objCalls = await page.evaluate(() => window.__objCalls);
+  assert.equal(objCalls[0].add, true);   // Shift still works independent of addMode, on objectselect too
 });
 
 /* ── objectselect-bbox: the reference editor's near-stub "wand" (key W) — no pixel analysis at
@@ -903,6 +924,25 @@ test('browser: fillWithImage stamps a bitmap into the fill region', async () => 
   assert.deepEqual(px, [0, 0, 255, 255]);
 });
 
+/* ── addImageLayer 'contain' fit must scale a smaller-than-artboard image UP as well as a
+   larger one down — a stray Math.min(1, ...) clamp previously made it only ever scale down,
+   so a small image dropped onto a big artboard stayed tiny in the corner instead of filling
+   the frame (reported as "image fit to frame not working"). Matches the reference editor's own
+   makeObj, which has no such clamp: scale = Math.min(slotW/imgW, slotH/imgH), full stop. ────── */
+test('browser: addImage with the default \'contain\' fit scales a SMALLER-than-artboard image up to fit it', async () => {
+  const result = await page.evaluate(async () => {
+    const c = document.createElement('canvas'); c.width = 20; c.height = 20;
+    c.getContext('2d').fillStyle = '#ff0000'; c.getContext('2d').fillRect(0, 0, 20, 20);
+    const img = await window.__ed.addImage(c.toDataURL());
+    return { scaleX: img.scaleX, scaleY: img.scaleY, renderedW: img.width * img.scaleX, renderedH: img.height * img.scaleY, W: window.__ed.W, H: window.__ed.H };
+  });
+  // 400x300 artboard, 20x20 image: scale = min(400/20, 300/20) = min(20, 15) = 15
+  assert.equal(result.scaleX, 15);
+  assert.equal(result.scaleY, 15);
+  assert.equal(result.renderedH, result.H);   // touches the artboard's shorter edge exactly
+  assert.ok(result.renderedW <= result.W);
+});
+
 test('browser: extendBackgroundToCanvas scales the background image to cover the artboard', async () => {
   const result = await page.evaluate(async () => {
     const ed = window.__ed;
@@ -994,6 +1034,67 @@ test('browser: layerLabel shows the ad-copy layer\'s own name, not its Fabric Gr
     return layerLabel(o);
   });
   assert.equal(label, 'CTA');   // NOT "3 layers" (the generic Group fallback)
+});
+
+/* ── stickers (stickers.js via editor.js's addSticker) — ported ditto reference categories:
+   sale bursts, price tags, corner ribbon, extra arrow rotations, and baked-text badge/tag/
+   banner/burst variants (kind: 'group', shape + centered IText label). ──────────────────────── */
+test('browser: every STICKER_GROUPS key places without error and resolves a real stickerSpec', async () => {
+  const result = await page.evaluate(async () => {
+    const { STICKER_GROUPS, stickerSpec } = await import('/packages/core/src/index.js');
+    const ed = window.__ed;
+    const missing = [];
+    const failed = [];
+    STICKER_GROUPS.forEach(g => g.keys.forEach(key => {
+      if (!stickerSpec(key)) { missing.push(key); return; }
+      const id = ed.addSticker(key);
+      if (!id || !ed.fc.getObjects().find(o => o.id === id)) failed.push(key);
+    }));
+    return { missing, failed, groupCount: STICKER_GROUPS.length };
+  });
+  assert.deepEqual(result.missing, []);
+  assert.deepEqual(result.failed, []);
+  assert.ok(result.groupCount >= 6);   // sale bursts, badges&tags, ribbons&banners, price tags, arrows, accents
+});
+
+test('browser: a plain (non-text) sticker is a single recolorable shape, not a group', async () => {
+  const info = await page.evaluate(() => {
+    const ed = window.__ed;
+    const id = ed.addSticker('burst12');
+    const o = ed.fc.getObjects().find(x => x.id === id);
+    return { type: o.type, role: o.role, name: o.name, fill: o.fill };
+  });
+  assert.notEqual(info.type, 'group');
+  assert.equal(info.role, 'shape');
+  assert.equal(info.name, 'Sticker');
+  assert.ok(info.fill);   // recolorable — has the palette's first fill applied directly
+});
+
+test('browser: a baked-text sticker (kind: \'group\') places its named base shape + a centered, auto-contrast IText label', async () => {
+  const info = await page.evaluate(() => {
+    const ed = window.__ed;
+    const id = ed.addSticker('burstText');
+    const o = ed.fc.getObjects().find(x => x.id === id);
+    const label = o._objects.find(c => c.type === 'i-text');
+    const shape = o._objects.find(c => c.type !== 'i-text');
+    return { type: o.type, role: o.role, childCount: o._objects.length, labelText: label && label.text, labelFill: label && label.fill, shapeType: shape && shape.type };
+  });
+  assert.equal(info.type, 'group');
+  assert.equal(info.role, 'shape');
+  assert.equal(info.childCount, 2);
+  assert.equal(info.labelText, 'SALE');
+  assert.equal(info.shapeType, 'polygon');   // burst12's own base shape kind
+  assert.ok(info.labelFill === '#0c0c0e' || info.labelFill === '#ffffff');   // real contrast pick, not a placeholder
+});
+
+test('browser: new ported shapes (burst/tag/swing/corner/arrowCurve/rotated arrows) all resolve valid specs', async () => {
+  const kinds = await page.evaluate(async () => {
+    const { stickerSpec } = await import('/packages/core/src/index.js');
+    return ['burst8', 'burst12', 'burst16', 'tag', 'swing', 'corner', 'arrowCurve', 'arrowUp', 'arrowDown', 'arrowLeft'].map(k => {
+      const s = stickerSpec(k); return s ? s.kind : null;
+    });
+  });
+  assert.ok(kinds.every(k => k === 'polygon' || k === 'path'));
 });
 
 /* ── promo layout (templates.js via editor.js's applyPromoLayout) ────────────────────────────── */
@@ -1187,6 +1288,182 @@ test('browser: commitRegions maps region types to layer roles via REGION_ROLE, k
   assert.equal(result.decorativeRole, 'decorative');  // already decorative
 });
 
+/* ── commitRegions must apply a text region's `style` (fontSize/color/textAlign/fontWeight) to the
+   resulting text layer, and store it back on the layer as `rstyle` so it survives an extract/merge
+   round-trip — regression test for style being silently dropped (only a box-height-derived default
+   fontSize was ever applied, color/align/weight were always ignored). ──── */
+test('browser: commitRegions applies a text region\'s style (fontSize/color/textAlign/fontWeight) to the layer', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const c = document.createElement('canvas'); c.width = ed.W; c.height = ed.H;
+    c.getContext('2d').fillStyle = '#888888'; c.getContext('2d').fillRect(0, 0, ed.W, ed.H);
+    const flat = c.toDataURL('image/png');
+    const style = { fontSize: 40, color: '#ff0000', textAlign: 'center', fontWeight: 'bold' };
+    const r = await ed.commitRegions(flat, [
+      { type: 'text', bbox: { x: 5, y: 5, width: 40, height: 10 }, content: 'Styled', style },
+    ]);
+    const layer = ed.fc.getObjects().find(o => o.regionType === 'text');
+    return {
+      status: r.status, W: ed.W,
+      fill: layer && layer.fill,
+      textAlign: layer && layer.textAlign,
+      fontWeight: layer && layer.fontWeight,
+      fontSize: layer && layer.fontSize,
+      rstyle: layer && layer.rstyle,
+    };
+  });
+  assert.equal(result.status, 'ok');
+  assert.equal(result.fill, '#ff0000');
+  assert.equal(result.textAlign, 'center');
+  assert.equal(result.fontWeight, 700);
+  assert.equal(result.fontSize, Math.max(12, Math.round(40 * (result.W / 1080))));
+  assert.deepEqual(result.rstyle, { fontSize: 40, color: '#ff0000', textAlign: 'center', fontWeight: 'bold' });
+});
+
+/* ── commitRegions must play a staggered "layer reveal" animation afterward (each new layer rises
+   + fades in) instead of popping the whole composition in instantly with no feedback tying a layer
+   to the region it came from — regression test for the animation being entirely absent. Checking
+   the full tween would be timing-flaky, so this only asserts the observable contract right after
+   commit: new layers start hidden (opacity 0, animateLayersIn's initial state) rather than already
+   at full opacity, and settle back to full opacity once the animation completes. ──── */
+test('browser: commitRegions plays a staggered reveal — new layers start hidden then fade back in', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const c = document.createElement('canvas'); c.width = ed.W; c.height = ed.H;
+    c.getContext('2d').fillStyle = '#888888'; c.getContext('2d').fillRect(0, 0, ed.W, ed.H);
+    const flat = c.toDataURL('image/png');
+    await ed.commitRegions(flat, [{ type: 'product', bbox: { x: 5, y: 5, width: 20, height: 20 } }]);
+    const layer = ed.fc.getObjects().find(o => o.regionType === 'product');
+    const bg = ed.fc.getObjects().find(o => o.role === 'bg');
+    const immediately = { layerOpacity: layer.opacity, bgOpacity: bg.opacity };
+    await new Promise(r => setTimeout(r, 2200));   // outlast the reveal's longest tween (~1280ms + delay)
+    const settled = { layerOpacity: layer.opacity, bgOpacity: bg.opacity, layerShadow: layer.shadow };
+    return { immediately, settled };
+  });
+  assert.equal(result.immediately.layerOpacity, 0);
+  assert.equal(result.settled.layerOpacity, 1);
+  assert.equal(result.settled.bgOpacity, 1);
+  assert.equal(result.settled.layerShadow, null);
+});
+
+/* ── detectObjects must fall back to a local (no-OpenCV) blob detector when the cv worker returns
+   nothing, instead of reporting 'no_match' even though there's an obvious foreground shape on the
+   canvas — regression test for the missing local-detection fallback. Stubs ed.cv.detect to always
+   return null (as if the worker/WASM never loaded) so the fallback path is exercised
+   deterministically, then paints an actual high-contrast rect so the blob detector has something
+   real to find. ──── */
+test('browser: detectObjects falls back to a local blob detector when the cv worker finds nothing', async () => {
+  await page.evaluate(() => window.__ed.setTool('rect'));
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.move(canvasBox.x + 40, canvasBox.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 220, canvasBox.y + 170, { steps: 4 });
+  await page.mouse.up();
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const o = ed.fc.getObjects().find(x => x.type === 'rect');
+    if (o) o.set({ fill: '#ff2222' });
+    ed.fc.renderAll();
+    const realCv = ed.cv;
+    ed.cv = { ...realCv, detect: async () => null };
+    const r = await ed.detectObjects();
+    ed.cv = realCv;
+    return r;
+  });
+  assert.equal(result.status, 'ok');
+  assert.ok(result.result.boxes.length > 0);
+});
+
+/* ── cutoutRegion's `bgMode` ('auto'/'cheap'/'best') must actually change the working resolution
+   passed into the cv worker instead of being a fully inert UI setting — regression test for the
+   "Clean background" picker doing nothing regardless of which mode was selected. Stubs
+   ed.cv.grabcut to capture the ImageData it's called with instead of running real OpenCV. ──── */
+test('browser: cutoutRegion varies working resolution by bgMode (cheap < auto < best)', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const realCv = ed.cv;
+    const widths = {};
+    ed.cv = { grabcut: async (img) => { widths.last = img.width; return [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }]; } };
+    // Use a source much larger than all three resolution caps (600/900/1200) so downscaling
+    // actually differs per mode — the editor's own W/H (400x300 in this fixture) is too small and
+    // would clamp every mode to the same 1:1 scale, masking the bug this test guards against.
+    const c = document.createElement('canvas'); c.width = 2000; c.height = 1500;
+    c.getContext('2d').fillStyle = '#888'; c.getContext('2d').fillRect(0, 0, 2000, 1500);
+    const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = c.toDataURL('image/png'); });
+    const box = { x: 10, y: 10, w: 80, h: 80 };
+    await ed.cutoutRegion(img, box, 'cheap'); const cheapW = widths.last;
+    await ed.cutoutRegion(img, box, 'auto'); const autoW = widths.last;
+    await ed.cutoutRegion(img, box, 'best'); const bestW = widths.last;
+    ed.cv = realCv;
+    return { cheapW, autoW, bestW };
+  });
+  assert.ok(result.cheapW < result.autoW, `cheap (${result.cheapW}) should be lower-res than auto (${result.autoW})`);
+  assert.ok(result.autoW < result.bestW, `auto (${result.autoW}) should be lower-res than best (${result.bestW})`);
+});
+
+/* ── commitRegions must NOT wipe layers the user already had on the canvas before running
+   convert-to-layers — only the old background and leftover review-box overlays. Regression test
+   for the bug where commitRegions removed every object unconditionally, silently destroying any
+   hand-placed text/logo/sticker the user added before clicking "Convert to layers". ──── */
+test('browser: commitRegions preserves pre-existing non-background layers instead of wiping the whole canvas', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const preExistingId = ed.addCTA({ x: 100, y: 100 });
+    const c = document.createElement('canvas'); c.width = ed.W; c.height = ed.H;
+    c.getContext('2d').fillStyle = '#888888'; c.getContext('2d').fillRect(0, 0, ed.W, ed.H);
+    const flat = c.toDataURL('image/png');
+    const r = await ed.commitRegions(flat, [{ type: 'product', bbox: { x: 5, y: 5, width: 20, height: 20 } }]);
+    return {
+      status: r.status,
+      preExistingSurvived: !!ed.fc.getObjects().find(o => o.id === preExistingId),
+      newRegionPresent: !!ed.fc.getObjects().find(o => o.regionType === 'product'),
+    };
+  });
+  assert.equal(result.status, 'ok');
+  assert.equal(result.preExistingSurvived, true);
+  assert.equal(result.newRegionPresent, true);
+});
+
+/* ── objectPickInImage (the review step's "Object select" tool) must fall back to a box-seeded
+   GrabCut when the colour wand finds nothing (e.g. a low-contrast subject), instead of giving up
+   immediately — regression test for the missing fallback (wand-only, no grabcut retry). Stubs
+   ed.cv.wand/grabcut directly so the test is deterministic and doesn't depend on real image
+   content or a live OpenCV worker. ──── */
+test('browser: objectPickInImage falls back to box-seeded grabCut when the colour wand finds nothing', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const calls = [];
+    const realCv = ed.cv;
+    ed.cv = {
+      wand: async (img, seed) => { calls.push('wand'); return []; },
+      grabcut: async (img, seed, work) => { calls.push('grabcut'); return [{ x: 10, y: 10 }, { x: 20, y: 10 }, { x: 20, y: 20 }]; },
+    };
+    const c = document.createElement('canvas'); c.width = ed.W; c.height = ed.H;
+    c.getContext('2d').fillStyle = '#888888'; c.getContext('2d').fillRect(0, 0, ed.W, ed.H);
+    const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = c.toDataURL('image/png'); });
+    const poly = await ed.objectPickInImage(img, { x: ed.W / 2, y: ed.H / 2 }, 32);
+    ed.cv = realCv;
+    return { calls, polyLen: poly ? poly.length : 0 };
+  });
+  assert.deepEqual(result.calls, ['wand', 'grabcut']);
+  assert.equal(result.polyLen, 3);
+});
+
+test('browser: objectPickInImage returns null when both wand and the grabCut fallback fail', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const realCv = ed.cv;
+    ed.cv = { wand: async () => [], grabcut: async () => null };
+    const c = document.createElement('canvas'); c.width = ed.W; c.height = ed.H;
+    c.getContext('2d').fillStyle = '#888888'; c.getContext('2d').fillRect(0, 0, ed.W, ed.H);
+    const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = c.toDataURL('image/png'); });
+    const poly = await ed.objectPickInImage(img, { x: ed.W / 2, y: ed.H / 2 }, 32);
+    ed.cv = realCv;
+    return { poly };
+  });
+  assert.equal(result.poly, null);
+});
+
 test('browser: commitRegions\' regionType survives an undo/redo round-trip (serialized via io.js EXTRA)', async () => {
   const result = await page.evaluate(async () => {
     const ed = window.__ed;
@@ -1202,6 +1479,82 @@ test('browser: commitRegions\' regionType survives an undo/redo round-trip (seri
   });
   assert.equal(result.found, true);
   assert.equal(result.role, 'decorative');
+});
+
+/* ── objectselect click accuracy: the reference editor filters detected boxes by point-containment
+   (smallest first) and scopes its grabCut refine to that box, instead of flood-filling from the
+   exact clicked pixel with no idea what object is under it — that's what made canvasmith's version
+   grab the wrong region on a busy/nested image. Stub cv.wand/grabcut/detect so this is deterministic. */
+test('browser: selectObjectAt picks the smallest detected box containing the click and scopes grabCut to it', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const realCv = ed.cv;
+    const workRects = [];
+    ed.cv = {
+      wand: async () => [],   // force the grabCut fallback so `work` is observable
+      grabcut: async (img, seed, work) => { workRects.push(work); return [{ x: 5, y: 5 }, { x: 15, y: 5 }, { x: 15, y: 15 }]; },
+    };
+    // A small nested box (the "real" target) inside a big background box — both contain the click.
+    ed._objBoxes = [{ x: 0, y: 0, w: ed.W, h: ed.H }, { x: 40, y: 40, w: 20, h: 20 }];
+    ed._objRegion = { left: 0, top: 0, width: ed.W, height: ed.H };
+    const c = document.createElement('canvas'); c.width = ed.W; c.height = ed.H;
+    c.getContext('2d').fillStyle = '#888'; c.getContext('2d').fillRect(0, 0, ed.W, ed.H);
+    ed._objSrc = c;
+    const r = await ed.selectObjectAt({ x: 50, y: 50 });
+    ed.cv = realCv;
+    return { status: r.status, workRects, sel: ed.selection };
+  });
+  assert.equal(result.status, 'ok');
+  // work rect must be scoped small (the 20x20 nested box), not the full-canvas background box.
+  assert.ok(result.workRects[0].w < 40 && result.workRects[0].h < 40);
+  assert.equal(result.sel.kind, 'poly');
+});
+
+test('browser: re-clicking the same spot on objectselect cycles to the next larger nested candidate', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const realCv = ed.cv;
+    const works = [];
+    ed.cv = {
+      wand: async () => [],
+      grabcut: async (img, seed, work) => { works.push(work); return [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }]; },
+    };
+    ed._objBoxes = [{ x: 0, y: 0, w: ed.W, h: ed.H }, { x: 40, y: 40, w: 20, h: 20 }];
+    ed._objRegion = { left: 0, top: 0, width: ed.W, height: ed.H };
+    const c = document.createElement('canvas'); c.width = ed.W; c.height = ed.H;
+    ed._objSrc = c;
+    await ed.selectObjectAt({ x: 50, y: 50 }, { cycle: true });
+    await ed.selectObjectAt({ x: 50, y: 50 }, { cycle: true });   // same spot again → cycle to the bigger box
+    ed.cv = realCv;
+    return { firstSmall: works[0].w < 40, secondBig: works[1].w > 40 };
+  });
+  assert.equal(result.firstSmall, true);
+  assert.equal(result.secondBig, true);
+});
+
+test('browser: objectselect Shift-click accumulates a multipoly (no auto-union) and mergeObjectSelection unions it', async () => {
+  const result = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const realCv = ed.cv;
+    const polyA = [{ x: 10, y: 10 }, { x: 30, y: 10 }, { x: 30, y: 30 }, { x: 10, y: 30 }];
+    const polyB = [{ x: 40, y: 10 }, { x: 60, y: 10 }, { x: 60, y: 30 }, { x: 40, y: 30 }];
+    await ed._commitObjectPoly(polyA, {});
+    const afterFirst = { kind: ed.selection.kind, multiCount: ed.multiCount };
+    await ed._commitObjectPoly(polyB, { add: true });
+    const afterAdd = { kind: ed.selection.kind, multiCount: ed.multiCount, polyCount: ed.selection.polys.length };
+    ed.cv = { union: async (W, H, polys) => [polys[0].concat(polys[1])] };   // stubbed union of the two
+    const r = await ed.mergeObjectSelection();
+    ed.cv = realCv;
+    return { afterFirst, afterAdd, mergeStatus: r.status, afterMerge: { kind: ed.selection.kind, multiCount: ed.multiCount } };
+  });
+  assert.equal(result.afterFirst.kind, 'poly');
+  assert.equal(result.afterFirst.multiCount, 1);
+  // Shift-click add must NOT auto-union — stays a multipoly of 2 separate polys until Merge runs.
+  assert.equal(result.afterAdd.kind, 'multipoly');
+  assert.equal(result.afterAdd.multiCount, 2);
+  assert.equal(result.afterAdd.polyCount, 2);
+  assert.equal(result.mergeStatus, 'ok');
+  assert.equal(result.afterMerge.multiCount, 1);
 });
 
 test('browser: aiExtendBackground passes a real white=empty/black=filled gap mask and swaps only the bg layer', async () => {
@@ -1234,4 +1587,66 @@ test('browser: aiExtendBackground passes a real white=empty/black=filled gap mas
   assert.deepEqual(result.filled, [0, 0, 0]);        // black = real pixels, leave alone
   assert.deepEqual(result.empty, [255, 255, 255]);   // white = empty gap, the model may fill it
   assert.equal(result.bgSwapped, true);
+});
+
+/* ── objectselect keybindings: [ / ] tolerance scrub and Escape-to-deselect, matching the
+   reference editor's own bindings for this tool (installKeybindings.js already wires both
+   generically — these confirm they actually reach objectselect specifically). ──────────────── */
+test('browser: [ / ] scrubs tolerance while objectselect is active', async () => {
+  await page.evaluate(() => { window.__ed.setTool('objectselect'); window.__ed.setToolOptions({ tolerance: 32 }); });
+  await page.keyboard.press(']');
+  assert.equal(await page.evaluate(() => window.__ed.toolOpts.tolerance), 36);
+  await page.keyboard.press('[');
+  await page.keyboard.press('[');
+  assert.equal(await page.evaluate(() => window.__ed.toolOpts.tolerance), 28);
+});
+
+test('browser: Escape clears an objectselect selection', async () => {
+  await page.evaluate(() => {
+    const ed = window.__ed;
+    ed.setTool('objectselect');
+    ed.selection = { kind: 'rect', x: 10, y: 10, w: 50, h: 50 };
+    ed.multiCount = 1;
+    ed._emit('selection', ed.selection);
+  });
+  assert.ok(await page.evaluate(() => !!window.__ed.selection));
+  await page.keyboard.press('Escape');
+  const result = await page.evaluate(() => ({ sel: window.__ed.selection, multiCount: window.__ed.multiCount }));
+  assert.equal(result.sel, null);
+  assert.equal(result.multiCount, 0);   // clearSelection() resets multiCount too — see editor.js
+});
+
+/* ── objectselect hover/tool-switch cleanup: leaving the tool must drop hover state so a stale
+   in-flight hover RPC can't land after the fact and nothing keeps a preview alive with no tool
+   there to clear it (regression: setTool used to only ever ADD hover state, never remove it). ── */
+test('browser: switching away from objectselect clears hover point and candidate-cycle state', async () => {
+  const result = await page.evaluate(() => {
+    const ed = window.__ed;
+    ed.setTool('objectselect');
+    ed._hoverPt = { x: 10, y: 10 };
+    ed._objCycle = { x: 10, y: 10, i: 2 };
+    ed.setTool('select');
+    return { hoverPt: ed._hoverPt, objCycle: ed._objCycle };
+  });
+  assert.equal(result.hoverPt, null);
+  assert.equal(result.objCycle, null);
+});
+
+/* ── regression: a click landing on an already-cached hover-preview mask must still update
+   _lastWandSeed (selectSimilar's seed point) — _down used to only set it inside selectObjectAt,
+   which a cache-hit skips entirely, leaving Similar searching from a stale earlier click. ──────── */
+test('browser: clicking a cached hover-preview mask on objectselect still updates the Similar seed point', async () => {
+  const result = await page.evaluate(() => {
+    const ed = window.__ed;
+    ed.setTool('objectselect');
+    const key = ed._hoverCellKey({ x: 120, y: 80 });
+    ed._hoverCache.put(key, [{ x: 5, y: 5 }, { x: 15, y: 5 }, { x: 15, y: 15 }]);   // pre-seed the cache
+    ed._lastWandSeed = { x: 1, y: 1 };   // a stale earlier click
+    return key;
+  });
+  const canvasBox = await page.locator('#cv').boundingBox();
+  await page.mouse.click(canvasBox.x + 120, canvasBox.y + 80);
+  const seed = await page.evaluate(() => window.__ed._lastWandSeed);
+  assert.equal(seed.x, 120);
+  assert.equal(seed.y, 80);
 });

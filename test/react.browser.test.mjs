@@ -80,7 +80,11 @@ const ed = (fn, ...args) => page.evaluate(fn, ...args);
 /* ── tool rail: pen is a real, clickable tool (was previously in ALL_TOOLS but had no rail
    button at all — see the "Draw" GROUPS entry and the pen Icon added alongside the overlay work) */
 test('react: the Draw group\'s tool rail includes a working Pen button', async () => {
-  const penBtn = page.locator('button[title="Pen"], button:has-text("Pen")').first();
+  // The rail groups tools into flyout clusters (ports the vanilla demo's TOOLGROUPS) and shows a
+  // custom hover tooltip instead of a native title attribute, so data-tool is the stable selector
+  // — a loose :has-text("Pen") fallback would also match e.g. an "Open image…" button (the
+  // substring "pen" sits right inside "Open"), grabbing the wrong element via .first().
+  const penBtn = page.locator('button[data-tool="pen"]').first();
   assert.ok(await penBtn.count() > 0, 'a Pen tool button should exist somewhere in the tool rail');
   await penBtn.click();
   await page.waitForTimeout(100);
@@ -304,7 +308,7 @@ test('react: the zoom pill shows a live percentage and zoom in/out/fit buttons w
   await page.waitForTimeout(100);
   const afterIn = await ed(() => window.__mounted.editor().fc.getZoom());
   assert.ok(afterIn > 1);
-  await page.locator('.cm-zoom-pill button[title="Zoom out (-)"]').click();
+  await page.locator('.cm-zoom-pill button[title="Zoom out (−)"]').click();
   await page.waitForTimeout(100);
   const afterOut = await ed(() => window.__mounted.editor().fc.getZoom());
   assert.ok(afterOut < afterIn);
@@ -394,8 +398,10 @@ test('react: mounting with an `image` prop tracks it as an asset, and clicking t
   assert.equal(objsAfter, objsBefore + 1);
 });
 
-/* ── review-box overlay (guided convert): full product/logo/text/sticker/decorative taxonomy ── */
-test('react: the region-review select offers all 5 region types with REGION_COLOR-driven styling', async () => {
+/* ── region review (guided convert): region boxes are real Fabric objects (role:'region') on the
+   live canvas — same architecture as the vanilla demo — with a side panel offering the full
+   product/logo/text/sticker/decorative taxonomy for whichever region is currently selected. */
+test('react: the region-review side panel offers all 5 region types for the selected region', async () => {
   const aiTab = page.locator('button:has-text("AI")').first();
   await aiTab.click();
   await page.waitForTimeout(150);
@@ -403,16 +409,25 @@ test('react: the region-review select offers all 5 region types with REGION_COLO
   assert.ok(await manualBtn.count() > 0);
   await manualBtn.click();
   await page.waitForTimeout(200);
-  const options = await page.locator('.cm-review-box select option').allTextContents();
-  assert.deepEqual(options.sort(), ['Decorative', 'Logo', 'Product', 'Sticker', 'Text'].sort());
-  const style = await page.locator('.cm-review-box').first().getAttribute('style');
-  assert.ok(style.includes('border-color'));
+  // selectOneManually() both opens review AND adds+selects one region rect, so the "Selected
+  // region" sub-panel (with its 5 type buttons) should already be showing.
+  const regionCount = await ed(() => window.__mounted.editor().fc.getObjects().filter(o => o.role === 'region').length);
+  assert.equal(regionCount, 1);
+  const typeLabels = await page.locator('.cm-review-panel-body button').allTextContents();
+  ['Product', 'Logo', 'Text', 'Sticker', 'Decoration'].forEach(label => {
+    assert.ok(typeLabels.some(t => t.includes(label)), 'expected a type button for ' + label);
+  });
+  const regionColor = await ed(() => {
+    const o = window.__mounted.editor().fc.getObjects().find(x => x.role === 'region');
+    return o && o.stroke;
+  });
+  assert.ok(regionColor && regionColor.startsWith('#'), 'expected the region rect to be styled via REGION_COLOR');
 });
 
 /* ── Compare: side-by-side view of the first meaningful state vs. the live render — previously
    absent from the React shell entirely (demo-only). ────────────────────────────────────────── */
 test('react: the Compare button is disabled until the first edit, then opens a two-pane modal, Escape closes it', async () => {
-  assert.equal(await page.locator('button:has-text("Compare")').first().isDisabled(), true);
+  assert.equal(await page.locator('button[title="Compare with the first-loaded version"]').first().isDisabled(), true);
 
   await ed(() => window.__mounted.editor().setTool('rect'));
   const box = await canvasBox();
@@ -422,8 +437,8 @@ test('react: the Compare button is disabled until the first edit, then opens a t
   await page.mouse.up();
   await page.waitForTimeout(150);
 
-  assert.equal(await page.locator('button:has-text("Compare")').first().isEnabled(), true);
-  await page.locator('button:has-text("Compare")').first().click();
+  assert.equal(await page.locator('button[title="Compare with the first-loaded version"]').first().isEnabled(), true);
+  await page.locator('button[title="Compare with the first-loaded version"]').first().click();
   await page.waitForTimeout(150);
   assert.equal(await page.locator('.cm-compare-backdrop').count(), 1);
   const srcs = await page.locator('.cm-compare-pane img').evaluateAll(els => els.map(e => e.getAttribute('src')));
@@ -443,7 +458,7 @@ test('react: the Compare "Original" pane stays the first-committed snapshot acro
   await page.mouse.move(box.x + 120, box.y + 120, { steps: 3 });
   await page.mouse.up();
   await page.waitForTimeout(150);
-  await page.locator('button:has-text("Compare")').first().click();
+  await page.locator('button[title="Compare with the first-loaded version"]').first().click();
   await page.waitForTimeout(150);
   const firstOriginal = await page.locator('.cm-compare-pane').first().locator('img').getAttribute('src');
   const firstCurrent = await page.locator('.cm-compare-pane').nth(1).locator('img').getAttribute('src');
@@ -456,7 +471,7 @@ test('react: the Compare "Original" pane stays the first-committed snapshot acro
   await page.mouse.move(box.x + 260, box.y + 120, { steps: 3 });
   await page.mouse.up();
   await page.waitForTimeout(150);
-  await page.locator('button:has-text("Compare")').first().click();
+  await page.locator('button[title="Compare with the first-loaded version"]').first().click();
   await page.waitForTimeout(150);
   const secondOriginal = await page.locator('.cm-compare-pane').first().locator('img').getAttribute('src');
   const secondCurrent = await page.locator('.cm-compare-pane').nth(1).locator('img').getAttribute('src');

@@ -4,9 +4,12 @@
    top of the built-in light/dark palettes, which the toolbar toggle switches between. */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Editor, ALL_TOOLS, PAINT_TOOLS, SEL_TOOLS, SHAPE_TOOLS, GeminiProvider, installBridge, installDropImport, installKeybindings, selectionPolys, selectionToPath2D, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, STICKER_PALETTE, stickerSpec, REGION_COLOR } from '@canvasmith/core';
+import {
+  Editor, ALL_TOOLS, PAINT_TOOLS, SEL_TOOLS, SHAPE_TOOLS, GeminiProvider, installBridge, installDropImport, installKeybindings, TOOL_KEYS,
+  selectionPolys, selectionToPath2D, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, STICKER_PALETTE, stickerSpec, STICKER_DEFAULT_LABEL, REGION_COLOR, REGION_NAME, relLum, hexRgb,
+  startSelection, updateSelection, finalizeSelection, startPolyBuild, polyBuildAdd, polyBuildPreview, finishPolyBuild, snapToEdge,
+} from '@canvasmith/core';
 
-const REGION_TYPE_LABELS = { product: 'Product', logo: 'Logo', text: 'Text', sticker: 'Sticker', decorative: 'Decorative' };
 const CROP_RATIOS = [['Free', 0], ['Original', 'orig'], ['1:1', 1], ['4:5', 4 / 5], ['3:2', 3 / 2], ['16:9', 16 / 9], ['9:16', 9 / 16]];
 /* Standard canvas-size presets, grouped by use-case — width/height in px at a nominal
    72-96dpi-ish "design pixel" scale (matches how every web design tool treats these, not
@@ -108,6 +111,9 @@ const ICONS = {
   plus: <path d="M12 5v14M5 12h14" />,
   maximize: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
   search: <><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.35-4.35" /></>,
+  square: <path d="M4 4h16v16H4z" />,
+  check: <path d="M4 12l5 5L20 6" />,
+  trash: <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />,
 };
 
 function Icon({ name, size = 15, style }) {
@@ -123,16 +129,29 @@ function Icon({ name, size = 15, style }) {
 /* Renders a stickers.js shape spec (same 0-100 coordinate space addSticker() builds from) as a
    small preview SVG for the Stickers grid — one rendering path shared with the real Fabric object
    addSticker() places, so the preview always matches what clicking it actually adds. */
+function StickerShapeSVG({ spec, fill }) {
+  if (spec.kind === 'circle') return <circle cx={spec.cx} cy={spec.cy} r={spec.r} fill={fill} />;
+  if (spec.kind === 'rect') return <rect x={spec.x} y={spec.y} width={spec.w} height={spec.h} rx={spec.rx} fill={fill} />;
+  if (spec.kind === 'polygon') return <polygon points={spec.points} fill={fill} />;
+  if (spec.kind === 'path') return <path d={spec.d} fill={spec.stroke ? 'none' : fill} stroke={spec.stroke ? fill : 'none'} strokeWidth={spec.stroke ? 10 : 0} fillRule={spec.fillRule || 'nonzero'} />;
+  return null;
+}
 function StickerPreview({ shapeKey, size = 28 }) {
   const spec = stickerSpec(shapeKey);
   if (!spec) return null;
   const fill = STICKER_PALETTE[0];
-  let shape = null;
-  if (spec.kind === 'circle') shape = <circle cx={spec.cx} cy={spec.cy} r={spec.r} fill={fill} />;
-  else if (spec.kind === 'rect') shape = <rect x={spec.x} y={spec.y} width={spec.w} height={spec.h} rx={spec.rx} fill={fill} />;
-  else if (spec.kind === 'polygon') shape = <polygon points={spec.points} fill={fill} />;
-  else if (spec.kind === 'path') shape = <path d={spec.d} fill={spec.stroke ? 'none' : fill} stroke={spec.stroke ? fill : 'none'} strokeWidth={spec.stroke ? 10 : 0} fillRule={spec.fillRule || 'nonzero'} />;
-  return <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true">{shape}</svg>;
+  if (spec.kind === 'group') {
+    const baseSpec = stickerSpec(spec.shape);
+    if (!baseSpec) return null;
+    const ink = relLum(hexRgb(fill)) > 0.6 ? '#0c0c0e' : '#ffffff';
+    return (
+      <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true">
+        <StickerShapeSVG spec={baseSpec} fill={fill} />
+        <text x={50} y={50} fontFamily="system-ui, sans-serif" fontWeight={800} fontSize={STICKER_DEFAULT_LABEL.length > 4 ? 14 : 19} fill={ink} textAnchor="middle" dominantBaseline="central">{STICKER_DEFAULT_LABEL}</text>
+      </svg>
+    );
+  }
+  return <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true"><StickerShapeSVG spec={spec} fill={fill} /></svg>;
 }
 
 const GROUPS = [
@@ -148,6 +167,48 @@ const BLEND_MODES = [
   ['darken', 'Darken'], ['lighten', 'Lighten'], ['color-dodge', 'Dodge'], ['color-burn', 'Burn'],
   ['hard-light', 'Hard light'], ['soft-light', 'Soft light'], ['difference', 'Difference'],
   ['hue', 'Hue'], ['saturation', 'Saturation'], ['color', 'Color'], ['luminosity', 'Luminosity'],
+];
+
+/* Per-tool display names for the rail's tooltips/flyouts and the ⌘K palette — ported verbatim
+   from the vanilla demo's TOOL_LABELS so both shells describe each tool identically. */
+const TOOL_LABELS = {
+  select: 'Move / select', hand: 'Hand · pan', crop: 'Crop',
+  marquee: 'Rectangular marquee', 'marquee-ellipse': 'Elliptical marquee', lasso: 'Lasso (freehand)',
+  'lasso-poly': 'Polygonal lasso · click to add points', 'lasso-mag': 'Magnetic lasso · snaps to edges',
+  wand: 'Magic wand · click a colour region', objectselect: 'Object select', hoverselect: 'Hover select · preview on hover',
+  'objectselect-bbox': 'Object / magic select', magicwand: 'Magic wand · click an object to grab it',
+  heal: 'Spot heal', clone: 'Clone stamp', redeye: 'Red-eye',
+  brush: 'Brush', pencil: 'Pencil', eraser: 'Eraser',
+  bucket: 'Paint bucket', gradient: 'Gradient',
+  dodge: 'Dodge · lighten', burn: 'Burn · darken', sponge: 'Sponge · saturation',
+  rect: 'Rectangle', ellipse: 'Ellipse', line: 'Line', triangle: 'Triangle', polygon: 'Polygon', star: 'Star',
+  type: 'Type', eyedropper: 'Eyedropper', pen: 'Pen · vector path',
+  aiinsert: 'AI insert',
+};
+// Inverse of TOOL_KEYS (letter -> tool), so the rail's tooltip/flyout shortcut hint always
+// matches what installKeybindings actually honors — same one-source-of-truth contract as the
+// vanilla demo's own TOOL_SHORTCUT derivation.
+const TOOL_SHORTCUT = {};
+Object.entries(TOOL_KEYS).forEach(([key, id]) => { TOOL_SHORTCUT[id] = key.toUpperCase(); });
+
+/* Rail grouping: each entry is a set of sibling tools that share one rail slot — a single tool
+   renders as a plain button, 2+ render as a button (showing whichever sibling is active, or the
+   first) plus a caret that opens a hover flyout listing the rest. Ported verbatim from the vanilla
+   demo's TOOLGROUPS so both shells group/cycle tools identically. */
+const TOOLGROUPS = [
+  ['select', 'hand'],
+  ['marquee', 'marquee-ellipse', 'lasso', 'lasso-poly', 'lasso-mag', 'wand', 'objectselect-bbox'],
+  ['magicwand', 'objectselect', 'hoverselect'],
+  ['aiinsert'],
+  ['crop'],
+  ['eyedropper'],
+  ['heal', 'clone', 'redeye'],
+  ['brush', 'pencil', 'eraser'],
+  ['bucket', 'gradient'],
+  ['dodge', 'burn', 'sponge'],
+  ['pen'],
+  ['rect', 'ellipse', 'line', 'triangle', 'polygon', 'star'],
+  ['type'],
 ];
 
 const SEL_REASON_MSG = {
@@ -240,11 +301,21 @@ const CSS = `
 .cm-root[data-side-collapsed=true]{grid-template-columns:52px 220px 1fr 0px}
 .cm-root[data-left-collapsed=true][data-side-collapsed=true]{grid-template-columns:52px 0px 1fr 0px}
 .cm-top{grid-column:1/5;display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid var(--cm-line);background:var(--cm-panel)}
-.cm-rail{display:flex;flex-direction:column;gap:2px;padding:6px 4px;border-right:1px solid var(--cm-line);background:var(--cm-panel);overflow-y:auto}
-.cm-rail button{all:unset;cursor:pointer;text-align:center;display:flex;align-items:center;justify-content:center;padding:9px 0;border-radius:7px;color:var(--cm-dim)}
-.cm-rail button:hover{background:var(--cm-bg);color:var(--cm-ink)}
-.cm-rail button[data-on=true]{background:var(--cm-accent);color:var(--cm-accent-ink)}
-.cm-rail .cm-grp{font-size:8px;letter-spacing:.1em;text-transform:uppercase;color:var(--cm-dim);text-align:center;margin-top:8px}
+.cm-rail{display:flex;flex-direction:column;align-items:center;gap:3px;padding:10px 8px;border-right:1px solid var(--cm-line);background:var(--cm-panel);overflow-y:auto;overflow-x:visible;position:relative;z-index:10}
+.cm-rail-group{position:relative}
+.cm-rail-btn{all:unset;box-sizing:border-box;cursor:pointer;width:40px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;position:relative;color:var(--cm-dim);transition:background .12s,color .12s}
+.cm-rail-btn:hover{background:var(--cm-bg);color:var(--cm-ink)}
+.cm-rail-btn[data-on=true]{background:var(--cm-accent);color:var(--cm-accent-ink)}
+.cm-rail-caret{position:absolute;right:3px;bottom:3px;width:0;height:0;border-left:4px solid transparent;border-bottom:4px solid var(--cm-dim)}
+.cm-rail-btn[data-on=true] .cm-rail-caret{border-bottom-color:var(--cm-accent-ink)}
+.cm-rail-flyout{position:absolute;left:48px;top:0;z-index:60;min-width:194px;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:11px;padding:6px;box-shadow:0 24px 60px rgba(0,0,0,.45)}
+.cm-rail-flyout-item{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:7px;cursor:pointer;font-size:12.5px;color:var(--cm-ink)}
+.cm-rail-flyout-item:hover,.cm-rail-flyout-item[data-on=true]{background:var(--cm-bg)}
+.cm-rail-flyout-item svg{flex-shrink:0;color:var(--cm-dim)}
+.cm-rail-flyout-item[data-on=true] svg{color:var(--cm-accent)}
+.cm-rail-flyout-item .sc{margin-left:auto;font-size:10.5px;color:var(--cm-dim);font-family:"JetBrains Mono",ui-monospace,monospace}
+.cm-rail-tip{position:fixed;z-index:70;background:var(--cm-ink);color:var(--cm-panel);font-size:11.5px;font-weight:600;padding:5px 9px;border-radius:6px;pointer-events:none;white-space:nowrap;transform:translateY(-50%);box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.cm-rail-bottom{display:flex;flex-direction:column;align-items:center;gap:3px;margin-top:8px;padding-top:8px;border-top:1px solid var(--cm-line)}
 .cm-stage{position:relative;overflow:hidden;display:grid;place-items:center;background:var(--cm-stage)}
 .cm-left{border-right:1px solid var(--cm-line);background:var(--cm-panel);overflow-y:auto;overflow-x:hidden;padding:18px;transition:padding .15s}
 .cm-root[data-left-collapsed=true] .cm-left{padding:0;width:0}
@@ -256,14 +327,14 @@ const CSS = `
 .cm-tabs button:hover{background:var(--cm-bg)}
 .cm-tabs button[data-on=true]{background:var(--cm-bg);color:var(--cm-ink)}
 .cm-collapse-left{position:absolute;top:50%;left:272px;transform:translateY(-50%);width:22px;height:36px;border-radius:8px;
-  border:1px solid var(--cm-line);background:var(--cm-panel);color:var(--cm-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;transition:left .15s}
+  border:1px solid var(--cm-line);background:var(--cm-panel);color:var(--cm-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;transition:left .15s,color .12s,border-color .12s,background .12s}
 .cm-root[data-left-collapsed=true] .cm-collapse-left{left:52px}
-.cm-collapse-left:hover{color:var(--cm-ink);border-color:var(--cm-accent)}
+.cm-collapse-left:hover{color:#fff;border-color:var(--cm-accent);background:var(--cm-accent)}
 .cm-collapse-left[data-flip=true] svg{transform:rotate(180deg)}
 .cm-collapse{position:absolute;top:50%;right:289px;transform:translateY(-50%);width:22px;height:36px;border-radius:8px;
-  border:1px solid var(--cm-line);background:var(--cm-panel);color:var(--cm-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;transition:right .15s}
+  border:1px solid var(--cm-line);background:var(--cm-panel);color:var(--cm-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;transition:right .15s,color .12s,border-color .12s,background .12s}
 .cm-root[data-side-collapsed=true] .cm-collapse{right:0}
-.cm-collapse:hover{color:var(--cm-ink);border-color:var(--cm-accent)}
+.cm-collapse:hover{color:#fff;border-color:var(--cm-accent);background:var(--cm-accent)}
 .cm-collapse[data-flip=true] svg{transform:rotate(180deg)}
 .cm-align{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin:10px 0}
 .cm-align button{all:unset;cursor:pointer;display:flex;align-items:center;justify-content:center;height:28px;border-radius:7px;border:1px solid var(--cm-line);font-size:11px;color:var(--cm-ink)}
@@ -290,7 +361,8 @@ const CSS = `
 .cm-icon-btn:hover{border-color:var(--cm-accent)}
 .cm-icon-btn[data-active=true]{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent)}
 .cm-top input[type=range]{width:90px}.cm-top input[type=color]{width:26px;height:26px;border:none;background:none;cursor:pointer}
-.cm-zoom-pill{display:flex;align-items:center;gap:2px;padding:2px;border-radius:999px;background:var(--cm-bg);border:1px solid var(--cm-line)}
+.cm-zoom-pill{position:absolute;bottom:16px;right:16px;z-index:15;display:flex;align-items:center;gap:2px;padding:2px;border-radius:999px;background:var(--cm-bg);border:1px solid var(--cm-line);box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.cm-dim-badge{position:absolute;top:14px;left:14px;z-index:15;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:999px;padding:5px 11px;font-size:11px;font-weight:600;font-family:"JetBrains Mono",ui-monospace,monospace;color:var(--cm-dim);box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 4px 12px rgba(0,0,0,.35);pointer-events:none}
 .cm-cmdk-backdrop{position:fixed;inset:0;z-index:200;background:rgba(8,8,12,.5);display:flex;align-items:flex-start;justify-content:center;padding-top:14vh}
 .cm-cmdk-box{width:min(560px,92vw);max-height:min(60vh,420px);background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.45);overflow:hidden;display:flex;flex-direction:column}
 .cm-cmdk-search-row{display:flex;align-items:center;gap:9px;padding:12px 14px;border-bottom:1px solid var(--cm-line);flex:none;color:var(--cm-dim)}
@@ -323,22 +395,22 @@ const CSS = `
 .cm-ai-textarea{width:100%;box-sizing:border-box;background:var(--cm-bg);border:1px solid var(--cm-line);border-radius:12px;color:var(--cm-ink);padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical}
 .cm-btn-accent{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent)}
 .cm-btn-accent:hover{opacity:.92;border-color:var(--cm-accent)}
+.cm-btn-spin{display:inline-block;width:11px;height:11px;border-radius:50%;border:1.6px solid color-mix(in srgb,var(--cm-accent-ink) 35%,transparent);border-top-color:var(--cm-accent-ink);animation:cm-btn-spin .6s linear infinite;flex:none}
+@keyframes cm-btn-spin{to{transform:rotate(360deg)}}
 .cm-ai-suggestions{display:flex;flex-direction:column;gap:6px}
 .cm-chip{all:unset;cursor:pointer;display:flex;align-items:center;gap:7px;padding:7px 13px;border-radius:999px;border:1px solid var(--cm-line);font-size:12.5px;font-weight:500;color:var(--cm-ink)}
 .cm-chip:hover{border-color:var(--cm-accent)}
 .cm-chip[data-on=true]{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent);font-weight:600}
-.cm-review-overlay{position:absolute;inset:0;z-index:5}
-/* Per-type border/fill color comes from REGION_COLOR (editor.js) via an inline style on each box
-   below — not a CSS[data-type=] rule — so the 5 region types share one color source with
-   commitRegions' own REGION_ROLE mapping instead of duplicating the palette here. */
-.cm-review-box{position:absolute;border:2px dashed;border-radius:5px;cursor:move;box-sizing:border-box}
-.cm-review-tag{position:absolute;top:-24px;left:-2px;display:flex;align-items:center;gap:4px;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:6px;padding:2px 4px;box-shadow:0 2px 8px rgba(0,0,0,.3)}
-.cm-review-tag select{all:unset;font-size:10.5px;font-weight:600;color:var(--cm-ink);cursor:pointer;padding:1px 3px}
-.cm-review-tag button{all:unset;box-sizing:border-box;cursor:pointer;width:16px;height:16px;display:flex;align-items:center;justify-content:center;border-radius:4px;color:var(--cm-dim)}
-.cm-review-tag button:hover{background:var(--cm-bg);color:#e0607a}
-.cm-review-handle{position:absolute;width:9px;height:9px;background:var(--cm-accent);border:1.5px solid var(--cm-panel);border-radius:50%;right:-5px;bottom:-5px;cursor:nwse-resize}
-.cm-review-toolbar{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);z-index:6;display:flex;align-items:center;gap:8px;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:12px;padding:8px 10px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
-.cm-review-sep{width:1px;height:20px;background:var(--cm-line)}
+/* Region boxes themselves are real Fabric objects rendered by <canvas> (role:'region', styled via
+   REGION_COLOR inline — same as the vanilla demo) — this whole review panel is a side-panel
+   overlay, not a canvas-space div overlay, so it doesn't need any absolutely-positioned box/handle
+   CSS of its own. */
+.cm-review-head{display:flex;align-items:center;justify-content:space-between;padding-bottom:10px;margin-bottom:10px;border-bottom:1px solid var(--cm-line)}
+.cm-review-panel-body{display:flex;flex-direction:column;gap:8px}
+.cm-eyebrow{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--cm-dim)}
+.cm-col{display:flex;flex-direction:column}
+.cm-dim{color:var(--cm-dim)}
+.cm-text-input{width:100%;box-sizing:border-box;background:var(--cm-bg);border:1px solid var(--cm-line);border-radius:8px;color:var(--cm-ink);padding:7px 9px;font-size:12px;font-family:inherit}
 .cm-grp{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--cm-dim);margin:16px 0 6px;padding-top:12px;border-top:1px solid var(--cm-line)}
 .cm-grp:first-child{margin-top:0;padding-top:0;border-top:none}
 .cm-field-grid{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
@@ -350,12 +422,30 @@ const CSS = `
 .cm-row{display:flex;gap:6px}
 .cm-row .cm-btn{flex:1;justify-content:center}
 .cm-btn:disabled, .cm-icon-btn:disabled{opacity:.4;cursor:default;pointer-events:none}
+.cm-props-empty{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;padding:48px 16px;color:var(--cm-dim)}
+.cm-props-empty svg{color:var(--cm-line);margin-bottom:4px}
+.cm-props-empty .h{font-size:12.5px;font-weight:700;color:var(--cm-ink)}
+.cm-props-empty .d{font-size:11.5px;line-height:1.6;max-width:190px;color:var(--cm-dim)}
+input[type=range]{width:110px;min-width:0;-webkit-appearance:none;appearance:none;background:transparent;cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:5px;border-radius:999px;background:var(--cm-line)}
+input[type=range]::-moz-range-track{height:5px;border-radius:999px;background:var(--cm-line)}
+input[type=range]::-moz-range-progress{height:5px;border-radius:999px;background:var(--cm-accent)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:15px;height:15px;margin-top:-5px;border-radius:50%;background:var(--cm-ink);border:3px solid var(--cm-accent);transition:transform .1s}
+input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:var(--cm-ink);border:3px solid var(--cm-accent);transition:transform .1s}
+input[type=range]:hover::-webkit-slider-thumb, input[type=range]:active::-webkit-slider-thumb{transform:scale(1.12)}
+input[type=range]:hover::-moz-range-thumb, input[type=range]:active::-moz-range-thumb{transform:scale(1.12)}
+input[type=range]:focus-visible{outline:none}
+input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 3px color-mix(in srgb,var(--cm-accent) 35%,transparent)}
+input[type=range]:focus-visible::-moz-range-thumb{box-shadow:0 0 0 3px color-mix(in srgb,var(--cm-accent) 35%,transparent)}
 input[type=range]:disabled{accent-color:var(--cm-dim)}
+input[type=range]:disabled::-webkit-slider-thumb{background:var(--cm-dim);border-color:var(--cm-line)}
+input[type=range]:disabled::-moz-range-thumb{background:var(--cm-dim);border-color:var(--cm-line)}
 `;
 
 export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = null, ai = 'gemini', theme = {}, mode, bridge = true, openCvUrl, onReady, onExport }) {
   const canvasRef = useRef(null);
   const stageRef = useRef(null);
+  const rootRef = useRef(null);
   const edRef = useRef(null);
   const [tool, setTool] = useState('select');
   const [opts, setOpts] = useState({ size: 30, opacity: 1, color: '#ef6a2d', tolerance: 32, addMode: false, gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }], cropRatio: 0 });
@@ -423,6 +513,12 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [leftTab, setLeftTab] = useState('tool');
   const [snapOn, setSnapOn] = useState(true);
+  // Rail flyout: index into TOOLGROUPS of the group whose sub-tool list is currently open (-1 =
+  // none), plus the hover tooltip's text/anchor rect — ports the vanilla demo's flyoutGroup/showTip
+  // state onto React so the rail behaves identically (click a multi-tool group to open its flyout,
+  // hover any rail button to show its name + shortcut).
+  const [railFlyout, setRailFlyout] = useState(-1);
+  const [railTip, setRailTip] = useState(null);
   const [props, setProps] = useState(EMPTY_PROPS);
   const [selMsg, setSelMsg] = useState('');
   // AI insert-at-point: {pt (scene px), region, prompt, busy, msg} | null — opened by the
@@ -434,6 +530,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   // the vanilla demo does: busy from mouse:down until the next selection/hover/error settles it.
   const [selCount, setSelCount] = useState(0);
   const [objselectBusy, setObjselectBusy] = useState(false);
+  const [objCount, setObjCount] = useState(0);   // # of boxes ed.detectObjectBoxes() found, for the "N objects" readout
 
   useEffect(() => {
     // Google Fonts stylesheet for the typography panel's non-system fonts — added once even if
@@ -450,7 +547,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
 
   useEffect(() => {
     const f = fabric || (typeof window !== 'undefined' && window.fabric);
-    const ed = new Editor({ fabric: f, canvasEl: canvasRef.current, width, height, openCvUrl });
+    const ed = new Editor({ fabric: f, canvasEl: canvasRef.current, width, height, openCvUrl, voidColor: (THEMES[mode_] || THEMES.dark).stage });
     edRef.current = ed;
     // Overlay chrome: marching-ants selection outline, crop scrim/thirds/handles/dimension
     // readout, hover-select preview, pen in-progress path, and Figma-style smart guides while
@@ -495,7 +592,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           }
         }
       }
-      if (hoverPreview) {
+      if (hoverPreview && (ed.tool === 'objectselect' || ed.tool === 'hoverselect')) {
         const p = selectionToPath2D({ kind: 'poly', pts: hoverPreview.pts }, ed.W, ed.H);
         ctx.lineWidth = 1.2 / v[0];
         ctx.setLineDash([4 / v[0], 3 / v[0]]);
@@ -576,7 +673,13 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
       }, 400);
     };
     const offs = [
-      ed.on('tool', t => { setTool(t); if (t !== 'aiinsert') setAiInsert(null); if (t !== 'crop') ed.setToolOptions({ cropRatio: 0 }); refreshExtendBanner(); }),
+      ed.on('tool', t => {
+        setTool(t); if (t !== 'aiinsert') setAiInsert(null); if (t !== 'crop') ed.setToolOptions({ cropRatio: 0 }); refreshExtendBanner();
+        // Leaving objectselect/hoverselect must drop the last hover-preview outline — otherwise it
+        // stays drawn (see the hoverPreview render gate above) until another 'hover' event happens
+        // to land, which may never come once a different tool is active.
+        if (t !== 'objectselect' && t !== 'hoverselect') { hoverPreview = null; ed.fc.requestRenderAll(); }
+      }),
       ed.on('history', h => setHist(h)),
       ed.on('change', () => {
         thumbVerRef.current++; setLayers(ed.layers()); refreshProps();
@@ -592,6 +695,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
       ed.on('aiinsert', ({ pt, region }) => setAiInsert({ pt, region, prompt: '', busy: false, msg: '' })),
       ed.on('hover', h => { hoverPreview = h; ed.fc.requestRenderAll(); setObjselectBusy(false); }),
       ed.on('error', () => setObjselectBusy(false)),
+      ed.on('objcount', n => setObjCount(n)),
       ed.on('zoom', z => setZoomPct(Math.round((z || ed.fc.getZoom() || 1) * 100))),
       ed.on('resize', () => fitToScreen()),
     ];
@@ -616,7 +720,12 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     if (image) { ed.openImage(image); trackAsset(image, 'Opened image'); }
     setLayers(ed.layers());
     onReady && onReady(ed);
-    requestAnimationFrame(() => fitToScreen());
+    // The stage may not have its final layout box on the very first paint (fonts/panels still
+    // settling) — retry a couple of times, same as the reference editor's own tryFit pattern,
+    // until one of them finds a real clientWidth and fitToScreen can actually measure it.
+    fittedRef.current = false;
+    const tryFit = () => { if (!fittedRef.current && fitRef.current && fitRef.current()) fittedRef.current = true; };
+    tryFit(); setTimeout(tryFit, 60); setTimeout(tryFit, 220);
     const onWindowResize = () => setZoomPct(Math.round((ed.fc.getZoom() || 1) * 100));
     window.addEventListener('resize', onWindowResize);
     // +/-/0 zoom shortcuts — no modifier, same guard (not typing, no Cmd/Ctrl/Alt) as the vanilla
@@ -640,6 +749,47 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Keeps fc's DOM size in lockstep with the stage's box WITHOUT re-fitting the artboard on every
+  // pixel of a window/panel resize — only the very first successful measurement fits/centers;
+  // after that, a resize just grows/shrinks the canvas element and re-anchors the offset, same as
+  // the reference editor's own resize observer (a live re-fit on every resize would fight a user's
+  // manual zoom/pan).
+  useEffect(() => {
+    const stage = stageRef.current; if (!stage) return;
+    const ro = new ResizeObserver(() => {
+      const e = edRef.current; if (!e || !stage.clientWidth) return;
+      if (!fittedRef.current) { if (fitRef.current && fitRef.current()) fittedRef.current = true; return; }
+      e.fc.setDimensions({ width: stage.clientWidth, height: stage.clientHeight });
+      e.fc.calcOffset();
+      e.fc.requestRenderAll();
+    });
+    ro.observe(stage);
+    return () => ro.disconnect();
+  }, []);
+
+  // Keeps the off-canvas mask (see Editor's constructor) matching the stage colour when the
+  // light/dark toggle flips — otherwise the mask would show a mismatched patch around the
+  // artboard after a theme switch instead of blending into the new stage background.
+  useEffect(() => {
+    if (edRef.current) edRef.current.setVoidColor((THEMES[mode_] || THEMES.dark).stage);
+  }, [mode_]);
+
+  // Paints each range input's own filled-track background (webkit has no way to style the
+  // "already-scrubbed" portion of a native slider's track from CSS alone) — same paintRangeFill
+  // approach as the vanilla demo, scoped to this root and re-run on every render plus on live drag
+  // input (React's onChange alone would leave the fill stale mid-drag before the next commit).
+  useEffect(() => {
+    const root = rootRef.current; if (!root) return;
+    const paint = (el) => {
+      const min = +el.min || 0, max = +el.max || 100, val = +el.value;
+      const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
+      el.style.background = `linear-gradient(to right, var(--cm-accent) ${pct}%, var(--cm-line) ${pct}%)`;
+    };
+    root.querySelectorAll('input[type=range]').forEach(paint);
+    const onInput = (e) => { if (e.target.matches('input[type=range]')) paint(e.target); };
+    root.addEventListener('input', onInput);
+    return () => root.removeEventListener('input', onInput);
+  });
 
   const ed = () => edRef.current;
   const pick = useCallback((t) => ed().setTool(t), []);
@@ -649,18 +799,27 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const toggleSnap = () => { const on = !snapOn; setSnapOn(on); ed().setSnapEnabled(on); };
 
   // ── zoom pill + fit-to-screen — ports the vanilla demo's setZoomAtCenter/fitToScreen exactly.
-  // Fabric's canvas element keeps its DOM size fixed at W×H; "zoom" is purely the viewport
-  // transform's scale, applied around the stage's own center.
+  // Matches the reference editor's model: fc's own DOM size always fills the STAGE (grown/shrunk
+  // by the ResizeObserver below, independent of the artboard), and "zoom" is purely the viewport
+  // transform's scale/pan on top — the artboard is just a W×H region drawn somewhere inside that
+  // stage-sized canvas. fitToScreen resizes fc to the stage, THEN fits the artboard inside it.
   const [zoomPct, setZoomPct] = useState(100);
+  // Stage dim-badge (top-left "960×640" readout) — mirrors ed.W/ed.H, refreshed alongside the
+  // zoom pill (same refreshZoomUI call sites as the vanilla demo) since both only change together
+  // (zoom/fit) or on an explicit canvas-size/crop apply, never independently of a render pass.
+  const [dims, setDims] = useState({ w: width, h: height });
+  const fittedRef = useRef(false);
   const setZoomAtCenter = (z) => {
     z = Math.min(5, Math.max(0.1, z));
     const stage = stageRef.current; if (!stage) return;
     ed().fc.zoomToPoint({ x: stage.clientWidth / 2, y: stage.clientHeight / 2 }, z);
     ed().fc.requestRenderAll();
     setZoomPct(Math.round(z * 100));
+    setDims({ w: ed().W, h: ed().H });
   };
   const fitToScreen = useCallback(() => {
-    const e = edRef.current, stage = stageRef.current; if (!e || !stage) return;
+    const e = edRef.current, stage = stageRef.current; if (!e || !stage || !stage.clientWidth) return false;
+    e.fc.setDimensions({ width: stage.clientWidth, height: stage.clientHeight });
     const pad = 48;
     const availW = Math.max(50, stage.clientWidth - pad), availH = Math.max(50, stage.clientHeight - pad);
     const z = Math.min(2, Math.max(0.05, Math.min(availW / e.W, availH / e.H)));
@@ -669,9 +828,15 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     vpt[4] = (stage.clientWidth - e.W * z) / 2;
     vpt[5] = (stage.clientHeight - e.H * z) / 2;
     e.fc.setViewportTransform(vpt);
+    e.fc.calcOffset();
     e.fc.requestRenderAll();
     setZoomPct(Math.round(z * 100));
+    setDims({ w: e.W, h: e.H });
+    return true;
   }, []);
+  // Always points at the latest fitToScreen so the resize observer below reframes to current dims
+  // even though it's installed once on mount (same fitRef indirection as the reference editor).
+  const fitRef = useRef(null); fitRef.current = fitToScreen;
 
   // ── Properties panel actions — mirrors the vanilla demo's wiring 1:1 so both UIs behave the
   // same; refreshProps() (via the 'change'/'selection' events already wired above) keeps `props`
@@ -783,6 +948,12 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const expandSel = async () => showSelResult(await ed().expandSelection(6));
   const contractSel = async () => showSelResult(await ed().contractSelection(6));
   const selectSimilar = async () => showSelResult(await ed().selectSimilar());
+  // Objectselect's Shift-click/Add mode deliberately keeps every picked object as a separate
+  // polygon (see Editor#_commitObjectPoly) instead of auto-unioning — Merge is the explicit second
+  // step that combines them into clean outline(s), matching the reference editor's own two-step
+  // "pick several, then Merge" flow rather than silently merging on every click.
+  const mergeSel = async () => showSelResult(await ed().mergeObjectSelection());
+  const redetectObjects = async () => { setSelMsg('Detecting…'); await ed().detectObjectBoxes(); setSelMsg(''); };
   const recolorSel = (hex) => { const id = ed().recolorSelection(hex); setSelMsg(id ? '' : 'Make a selection first.'); };
   // Clip/unclip the active layer to the current selection — non-destructive: hides pixels
   // outside the selection via a clipPath, doesn't touch layer size/position/data. Needs BOTH an
@@ -867,6 +1038,10 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   };
   const fillWithImagePick = () => pickImage(src => ed().fillWithImage(src));
   const addImagePick = () => pickImage(src => { ed().addImage(src); trackAsset(src, 'Image'); });
+  /* "Open image…" starts a fresh document from the photo: the artboard resizes to match the
+     image (Editor#openImage's fit-artboard behavior), same as the vanilla demo's header button.
+     addImagePick above stays the "insert into the current artboard" tool. */
+  const openImagePick = () => pickImage(src => { ed().openImage(src); trackAsset(src, 'Opened image'); });
   // Vector export — exportSVG() returns a plain SVG string (not a dataURL, unlike PNG/JPEG), so
   // it needs wrapping in a Blob URL before it can be downloaded — same as the vanilla demo's own
   // svg.onclick. Previously absent from the React shell entirely (only PNG/JPG existed here).
@@ -876,41 +1051,334 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     if (onExport) onExport(url); else downloadURL(url, 'canvasmith.svg');
     URL.revokeObjectURL(url);
   };
-
-  // ── Convert to layers: guided review-box overlay over the canvas ────────────────────────
-  // review = { flat, boxes: [{id, type, x, y, w, h} in scene px] } | null. Box positions are
-  // stored in scene (artboard) px and converted to screen px at render time via the live
-  // viewportTransform, so panning/zooming while reviewing just re-renders in place — same
-  // contract as the vanilla demo's openReview/sceneToScreen.
-  const [review, setReview] = useState(null);
-  const [convertBusy, setConvertBusy] = useState(false);
-  const [convertMsg, setConvertMsg] = useState('');
+  // Scene (artboard) px -> screen px, via the live viewportTransform — shared by the region-review
+  // hover-preview SVG and the AI-insert popover positioning.
   const sceneToScreen = (pt) => {
     const v = ed().fc.viewportTransform;
     const canvasRect = canvasRef.current.getBoundingClientRect();
     const stageRect = stageRef.current.getBoundingClientRect();
     return { x: canvasRect.left - stageRect.left + pt.x * v[0] + v[4], y: canvasRect.top - stageRect.top + pt.y * v[3] + v[5] };
   };
-  const screenDeltaToScene = (dx, dy) => {
-    const v = ed().fc.viewportTransform;
-    return { dx: dx / v[0], dy: dy / v[3] };
+
+  // ── Convert to layers: guided review — REAL Fabric objects (role:'region') on the live canvas,
+  // same architecture as the vanilla demo (see apps/demo/index.html's openReview/renderReviewPanel
+  // block) instead of a parallel React-state box model. Fabric's own selection/move/resize/multi-
+  // select drives box editing and the "Selected region" panel reads the live active object — this
+  // is what buys back lasso/polygon/magnetic-lasso/object-click detection, rename, merge, and the
+  // live hover-cutout-preview for free from the shared selection.js primitives instead of
+  // reimplementing that geometry a second time in React state (which is what the old box-only
+  // model above did, and why it never grew past plain rectangles).
+  //
+  // reviewState: {flat, srcImg} | null — regions themselves are queried live off the canvas
+  // (regionObjects()) so there's exactly one source of truth, never a parallel array to drift.
+  const reviewStateRef = useRef(null);
+  const [reviewOn, setReviewOn] = useState(false);   // mirrors !!reviewStateRef.current for render gating
+  const [, bumpReview] = useState(0);
+  const forceReview = useCallback(() => bumpReview(n => n + 1), []);
+  const [convertBusy, setConvertBusy] = useState(false);
+  const [convertMsg, setConvertMsg] = useState('');
+  const [commitBusy, setCommitBusy] = useState(false);
+  const [regionDraw, setRegionDrawState] = useState(null);   // null | 'object' | 'box' | 'lasso' | 'polylasso' | 'maglasso'
+  const [objMulti, setObjMulti] = useState(false);
+  const [bgMode, setBgMode] = useState('auto');
+  const dragBuildRef = useRef(null);     // in-progress box/lasso drag: {mode, sel, shape}
+  const polyBuildStateRef = useRef(null);  // in-progress polygon/magnetic click-build: {pts:[]}
+  const polyDraftShapeRef = useRef(null);
+  const reviewHoverRef = useRef({ timer: null, key: null, cache: {} });
+
+  const regionObjects = () => ed().fc.getObjects().filter(o => o.role === 'region');
+  const activeRegion = () => { const o = ed().fc.getActiveObject(); return (reviewStateRef.current && o && o.role === 'region') ? o : null; };
+  const selectedRegions = () => {
+    const a = ed().fc.getActiveObject(); if (!a) return [];
+    return (a.type === 'activeSelection' ? a.getObjects() : [a]).filter(o => o.role === 'region');
   };
-  const openReview = (flat, regions) => {
-    const boxes = regions.map((rg, i) => {
-      const bbox = rg.bbox || {};
-      return {
-        id: 'rv' + i, type: REGION_COLOR[rg.type] ? rg.type : 'decorative',
-        x: (bbox.x || 0) / 100 * ed().W, y: (bbox.y || 0) / 100 * ed().H,
-        w: Math.max(12, (bbox.width || 0) / 100 * ed().W), h: Math.max(12, (bbox.height || 0) / 100 * ed().H),
-      };
+  const makeRegionRectObj = (rg) => {
+    const bbox = rg.bbox || {};
+    const x = (bbox.x || 0) / 100 * ed().W, y = (bbox.y || 0) / 100 * ed().H;
+    const w = Math.max(12, (bbox.width || 0) / 100 * ed().W), h = Math.max(12, (bbox.height || 0) / 100 * ed().H);
+    const rt = REGION_COLOR[rg.type] ? rg.type : 'decorative';
+    const fabric = ed().fabric;
+    const r = new fabric.Rect({
+      left: x, top: y, width: w, height: h,
+      fill: REGION_COLOR[rt] + '1f', stroke: REGION_COLOR[rt], strokeWidth: 2, strokeDashArray: [7, 5],
+      strokeUniform: true, rx: 3, ry: 3, cornerColor: REGION_COLOR[rt], cornerStyle: 'circle', transparentCorners: false, objectCaching: false,
     });
-    setReview({ flat, boxes });
-    ed().setTool('select');
+    r.set({ id: 'r' + Math.random().toString(36).slice(2, 9), role: 'region', regionType: rt, rcontent: rg.content || '', rstyle: rg.style || null, name: rg.name || REGION_NAME[rt], renamed: !!rg.name });
+    return r;
   };
-  const closeReview = () => { setReview(null); setConvertMsg(''); };
-  const addReviewBox = () => setReview(r => r && ({ ...r, boxes: [...r.boxes, { id: 'rv' + Date.now(), type: 'decorative', x: ed().W * 0.35, y: ed().H * 0.35, w: ed().W * 0.3, h: ed().H * 0.3 }] }));
-  const removeReviewBox = (id) => setReview(r => r && ({ ...r, boxes: r.boxes.filter(b => b.id !== id) }));
-  const setReviewBoxType = (id, type) => setReview(r => r && ({ ...r, boxes: r.boxes.map(b => b.id === id ? { ...b, type } : b) }));
+  const makeFreehandRegionObj = (pts, rg = {}) => {
+    const fabric = ed().fabric;
+    const poly = new fabric.Polygon(pts.map(p => ({ x: p.x, y: p.y })), {
+      fill: REGION_COLOR.product + '1f', stroke: REGION_COLOR.product, strokeWidth: 2, strokeDashArray: [7, 5],
+      strokeUniform: true, cornerColor: REGION_COLOR.product, cornerStyle: 'circle', transparentCorners: false, objectCaching: false,
+    });
+    poly.set({ id: 'r' + Math.random().toString(36).slice(2, 9), role: 'region', regionType: 'product', rcontent: rg.content || '', rstyle: rg.style || null, name: rg.name || REGION_NAME.product, renamed: !!rg.name, isFreehand: true });
+    return poly;
+  };
+  const regionBBox = (o) => {
+    o.setCoords();
+    const a = o.aCoords, xs = [a.tl.x, a.tr.x, a.bl.x, a.br.x], ys = [a.tl.y, a.tr.y, a.bl.y, a.br.y];
+    const x = Math.min(...xs), y = Math.min(...ys);
+    return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+  };
+  const regionAbsPolygon = (o) => {
+    if (!o.isFreehand || o.type !== 'polygon' || !o.points) return null;
+    const m = o.calcTransformMatrix(), off = o.pathOffset || { x: 0, y: 0 };
+    return o.points.map(p => ed().fabric.util.transformPoint({ x: p.x - off.x, y: p.y - off.y }, m));
+  };
+  const regionToPayload = (o) => {
+    const b = regionBBox(o);
+    return {
+      type: o.regionType, content: o.rcontent || '', style: o.rstyle || undefined, name: o.renamed ? o.name : undefined,
+      polygon: regionAbsPolygon(o) || undefined,
+      bbox: { x: b.x / ed().W * 100, y: b.y / ed().H * 100, width: b.w / ed().W * 100, height: b.h / ed().H * 100 },
+    };
+  };
+
+  const openReview = (flat, regions) => {
+    loadImgEl(flat).then(img => { if (reviewStateRef.current) reviewStateRef.current.srcImg = img; });
+    reviewStateRef.current = { flat, srcImg: null };
+    setRegionDrawState(null); setObjMulti(false);
+    ed().setTool('select');
+    regions.forEach(rg => ed().fc.add(makeRegionRectObj(rg)));
+    ed().fc.discardActiveObject();
+    ed().fc.renderAll();
+    setReviewOn(true);
+  };
+  const closeReview = (removeBoxes = true) => {
+    if (removeBoxes) regionObjects().forEach(o => ed().fc.remove(o));
+    ed().fc.discardActiveObject();
+    ed().fc.renderAll();
+    reviewStateRef.current = null;
+    setRegionDrawState(null); polyBuildStateRef.current = null; dragBuildRef.current = null;
+    setReviewOn(false);
+    setConvertMsg('');
+  };
+  const setRegionDrawMode = (mode) => {
+    if (polyBuildStateRef.current) finishPolyDrawLocal(true);
+    if (dragBuildRef.current) { if (dragBuildRef.current.shape) ed().fc.remove(dragBuildRef.current.shape); dragBuildRef.current = null; }
+    setRegionDrawState(mode);
+    if (mode) ed().fc.discardActiveObject();
+    if (mode === 'maglasso' && !ed()._edgeMap) ed().buildMagneticEdgeMap();
+    ed().fc.selection = !mode;
+    ed().fc.defaultCursor = mode ? 'crosshair' : 'default';
+    ed().fc.getObjects().forEach(o => { if (o.role === 'region') { o.selectable = !mode; o.evented = !mode; } });
+    ed().fc.renderAll();
+    forceReview();
+  };
+  const finishPolyDrawLocal = (cancel) => {
+    if (polyDraftShapeRef.current) { ed().fc.remove(polyDraftShapeRef.current); polyDraftShapeRef.current = null; }
+    const build = polyBuildStateRef.current; polyBuildStateRef.current = null;
+    const wasDrawing = regionDraw === 'polylasso' || regionDraw === 'maglasso';
+    if (!cancel && build) {
+      const sel = finishPolyBuild(build);
+      if (sel) { const region = makeFreehandRegionObj(sel.pts); ed().fc.add(region); ed().fc.setActiveObject(region); }
+    }
+    if (wasDrawing) { setRegionDrawMode(null); return; }
+    ed().fc.renderAll();
+    forceReview();
+  };
+  const snapToEdgePt = (pt) => (ed()._edgeMap ? snapToEdge(ed()._edgeMap, pt) : pt);
+  const reviewCanvasDown = (pt) => {
+    if (!reviewStateRef.current || !regionDraw) return;
+    if (regionDraw === 'object') {
+      if (!reviewStateRef.current.srcImg) return;
+      setConvertMsg('');
+      Promise.resolve(ed().objectPickInImage(reviewStateRef.current.srcImg, pt, ed().toolOpts.tolerance)).then(poly => {
+        if (!poly) {
+          // Wand + the box-seeded GrabCut fallback (editor.js#objectPickInImage) both failed to find
+          // anything at this point — tell the user instead of leaving the click looking like a no-op,
+          // which previously left no signal at all that anything had (or hadn't) happened.
+          setConvertMsg('No object found here — try again or draw a box.');
+          return;
+        }
+        const region = makeFreehandRegionObj(poly);
+        ed().fc.add(region); ed().fc.setActiveObject(region); ed().fc.renderAll();
+        if (!objMulti) { setRegionDrawMode(null); }
+        else {
+          const n = regionObjects().filter(o => o.type === 'polygon').length;
+          setConvertMsg('Object added (' + n + ') · click more, or Merge');
+          forceReview();
+        }
+      });
+      return;
+    }
+    if (regionDraw === 'box' || regionDraw === 'lasso') {
+      dragBuildRef.current = { mode: regionDraw, sel: startSelection(regionDraw === 'box' ? 'marquee' : 'lasso', pt), shape: null };
+      return;
+    }
+    if (regionDraw === 'polylasso' || regionDraw === 'maglasso') {
+      const p = regionDraw === 'maglasso' ? snapToEdgePt(pt) : pt;
+      if (!polyBuildStateRef.current) polyBuildStateRef.current = startPolyBuild();
+      const next = polyBuildAdd(polyBuildStateRef.current, p);
+      if (next.closed) { polyBuildStateRef.current = next; finishPolyDrawLocal(false); }
+      else { polyBuildStateRef.current = next; forceReview(); }
+    }
+  };
+  const reviewCanvasMove = (pt) => {
+    if (!reviewStateRef.current) return;
+    const fc = ed().fc, fabric = ed().fabric;
+    if (regionDraw === 'box' || regionDraw === 'lasso') {
+      const d = dragBuildRef.current; if (!d) return;
+      updateSelection(d.sel, pt);
+      if (d.shape) fc.remove(d.shape);
+      const s = d.sel;
+      d.shape = s.kind === 'poly'
+        ? new fabric.Polyline(s.pts, { role: 'draft', excludeFromExport: true, fill: REGION_COLOR.product + '19', stroke: REGION_COLOR.product, strokeWidth: 2, strokeDashArray: [6, 4], strokeUniform: true, selectable: false, evented: false })
+        : new fabric.Rect({ role: 'draft', excludeFromExport: true, left: s.x, top: s.y, width: s.w, height: s.h, fill: REGION_COLOR.product + '19', stroke: REGION_COLOR.product, strokeWidth: 2, strokeDashArray: [6, 4], strokeUniform: true, selectable: false, evented: false });
+      fc.add(d.shape);
+      fc.requestRenderAll();
+      return;
+    }
+    if ((regionDraw === 'polylasso' || regionDraw === 'maglasso') && polyBuildStateRef.current) {
+      const p = regionDraw === 'maglasso' ? snapToEdgePt(pt) : pt;
+      const preview = polyBuildPreview(polyBuildStateRef.current, p);
+      if (polyDraftShapeRef.current) fc.remove(polyDraftShapeRef.current);
+      polyDraftShapeRef.current = new fabric.Polyline(preview.pts, { role: 'draft', excludeFromExport: true, fill: 'transparent', stroke: REGION_COLOR.product, strokeWidth: 2, strokeDashArray: [6, 4], strokeUniform: true, selectable: false, evented: false });
+      fc.add(polyDraftShapeRef.current);
+      fc.requestRenderAll();
+      return;
+    }
+    if (!regionDraw) reviewHoverMove(pt);
+  };
+  const reviewCanvasUp = () => {
+    if (!reviewStateRef.current || !(regionDraw === 'box' || regionDraw === 'lasso') || !dragBuildRef.current) return;
+    const fc = ed().fc, d = dragBuildRef.current;
+    if (d.shape) fc.remove(d.shape);
+    const sel = finalizeSelection(d.sel);
+    dragBuildRef.current = null;
+    if (sel) {
+      const region = sel.kind === 'poly' ? makeFreehandRegionObj(sel.pts) : makeRegionRectObj({ type: 'product', bbox: { x: sel.x / ed().W * 100, y: sel.y / ed().H * 100, width: sel.w / ed().W * 100, height: sel.h / ed().H * 100 } });
+      fc.add(region); fc.setActiveObject(region);
+    }
+    setRegionDrawMode(null);
+  };
+  // Live cutout preview: rest the cursor on a region box to see the exact silhouette Create/
+  // Extract will cut (ed().cutoutRegion — same call both use). Debounced + cached by box id +
+  // rounded bbox; skips polygon regions (already showing their exact traced shape) and single-
+  // flights so overlapping mouse moves never stack concurrent cv calls — mirrors ditto's own
+  // reviewRegionAt/computeReviewMask (reviewHoverBusyRef).
+  const [reviewHoverPoly, setReviewHoverPoly] = useState(null);
+  const reviewRegionAt = (pt) => {
+    let best = null;
+    regionObjects().forEach(o => {
+      if (o.type === 'polygon') return;
+      const b = regionBBox(o);
+      if (pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h && (!best || b.w * b.h < best.b.w * best.b.h)) best = { o, b };
+    });
+    return best;
+  };
+  const reviewHoverMove = (pt) => {
+    const hit = reviewRegionAt(pt);
+    const H = reviewHoverRef.current;
+    if (!hit) { clearTimeout(H.timer); if (H.key) { H.key = null; setReviewHoverPoly(null); } return; }
+    const key = hit.o.id + '_' + Math.round(hit.b.x) + '_' + Math.round(hit.b.y) + '_' + Math.round(hit.b.w) + '_' + Math.round(hit.b.h) + '_' + bgMode;
+    clearTimeout(H.timer);
+    const cached = H.cache[key];
+    if (cached) { H.key = key; setReviewHoverPoly(cached); return; }
+    H.timer = setTimeout(async () => {
+      if (H.busy || !reviewStateRef.current || !reviewStateRef.current.srcImg) return;
+      H.busy = true;
+      try {
+        const poly = await ed().cutoutRegion(reviewStateRef.current.srcImg, hit.b, bgMode);
+        if (poly && poly.length >= 3) { H.cache[key] = poly; H.key = key; setReviewHoverPoly(poly); }
+      } finally { H.busy = false; }
+    }, 160);
+  };
+  const hideReviewHover = () => { const H = reviewHoverRef.current; clearTimeout(H.timer); H.key = null; setReviewHoverPoly(null); };
+  const loadImgEl = (src) => new Promise(res => { const img = new Image(); img.onload = () => res(img); img.src = src; });
+
+  const mergeSelectedRegions = async () => {
+    const fc = ed().fc, fabric = ed().fabric;
+    const items = selectedRegions(); if (items.length < 2) return;
+    const first = items[0];
+    const hasPoly = items.some(o => o.type === 'polygon');
+    let mergedPolys = null;
+    if (hasPoly && ed().cv) {
+      try {
+        const polys = items.map(o => {
+          if (o.type === 'polygon') { const m = o.calcTransformMatrix(), off = o.pathOffset || { x: 0, y: 0 }; return o.points.map(p => fabric.util.transformPoint(new fabric.Point(p.x - off.x, p.y - off.y), m)); }
+          const b = regionBBox(o); return [{ x: b.x, y: b.y }, { x: b.x + b.w, y: b.y }, { x: b.x + b.w, y: b.y + b.h }, { x: b.x, y: b.y + b.h }];
+        });
+        mergedPolys = await ed().cv.union(ed().W, ed().H, polys);
+      } catch (e) { mergedPolys = null; }
+    }
+    fc.discardActiveObject();
+    items.forEach(o => fc.remove(o));
+    if (mergedPolys && mergedPolys.length) {
+      mergedPolys.forEach((pl, i) => {
+        const r = makeFreehandRegionObj(pl);
+        r.set({ regionType: first.regionType, rstyle: first.rstyle || null, fill: REGION_COLOR[first.regionType] + '1f', stroke: REGION_COLOR[first.regionType], name: first.renamed ? first.name : REGION_NAME[first.regionType], renamed: first.renamed });
+        fc.add(r); if (i === 0) fc.setActiveObject(r);
+      });
+    } else {
+      let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+      items.forEach(o => { const b = regionBBox(o); x1 = Math.min(x1, b.x); y1 = Math.min(y1, b.y); x2 = Math.max(x2, b.x + b.w); y2 = Math.max(y2, b.y + b.h); });
+      const merged = makeRegionRectObj({ type: first.regionType, name: first.renamed ? first.name : undefined, style: first.rstyle || undefined, bbox: { x: x1 / ed().W * 100, y: y1 / ed().H * 100, width: (x2 - x1) / ed().W * 100, height: (y2 - y1) / ed().H * 100 } });
+      fc.add(merged); fc.setActiveObject(merged);
+    }
+    fc.renderAll();
+    forceReview();
+  };
+  const mergeObjectRegions = async () => {
+    const items = regionObjects().filter(o => o.type === 'polygon');
+    if (items.length < 2) return;
+    const fc = ed().fc, fabric = ed().fabric;
+    fc.discardActiveObject();
+    fc.setActiveObject(new fabric.ActiveSelection(items, { canvas: fc }));
+    await mergeSelectedRegions();
+  };
+  const renameActiveRegion = (name) => {
+    const o = activeRegion(); if (!o) return;
+    o.set({ name, renamed: !!(name && name.trim()) });
+    forceReview();
+  };
+  const setActiveRegionType = (t) => {
+    const o = activeRegion(); if (!o) return;
+    o.set({ regionType: t, stroke: REGION_COLOR[t], fill: REGION_COLOR[t] + '1f', cornerColor: REGION_COLOR[t] });
+    if (!o.renamed) o.set('name', REGION_NAME[t]);
+    ed().fc.renderAll();
+    forceReview();
+  };
+  const removeActiveRegion = () => {
+    const o = activeRegion(); if (!o) return;
+    ed().fc.remove(o); ed().fc.discardActiveObject(); ed().fc.renderAll();
+    forceReview();
+  };
+  const [extractBusy, setExtractBusy] = useState(false);
+  const extractActiveRegion = async () => {
+    const regs = selectedRegions();
+    if (regs.length !== 1 || !reviewStateRef.current || extractBusy) return;
+    const o = regs[0];
+    setExtractBusy(true);
+    try {
+      const r = await ed().extractRegion(reviewStateRef.current.flat, regionToPayload(o), bgMode);
+      if (r.status === 'ok') { ed().fc.remove(o); ed().fc.renderAll(); if (!regionObjects().length) closeReview(false); }
+    } finally {
+      setExtractBusy(false);
+      forceReview();
+    }
+  };
+  const [autodetectBusy, setAutodetectBusy] = useState(false);
+  const autoDetectRegions = async () => {
+    if (!reviewStateRef.current) return;
+    setAutodetectBusy(true);
+    try {
+      const r = await ed().detectObjects({ text: true });
+      if (r.status === 'ok') {
+        const { boxes, textBoxes } = r.result;
+        const covered = (t, o) => { const ix = Math.max(0, Math.min(t.x + t.w, o.x + o.w) - Math.max(t.x, o.x)), iy = Math.max(0, Math.min(t.y + t.h, o.y + o.h) - Math.max(t.y, o.y)); return (ix * iy) >= 0.7 * (t.w * t.h); };
+        const txt = (textBoxes || []).filter(t => !boxes.some(o => covered(t, o)));
+        const add = (b, type) => ed().fc.add(makeRegionRectObj({ type, bbox: { x: b.x / ed().W * 100, y: b.y / ed().H * 100, width: b.w / ed().W * 100, height: b.h / ed().H * 100 } }));
+        boxes.forEach(b => add(b, 'product'));
+        txt.forEach(b => add(b, 'text'));
+        ed().fc.renderAll();
+      }
+    } finally {
+      setAutodetectBusy(false);
+      forceReview();
+    }
+  };
   const detectAndConvert = async () => {
     if (needKey) { setSideTab('ai'); return; }
     setConvertBusy(true);
@@ -928,52 +1396,60 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
       setConvertBusy(false);
     }
   };
-  const selectOneManually = () => { openReview(ed().exportPNG(), []); addReviewBox(); };
+  const selectOneManually = () => {
+    openReview(ed().exportPNG(), []);
+    const r = makeRegionRectObj({ type: 'product', bbox: { x: 38, y: 42, width: 24, height: 16 } });
+    ed().fc.add(r); ed().fc.setActiveObject(r); ed().fc.renderAll();
+  };
   const commitReview = async () => {
-    if (!review || !review.boxes.length) { closeReview(); return; }
-    const regions = review.boxes.map(b => ({
-      type: b.type,
-      bbox: { x: b.x / ed().W * 100, y: b.y / ed().H * 100, width: b.w / ed().W * 100, height: b.h / ed().H * 100 },
-    }));
-    const flat = review.flat;
-    closeReview();
-    await ed().commitRegions(flat, regions);
+    if (!reviewStateRef.current || commitBusy) return;
+    const regs = regionObjects();
+    if (!regs.length) { closeReview(); return; }
+    const regions = regs.map(regionToPayload);
+    const flat = reviewStateRef.current.flat;
+    // commitRegions runs real per-region CV work (grabCut cutouts) and can take a few seconds —
+    // keep the review overlay up with a busy/spinner state INSTEAD of closing it immediately, so
+    // the user gets feedback instead of a canvas that looks frozen while layers build underneath.
+    setCommitBusy(true);
+    try {
+      await ed().commitRegions(flat, regions, bgMode);
+    } finally {
+      setCommitBusy(false);
+      closeReview(true);
+    }
   };
-  const reviewDragRef = useRef(null);
-  const onReviewBoxMouseDown = (e, box, mode) => {
-    e.preventDefault();
-    reviewDragRef.current = { id: box.id, mode, lastX: e.clientX, lastY: e.clientY };
-  };
+  // Wire Fabric canvas events for the whole review session — mirrors the demo's ed.fc.on(...)
+  // wiring, scoped to the review lifetime via reviewOn.
   useEffect(() => {
-    const onMove = (e) => {
-      const d = reviewDragRef.current; if (!d) return;
-      const dx = e.clientX - d.lastX, dy = e.clientY - d.lastY;
-      d.lastX = e.clientX; d.lastY = e.clientY;
-      const { dx: sdx, dy: sdy } = screenDeltaToScene(dx, dy);
-      setReview(r => {
-        if (!r) return r;
-        return { ...r, boxes: r.boxes.map(b => {
-          if (b.id !== d.id) return b;
-          return d.mode === 'move' ? { ...b, x: b.x + sdx, y: b.y + sdy } : { ...b, w: Math.max(12, b.w + sdx), h: Math.max(12, b.h + sdy) };
-        }) };
-      });
+    if (!reviewOn) return;
+    const fc = ed().fc;
+    const onDown = (opt) => reviewCanvasDown(fc.getPointer(opt.e));
+    const onMoveEvt = (opt) => reviewCanvasMove(fc.getPointer(opt.e));
+    const onUp = () => reviewCanvasUp();
+    const onSel = () => forceReview();
+    fc.on('mouse:down', onDown);
+    fc.on('mouse:move', onMoveEvt);
+    fc.on('mouse:up', onUp);
+    fc.on('selection:created', onSel);
+    fc.on('selection:updated', onSel);
+    fc.on('selection:cleared', onSel);
+    fc.on('object:modified', onSel);
+    const onKey = (e) => {
+      if (e.key === 'Enter' && (regionDraw === 'polylasso' || regionDraw === 'maglasso') && polyBuildStateRef.current) { e.preventDefault(); finishPolyDrawLocal(false); }
+      else if (e.key === 'Escape') { e.preventDefault(); if (commitBusy) return; if (regionDraw) setRegionDrawMode(null); else closeReview(); }
     };
-    const onUp = () => { reviewDragRef.current = null; };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    return () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  // Re-render box screen positions on pan/zoom/resize — box state itself (scene px) is unchanged.
-  const [, bumpReview] = useState(0);
-  useEffect(() => {
-    if (!review) return;
-    const off = ed().on('zoom', () => bumpReview(n => n + 1));
-    const onResize = () => bumpReview(n => n + 1);
+    document.addEventListener('keydown', onKey);
+    const offZoom = ed().on('zoom', () => { hideReviewHover(); forceReview(); });
+    const onResize = () => forceReview();
     window.addEventListener('resize', onResize);
-    return () => { off(); window.removeEventListener('resize', onResize); };
+    return () => {
+      fc.off('mouse:down', onDown); fc.off('mouse:move', onMoveEvt); fc.off('mouse:up', onUp);
+      fc.off('selection:created', onSel); fc.off('selection:updated', onSel); fc.off('selection:cleared', onSel); fc.off('object:modified', onSel);
+      document.removeEventListener('keydown', onKey);
+      offZoom(); window.removeEventListener('resize', onResize);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [review]);
+  }, [reviewOn, regionDraw, objMulti, commitBusy]);
   // Re-render the AI-insert popover's screen position on pan/zoom/resize — same contract as review.
   const [, bumpAiInsert] = useState(0);
   useEffect(() => {
@@ -1056,7 +1532,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const style = Object.fromEntries(Object.entries({ ...palette, 'accent-ink': palette.accentInk, ...theme })
     .filter(([k]) => k !== 'accentInk').map(([k, v]) => ['--cm-' + k, v]));
   return (
-    <div className="cm-root" style={style} data-cm-mode={mode_}>
+    <div className="cm-root" ref={rootRef} style={style} data-cm-mode={mode_}>
       <style>{CSS}</style>
       <svg width="0" height="0" style={{ position: 'absolute' }}>
         <defs><linearGradient id="cm-grad-icon" x1="0" y1="0" x2="1" y2="1">
@@ -1064,14 +1540,23 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
         </linearGradient></defs>
       </svg>
       <div className="cm-top">
-        <strong style={{ fontSize: 13 }}>Canvasmith</strong>
-        <button className="cm-btn" disabled={hist.past < 2} onClick={() => ed().undo()}><Icon name="undo" /> Undo</button>
-        <button className="cm-btn" disabled={!hist.future} onClick={() => ed().redo()}><Icon name="redo" /> Redo</button>
+        <strong style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span style={{ width: 8, height: 8, borderRadius: 2.5, background: 'var(--cm-accent)', boxShadow: '0 0 0 3px color-mix(in srgb, var(--cm-accent) 18%, transparent)' }} />
+          Canvasmith
+        </strong>
+        <span className="cm-note" title="Every control on this page is a public Editor API call — no framework, no build step." style={{ margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>React shell on the headless core</span>
+        <button className="cm-btn" title="Open image…" onClick={openImagePick}><Icon name="duplicate" size={13} /> Open image…</button>
         <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
-        <label>Size <input type="range" min="2" max="220" value={opts.size} onChange={e => ed().setToolOptions({ size: +e.target.value })} /></label>
-        <label>Opacity <input type="range" min="0.05" max="1" step="0.05" value={opts.opacity} onChange={e => ed().setToolOptions({ opacity: +e.target.value })} /></label>
+        <button className="cm-icon-btn" title="Undo" disabled={hist.past < 2} onClick={() => ed().undo()}><Icon name="undo" size={14} /></button>
+        <button className="cm-icon-btn" title="Redo" disabled={!hist.future} onClick={() => ed().redo()}><Icon name="redo" size={14} /></button>
+        <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
         <input type="color" value={opts.color} onChange={e => ed().setToolOptions({ color: e.target.value, fill: e.target.value })} title="Colour" />
         {tool === 'crop' && <button className="cm-btn" onClick={() => ed().applyCrop()}>✓ Apply crop</button>}
+        <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
+        <button className="cm-btn" title="Search tools & actions (⌘K)" onClick={openCmdk}>
+          <Icon name="search" size={13} /><span style={{ color: 'var(--cm-dim)', fontSize: 11.5 }}>Search</span><span className="cm-tag mono" style={{ fontSize: 9.5 }}>⌘K</span>
+        </button>
+        <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
         <span style={{ position: 'relative' }}>
           <button className="cm-btn" onClick={openCanvasSize}>Canvas size</button>
           {csOpen && (
@@ -1118,32 +1603,71 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           )}
         </span>
         <span style={{ flex: 1 }} />
-        <div className="cm-zoom-pill">
-          <button className="cm-icon-btn" title="Zoom out (-)" onClick={() => setZoomAtCenter(ed().fc.getZoom() * 0.83)}><Icon name="minus" size={13} /></button>
-          <button className="cm-btn" style={{ minWidth: 44, justifyContent: 'center' }} title="Fit to screen (0)" onClick={fitToScreen}>{zoomPct}%</button>
-          <button className="cm-icon-btn" title="Zoom in (+)" onClick={() => setZoomAtCenter(ed().fc.getZoom() * 1.2)}><Icon name="plus" size={13} /></button>
-          <button className="cm-icon-btn" title="Fit to screen (0)" onClick={fitToScreen}><Icon name="maximize" size={13} /></button>
-        </div>
-        <button className="cm-btn" disabled={!compareReady} title="Compare with the first-loaded version" onClick={openCompare}>
-          <Icon name="search" size={13} />Compare
-        </button>
         <button className="cm-icon-btn" title={mode_ === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} onClick={() => setMode(mode_ === 'dark' ? 'light' : 'dark')}>
           <Icon name={mode_ === 'dark' ? 'sun' : 'moon'} />
         </button>
-        <button className="cm-btn" onClick={() => { const u = ed().exportPNG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.png'); }}>⬇ PNG</button>
-        <button className="cm-btn" onClick={() => { const u = ed().exportJPEG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.jpg'); }}>⬇ JPG</button>
+        <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
+        <button className="cm-icon-btn" disabled={!compareReady} title="Compare with the first-loaded version" onClick={openCompare}>
+          <Icon name="search" size={13} />
+        </button>
+        <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
         <button className="cm-btn" onClick={exportSvg}>⬇ SVG</button>
+        <button className="cm-btn" onClick={() => { const u = ed().exportJPEG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.jpg'); }}>⬇ JPG</button>
+        <button className="cm-btn cm-btn-accent" onClick={() => { const u = ed().exportPNG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.png'); }}>⬇ PNG</button>
       </div>
-      <div className="cm-rail">
-        {GROUPS.map(g => (
-          <React.Fragment key={g.label}>
-            <div className="cm-grp">{g.label}</div>
-            {g.tools.map(([id, label]) => (
-              <button key={id} data-on={tool === id} title={label} onClick={() => pick(id)}><Icon name={id} /></button>
-            ))}
-          </React.Fragment>
-        ))}
+      <div className="cm-rail" onMouseLeave={() => setRailTip(null)}>
+        {TOOLGROUPS.map((ids, gi) => {
+          const activeId = ids.find(id => id === tool);
+          const shownId = activeId || ids[0];
+          const shownLabel = (TOOL_LABELS[shownId] || shownId) + (TOOL_SHORTCUT[shownId] ? '  (' + TOOL_SHORTCUT[shownId] + ')' : '');
+          return (
+            <div className="cm-rail-group" key={ids[0]}>
+              <button
+                className="cm-rail-btn"
+                data-on={!!activeId}
+                data-tool={shownId}
+                onMouseEnter={(e) => setRailTip({ text: shownLabel, rect: e.currentTarget.getBoundingClientRect() })}
+                onMouseLeave={() => setRailTip(null)}
+                onClick={() => { setRailTip(null); pick(shownId); setRailFlyout(f => (ids.length > 1 ? (f === gi ? -1 : gi) : -1)); }}
+              >
+                <Icon name={shownId} size={18} />
+                {ids.length > 1 && <span className="cm-rail-caret" />}
+              </button>
+              {railFlyout === gi && (
+                <div className="cm-rail-flyout" onMouseLeave={() => setRailFlyout(-1)}>
+                  {ids.map(id => (
+                    <div key={id} className="cm-rail-flyout-item" data-on={id === tool} data-tool={id}
+                      onClick={() => { pick(id); setRailFlyout(-1); }}>
+                      <Icon name={id} size={15} />
+                      <span style={{ flex: 1 }}>{TOOL_LABELS[id] || id}</span>
+                      {TOOL_SHORTCUT[id] && <span className="sc">{TOOL_SHORTCUT[id]}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        <div className="cm-rail-bottom">
+          <button className="cm-rail-btn" title="Duplicate (⌘D)"
+            onMouseEnter={(e) => setRailTip({ text: 'Duplicate  (⌘D)', rect: e.currentTarget.getBoundingClientRect() })}
+            onMouseLeave={() => setRailTip(null)}
+            onClick={() => { setRailTip(null); duplicate(); }}>
+            <Icon name="duplicate" size={17} />
+          </button>
+          <button className="cm-rail-btn" title="Delete (⌫)"
+            onMouseEnter={(e) => setRailTip({ text: 'Delete  (⌫)', rect: e.currentTarget.getBoundingClientRect() })}
+            onMouseLeave={() => setRailTip(null)}
+            onClick={() => { setRailTip(null); activeLayer && ed().removeLayer(activeLayer.id); }}>
+            <Icon name="close" size={17} />
+          </button>
+        </div>
       </div>
+      {railTip && (
+        <div className="cm-rail-tip" style={{ left: railTip.rect.right + 8, top: railTip.rect.top + railTip.rect.height / 2 }}>
+          {railTip.text}
+        </div>
+      )}
       <button className="cm-collapse-left" data-flip={leftCollapsed} title={leftCollapsed ? 'Show panel' : 'Hide panel'} onClick={() => setLeftCollapsed(s => !s)}>
         <Icon name="chevron" size={13} />
       </button>
@@ -1202,13 +1726,13 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                   {snapOn ? 'Snap: on' : 'Snap: off'}
                 </button>
 
-                {(tool === 'objectselect' || tool === 'hoverselect' || tool === 'magicwand') && (
+                {tool === 'magicwand' && (
                   <React.Fragment>
                     <div className="cm-note" style={{ marginTop: 8 }}>
                       {objselectBusy ? 'Finding object…'
                         : selCount > 1 ? selCount + ' selected · ⇧-click (or Add) to keep combining'
                         : selCount === 1 ? 'Selected · ⇧-click to add more, ⌥-click to subtract'
-                        : (tool === 'hoverselect' ? 'Hover to preview, click to select' : 'Click an object to select it')}
+                        : 'Click an object to select it'}
                     </div>
                     <button className="cm-toggle" data-on={opts.addMode} style={{ marginTop: 8 }}
                       onClick={() => ed().setToolOptions({ addMode: !opts.addMode })}>
@@ -1219,6 +1743,49 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                         onChange={e => ed().setToolOptions({ tolerance: +e.target.value })} />
                     </label>
                     <div className="cm-note" style={{ marginTop: 8 }}>⇧ add · ⌥ subtract · [ ] tolerance</div>
+                  </React.Fragment>
+                )}
+                {(tool === 'objectselect' || tool === 'hoverselect') && (
+                  <React.Fragment>
+                    <div className="cm-row" style={{ alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+                      <span style={{ fontWeight: 600 }}>{tool === 'hoverselect' ? 'Hover select' : 'Object select'}</span>
+                      <button className="cm-toggle" data-on={opts.addMode}
+                        title="Keep adding each clicked object to the selection (same as holding Shift)"
+                        onClick={() => ed().setToolOptions({ addMode: !opts.addMode })}>
+                        Add{opts.addMode ? ' ✓' : ''}
+                      </button>
+                    </div>
+                    <div className="cm-note" style={{ marginTop: 6 }}>
+                      {objselectBusy ? 'Finding object…'
+                        : selCount > 1 ? selCount + ' selected · Merge to combine'
+                        : objCount ? objCount + (tool === 'hoverselect' ? ' objects · hover to preview, click to select' : ' objects · click to select')
+                        : 'No objects found — re-detect'}
+                    </div>
+                    <label style={{ display: 'block', marginTop: 8, fontSize: 11, color: 'var(--cm-dim)' }}
+                      title="How close in colour a pixel must be to the clicked spot to seed the object. Higher = grabs more of the colour before the object is completed.">
+                      Colour match
+                      <input type="range" min="4" max="96" value={opts.tolerance} style={{ width: '100%' }}
+                        onChange={e => ed().setToolOptions({ tolerance: +e.target.value })} />
+                    </label>
+                    <div className="cm-row" style={{ marginTop: 8 }}>
+                      <button className="cm-btn" style={{ width: '100%', justifyContent: 'center' }} disabled={objselectBusy || selCount < 2}
+                        title="Select 2+ objects (⇧-click or the Add toggle), then merge them into one shape via polygon clipping"
+                        onClick={mergeSel}>Merge{selCount > 1 ? ' (' + selCount + ')' : ''}</button>
+                    </div>
+                    <div className="cm-row" style={{ marginTop: 6 }}>
+                      <button className="cm-btn" disabled={objselectBusy || !selCount} onClick={expandSel}>Expand</button>
+                      <button className="cm-btn" disabled={objselectBusy || !selCount} onClick={contractSel}>Contract</button>
+                    </div>
+                    <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }}
+                      disabled={objselectBusy} title="Select every region on the canvas matching the colour you last clicked, within Colour match"
+                      onClick={selectSimilar}>Similar</button>
+                    {!!selCount && (
+                      <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }}
+                        onClick={() => ed().clearSelection()}>Deselect</button>
+                    )}
+                    <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }}
+                      disabled={objselectBusy} onClick={redetectObjects}>Re-detect</button>
+                    <div className="cm-note" style={{ marginTop: 8 }}>⇧ add · ⌥ subtract · [ ] tolerance · re-click cycles nested</div>
                   </React.Fragment>
                 )}
 
@@ -1380,44 +1947,36 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
       </div>
       <div className="cm-stage" ref={stageRef} onDragOver={onStageDragOver} onDrop={onStageDrop}>
         <canvas ref={canvasRef} />
+        <span className="cm-dim-badge">{dims.w}×{dims.h}</span>
+        <div className="cm-zoom-pill">
+          <button className="cm-icon-btn" title="Zoom out (−)" onClick={() => setZoomAtCenter(ed().fc.getZoom() * 0.83)}><Icon name="minus" size={14} /></button>
+          <button className="cm-btn" style={{ minWidth: 44, justifyContent: 'center' }} title="Reset to fit" onClick={fitToScreen}>{zoomPct}%</button>
+          <button className="cm-icon-btn" title="Zoom in (+)" onClick={() => setZoomAtCenter(ed().fc.getZoom() * 1.2)}><Icon name="plus" size={14} /></button>
+          <span style={{ width: 1, height: 16, background: 'var(--cm-line)' }} />
+          <button className="cm-icon-btn" title="Fit to screen (0)" onClick={fitToScreen}><Icon name="maximize" size={14} /></button>
+        </div>
         {showExtendBanner && (
           <button className="cm-extend-banner" onClick={onExtendBannerClick}>
             <Icon name="search" size={13} />Background doesn't fill the canvas — AI-extend it
           </button>
         )}
-        {review && (
-          <React.Fragment>
-            <div className="cm-review-overlay">
-              {review.boxes.map(b => {
-                const p = sceneToScreen({ x: b.x, y: b.y });
-                const v = ed().fc.viewportTransform;
-                const color = REGION_COLOR[b.type] || REGION_COLOR.decorative;
-                return (
-                  <div key={b.id} className="cm-review-box" data-type={b.type}
-                    style={{ left: p.x, top: p.y, width: b.w * v[0], height: b.h * v[3], borderColor: color, background: color + '1f' }}
-                    onMouseDown={e => onReviewBoxMouseDown(e, b, 'move')}>
-                    <div className="cm-review-tag" onMouseDown={e => e.stopPropagation()}>
-                      <select value={b.type} onChange={e => setReviewBoxType(b.id, e.target.value)}>
-                        {Object.entries(REGION_TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                      </select>
-                      <button onClick={() => removeReviewBox(b.id)} title="Remove"><Icon name="close" size={10} /></button>
-                    </div>
-                    <div className="cm-review-handle" onMouseDown={e => { e.stopPropagation(); onReviewBoxMouseDown(e, b, 'resize'); }} />
-                  </div>
-                );
-              })}
-            </div>
-            <div className="cm-review-toolbar">
-              <span className="cm-note" style={{ margin: 0 }}>{review.boxes.length} region{review.boxes.length === 1 ? '' : 's'}</span>
-              <span className="cm-review-sep" />
-              <button className="cm-btn" onClick={addReviewBox}>+ Add box</button>
-              <button className="cm-btn" onClick={closeReview}>Cancel</button>
-              <button className="cm-btn cm-btn-accent" disabled={!review.boxes.length} onClick={commitReview}>
-                <Icon name="wand" size={13} />Create {review.boxes.length} layer{review.boxes.length === 1 ? '' : 's'}
-              </button>
-            </div>
-          </React.Fragment>
-        )}
+        {reviewOn && reviewHoverPoly && (() => {
+          // Live cutout-preview overlay: dashed lime silhouette over the hovered region box,
+          // showing the exact shape Create/Extract will cut — see reviewHoverMove above. Region
+          // boxes THEMSELVES are real Fabric objects (Fabric renders them natively on <canvas>);
+          // this SVG only draws the one thing Fabric doesn't already show: the precomputed cutout
+          // preview polygon, matching the vanilla demo's #review-hover-preview.
+          const screenPts = reviewHoverPoly.map(sceneToScreen);
+          const xs = screenPts.map(p => p.x), ys = screenPts.map(p => p.y);
+          const minX = Math.min(...xs), minY = Math.min(...ys), maxX = Math.max(...xs), maxY = Math.max(...ys);
+          return (
+            <svg style={{ position: 'absolute', left: minX, top: minY, zIndex: 5, pointerEvents: 'none' }}
+              width={Math.max(1, maxX - minX)} height={Math.max(1, maxY - minY)}>
+              <polygon fill="rgba(212,255,69,.28)" stroke="#d4ff45" strokeWidth="2"
+                points={screenPts.map(p => (p.x - minX) + ',' + (p.y - minY)).join(' ')} />
+            </svg>
+          );
+        })()}
         {aiInsert && (() => {
           const p = sceneToScreen(aiInsert.pt);
           const stageW = stageRef.current ? stageRef.current.clientWidth : 0;
@@ -1453,7 +2012,117 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
         <Icon name="chevron" size={13} />
       </button>
       <div className="cm-side">
-        {!sideCollapsed && (
+        {!sideCollapsed && reviewOn && (() => {
+          const ar = activeRegion();
+          const polyRegionCount = regionObjects().filter(o => o.type === 'polygon').length;
+          const mergeCount = selectedRegions().length;
+          const n = regionObjects().length;
+          const isPolyClick = regionDraw === 'polylasso' || regionDraw === 'maglasso';
+          const HAND_TOOLS = [
+            ['object', 'spark', 'Object'], ['box', 'square', 'Box'], ['lasso', 'lasso', 'Lasso'],
+            ['polylasso', 'polygon', 'Polygon'], ['maglasso', 'wand', 'Magnetic'],
+          ];
+          const BG_MODE_NOTE = {
+            auto: 'Local silhouette cutout via edge/colour segmentation — same engine as Object select.',
+            cheap: 'Faster — lower-resolution local cutout, good for small/medium objects.',
+            best: 'Same local cutout engine, run at a higher resolution for a cleaner edge (slower).',
+          };
+          return (
+            <React.Fragment>
+              <div className="cm-review-head">
+                <span className="cm-row" style={{ gap: 6, fontWeight: 700, fontSize: 13 }}><Icon name="layers" size={15} style={{ color: 'var(--cm-accent)' }} />Review regions</span>
+                <span className="cm-tag" style={{ fontFamily: '"JetBrains Mono", ui-monospace, monospace', fontSize: 10.5 }}>{n} {n === 1 ? 'box' : 'boxes'}</span>
+              </div>
+              <div className="cm-review-panel-body">
+                <button className="cm-btn" style={{ width: '100%', justifyContent: 'flex-start' }} disabled={autodetectBusy} onClick={autoDetectRegions}>
+                  {autodetectBusy ? <React.Fragment><span className="cm-btn-spin" />Detecting…</React.Fragment> : <React.Fragment><Icon name="spark" size={13} />Auto-detect all objects</React.Fragment>}
+                </button>
+                <div className="cm-eyebrow" style={{ marginTop: 6 }}>Select by hand</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                  {HAND_TOOLS.map(([mode, icon, label]) => (
+                    <button key={mode} className="cm-btn" data-on={regionDraw === mode} style={{ justifyContent: 'flex-start' }}
+                      onClick={() => setRegionDrawMode(regionDraw === mode ? null : mode)}>
+                      <Icon name={icon} size={13} />{label}
+                    </button>
+                  ))}
+                  <button className="cm-btn" style={{ justifyContent: 'flex-start' }} onClick={() => {
+                    const r = makeRegionRectObj({ type: 'product', bbox: { x: 38, y: 42, width: 24, height: 16 } });
+                    ed().fc.add(r); ed().fc.setActiveObject(r); ed().fc.renderAll(); forceReview();
+                  }}><Icon name="plus" size={13} />Add box</button>
+                </div>
+                {regionDraw === 'object' && (
+                  <div className="cm-col" style={{ gap: 8, padding: 10, background: 'var(--cm-bg)', borderRadius: 10 }}>
+                    <span className="cm-note" style={{ margin: 0 }}>Click an object on the canvas to capture it.{objMulti ? ' Keep clicking to add more.' : ''}</span>
+                    {convertMsg && <span className="cm-note" style={{ margin: 0, color: 'var(--cm-accent)' }}>{convertMsg}</span>}
+                    <div className="cm-row" style={{ gap: 6, fontSize: 11 }}>
+                      <span className="cm-dim">Colour match</span>
+                      <input type="range" min={4} max={96} value={ed().toolOpts.tolerance} onChange={e => ed().setToolOptions({ tolerance: +e.target.value })} style={{ flex: 1 }} />
+                    </div>
+                    <div className="cm-row" style={{ gap: 6 }}>
+                      <button className="cm-chip" data-on={objMulti} title="Keep adding each clicked object to the selection" onClick={() => setObjMulti(m => !m)}>Add{objMulti ? ' ✓' : ''}</button>
+                      <button className="cm-btn cm-btn-accent" style={{ flex: 1, justifyContent: 'center' }} disabled={polyRegionCount < 2} onClick={mergeObjectRegions}>
+                        <Icon name="layers" size={13} />Merge objects{polyRegionCount >= 2 ? ' (' + polyRegionCount + ')' : ''}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {isPolyClick && polyBuildStateRef.current && (
+                  <button className="cm-btn cm-btn-accent" style={{ width: '100%', justifyContent: 'center' }} onClick={() => finishPolyDrawLocal(false)}>
+                    <Icon name="check" size={13} />Finish shape
+                  </button>
+                )}
+                {mergeCount >= 2 && (
+                  <button className="cm-btn" style={{ width: '100%', justifyContent: 'center' }} onClick={mergeSelectedRegions}>
+                    <Icon name="layers" size={13} />Merge {mergeCount} selected
+                  </button>
+                )}
+                {ar && (
+                  <div className="cm-col" style={{ gap: 8, marginTop: 6, paddingTop: 12, borderTop: '1px solid var(--cm-line)' }}>
+                    <div className="cm-eyebrow" style={{ marginTop: 0 }}>Selected region</div>
+                    <input key={ar.id} className="cm-text-input" defaultValue={ar.renamed ? (ar.name || '') : ''} placeholder={ar.renamed ? 'Region name' : (ar.name || 'Region name')}
+                      onChange={e => renameActiveRegion(e.target.value)} />
+                    <span className="cm-note" style={{ margin: 0, fontSize: 11 }}>Type</span>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+                      {Object.keys(REGION_COLOR).map(t => (
+                        <button key={t} className="cm-btn" style={ar.regionType === t ? { background: REGION_COLOR[t] + '38', borderColor: REGION_COLOR[t] } : undefined} onClick={() => setActiveRegionType(t)}>
+                          <span style={{ width: 8, height: 8, borderRadius: '50%', background: REGION_COLOR[t], display: 'inline-block', marginRight: 5 }} />{REGION_NAME[t]}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="cm-row" style={{ gap: 6 }}>
+                      <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} disabled={extractBusy} onClick={extractActiveRegion}>
+                        {extractBusy ? <React.Fragment><span className="cm-btn-spin" />Extracting…</React.Fragment> : <React.Fragment><Icon name="duplicate" size={13} />Extract</React.Fragment>}
+                      </button>
+                      <button className="cm-icon-btn" title="Delete region" style={{ color: '#e0607a' }} onClick={removeActiveRegion}><Icon name="trash" size={13} /></button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="cm-col" style={{ gap: 6, padding: '10px 12px', borderTop: '1px solid var(--cm-line)' }}>
+                <div className="cm-row" style={{ justifyContent: 'space-between' }}>
+                  <span className="cm-dim" style={{ fontSize: 11, fontWeight: 600 }}>Clean background</span>
+                  <span className="cm-row" style={{ gap: 3, background: 'var(--cm-bg)', borderRadius: 999, padding: 3 }}>
+                    {['auto', 'cheap', 'best'].map(m => (
+                      <button key={m} className="cm-btn" style={{ padding: '3px 9px', fontSize: 11, ...(bgMode === m ? { background: 'var(--cm-accent)', color: 'var(--cm-accent-ink)' } : {}) }} onClick={() => setBgMode(m)}>
+                        {m[0].toUpperCase() + m.slice(1)}
+                      </button>
+                    ))}
+                  </span>
+                </div>
+                <span className="cm-dim" style={{ fontSize: 10.5 }}>{BG_MODE_NOTE[bgMode]}</span>
+              </div>
+              <div className="cm-row" style={{ gap: 8, padding: 12, borderTop: '1px solid var(--cm-line)' }}>
+                <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} disabled={commitBusy} onClick={() => closeReview(true)}>Cancel</button>
+                <button className="cm-btn cm-btn-accent" style={{ flex: 1.4, justifyContent: 'center' }} disabled={commitBusy || n === 0} onClick={commitReview}>
+                  {commitBusy
+                    ? <React.Fragment><span className="cm-btn-spin" />Creating layers…</React.Fragment>
+                    : <React.Fragment><Icon name="wand" size={13} />Create {n} layer{n === 1 ? '' : 's'}</React.Fragment>}
+                </button>
+              </div>
+            </React.Fragment>
+          );
+        })()}
+        {!sideCollapsed && !reviewOn && (
           <React.Fragment>
             <div className="cm-tabs">
               <button data-on={sideTab === 'layer'} onClick={() => setSideTab('layer')}><Icon name="layers" size={13} /> Layer</button>
@@ -1465,7 +2134,16 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
             {sideTab === 'layer' && (
               <div>
                 {!props.active ? (
-                  <div className="cm-note">Select a layer on the canvas or from the Layers tab to see and edit its properties.</div>
+                  <React.Fragment>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                      <strong style={{ fontSize: 13 }}>Properties</strong>
+                    </div>
+                    <div className="cm-props-empty">
+                      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="4" y="4" width="16" height="16" rx="2" /><path d="M4 15l4-4 4 4 4-6 4 4" /></svg>
+                      <span className="h">Nothing selected</span>
+                      <span className="d">Select a layer on the canvas or from the Layers tab to see and edit its properties.</span>
+                    </div>
+                  </React.Fragment>
                 ) : (
                   <React.Fragment>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, marginBottom: 4 }}>
@@ -1766,10 +2444,10 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                   <div className="cm-ai-card-title"><Icon name="layers" size={15} style={{ color: 'var(--cm-accent)' }} />Convert to layers<span className="cm-chip" style={{ padding: '1px 7px', fontSize: 9.5 }}>guided</span></div>
                   <p>Detects objects and shows them as boxes — adjust, add or remove any, then create editable layers.</p>
                 </div>
-                <button className="cm-btn cm-btn-accent" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} disabled={convertBusy || !!review} onClick={detectAndConvert}>
+                <button className="cm-btn cm-btn-accent" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} disabled={convertBusy || reviewOn} onClick={detectAndConvert}>
                   {convertBusy ? 'Detecting…' : <React.Fragment><Icon name="layers" size={14} />Detect &amp; convert to layers</React.Fragment>}
                 </button>
-                <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} disabled={convertBusy || !!review} onClick={selectOneManually}>
+                <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} disabled={convertBusy || reviewOn} onClick={selectOneManually}>
                   <Icon name="lasso" size={13} />Select one object manually
                 </button>
                 {convertMsg && <div className="cm-note" style={{ color: 'var(--cm-accent)' }}>{convertMsg}</div>}
