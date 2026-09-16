@@ -121,9 +121,14 @@ test('react: entering crop draws a real dark scrim on contextTop outside the cro
   await page.waitForTimeout(150);
   const hasCrop = await ed(() => !!window.__mounted.editor().crop);
   assert.equal(hasCrop, true);
+  // The default box starts flush to the full artboard (the whole thing is "selected" to crop, like
+  // a conventional crop tool) — shrink it first so there's an "outside" region for the scrim to
+  // actually darken.
+  await ed(() => { const wed = window.__mounted.editor(); wed.crop = { ...wed.crop, x: wed.crop.x + 20, y: wed.crop.y + 20, w: wed.crop.w - 20, h: wed.crop.h - 20 }; wed.fc.requestRenderAll(); });
+  await page.waitForTimeout(150);
   const pixel = await ed(() => {
     const ctx = window.__mounted.editor().fc.contextTop;
-    return [...ctx.getImageData(2, 2, 1, 1).data];   // corner, well outside the default 10%/80% crop box
+    return [...ctx.getImageData(2, 2, 1, 1).data];   // corner, now outside the shrunk crop box
   });
   assert.equal(pixel[0], 0); assert.equal(pixel[1], 0); assert.equal(pixel[2], 0);
   assert.ok(pixel[3] > 100 && pixel[3] < 140);   // rgba(0,0,0,0.48) -> alpha ~122/255
@@ -139,6 +144,26 @@ test('react: leaving the crop tool clears the scrim from contextTop', async () =
     return [...ctx.getImageData(2, 2, 1, 1).data];
   });
   assert.equal(pixel[3], 0);   // fully transparent — no leftover scrim
+});
+
+/* ── re-entering crop after a previous artboard-wide crop was applied: the default box must seed
+   flush against the NEW (now-smaller) artboard — the whole current image/canvas starts "selected,"
+   same as the very first (never-cropped) entry — not some remembered pre-crop rect and not an
+   arbitrary inset. setTool('crop') re-derives {0,0,W,H} from the CURRENT this.W/this.H every
+   entry, so a re-crop picks up the already-cropped size. ─────────────────────────────────────── */
+test('react: re-entering crop after applying one seeds a box flush to the new (already-cropped) artboard size', async () => {
+  await ed(() => window.__mounted.editor().setTool('crop'));
+  await page.waitForTimeout(150);
+  await ed(() => { const wed = window.__mounted.editor(); wed.crop = { x: 10, y: 10, w: 200, h: 150 }; });
+  await ed(() => window.__mounted.editor().applyCrop());
+  await page.waitForTimeout(150);
+  const afterApply = await ed(() => ({ W: window.__mounted.editor().W, H: window.__mounted.editor().H }));
+  assert.deepEqual(afterApply, { W: 200, H: 150 });
+
+  await ed(() => window.__mounted.editor().setTool('crop'));
+  await page.waitForTimeout(150);
+  const crop = await ed(() => window.__mounted.editor().crop);
+  assert.deepEqual(crop, { x: 0, y: 0, w: afterApply.W, h: afterApply.H }, 'the re-seeded box must be flush to the NEW, already-cropped artboard size');
 });
 
 /* ── marquee selection: marching-ants outline actually gets drawn (not just tracked in state) ── */
@@ -278,7 +303,7 @@ test('react: the Layer tab shows a Border section for a shape, with a colour swa
   await page.mouse.move(box.x + 150, box.y + 150, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(150);
-  await page.locator('button:has-text("Layer")').first().click();
+  await page.locator('button:has-text("Layers")').first().click();
   await page.waitForTimeout(150);
   assert.ok(await page.locator('.cm-grp:has-text("Border")').count() > 0);
   // width still 0 -> no colour swatch row yet
@@ -517,6 +542,107 @@ test('react: a crop-ratio chip constrains a SUBSEQUENT handle drag (matches the 
   assert.ok(Math.abs(after.w / after.h - 1) < 0.05);   // the drag was ratio-locked to 1:1
 });
 
+/* ── crop scoped to a selected image layer: previously applyCrop() always resized the whole
+   artboard (Photoshop's "Canvas Size") no matter what was selected, which read as "the crop tool
+   crops the frame instead of the image." Selecting a non-bg image before entering Crop must now
+   seed the crop box from THAT image and, on Apply, adjust only its own cropX/cropY/width/height —
+   the artboard size and every other object stay untouched. ─────────────────────────────────── */
+test('react: cropping a selected image layer crops only that image, not the artboard', async () => {
+  const before = await ed(async () => {
+    const wed = window.__mounted.editor();
+    const c = document.createElement('canvas'); c.width = 40; c.height = 40;
+    c.getContext('2d').fillStyle = '#3366ff'; c.getContext('2d').fillRect(0, 0, 40, 40);
+    const img = await wed.addImage(c.toDataURL(), { role: 'image', name: 'Layer', fit: 'contain' });
+    img.set({ left: 20, top: 30, scaleX: 2, scaleY: 2, originX: 'left', originY: 'top' });
+    img.setCoords();
+    wed.fc.setActiveObject(img);
+    wed.commit('test-setup');
+    return { W: wed.W, H: wed.H, id: img.id, left: img.left, top: img.top };
+  });
+
+  await ed(() => window.__mounted.editor().setTool('crop'));
+  await page.waitForTimeout(150);
+  const seeded = await ed(() => window.__mounted.editor().crop);
+  // seeded flush to the image's own bounding box (left/top at scale 2), not the artboard's own box
+  assert.equal(seeded.x, before.left);
+  assert.equal(seeded.y, before.top);
+
+  const box = await canvasBox();
+  // drag the bottom-right handle in to shrink the crop box, well inside the image's own bounds
+  await page.mouse.move(box.x + seeded.x + seeded.w, box.y + seeded.y + seeded.h);
+  await page.mouse.down();
+  await page.mouse.move(box.x + seeded.x + seeded.w - 20, box.y + seeded.y + seeded.h - 20, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+
+  await page.locator('button:has-text("Apply crop")').click();
+  await page.waitForTimeout(100);
+
+  const after = await ed((id) => {
+    const wed = window.__mounted.editor();
+    const img = wed.fc.getObjects().find(o => o.id === id);
+    return { W: wed.W, H: wed.H, tool: wed.tool, cropX: img.cropX, cropY: img.cropY, w: img.getScaledWidth(), h: img.getScaledHeight() };
+  }, before.id);
+  assert.equal(after.W, before.W, 'artboard width must be untouched by an image-scoped crop');
+  assert.equal(after.H, before.H, 'artboard height must be untouched by an image-scoped crop');
+  assert.equal(after.tool, 'select');
+  assert.ok(after.w < seeded.w, 'the image itself shrank to the dragged crop box');
+  assert.ok(after.h < seeded.h);
+});
+
+/* ── re-cropping an already-cropped image layer: re-entering Crop must show the FULL original
+   image again (Fabric's cropX/cropY/width/height only ever hide part of the underlying element —
+   the full-res source is always still there) with the box seeded to the PREVIOUS crop window, not
+   just the sliver that was visible. Cancelling (leaving Crop without applying) must restore the
+   image to its pre-recrop cropped state, since entering Crop is what visually expanded it. ────── */
+test('react: re-entering crop on an already-cropped image shows the full image again with the previous crop window selected', async () => {
+  const setup = await ed(async () => {
+    const wed = window.__mounted.editor();
+    const c = document.createElement('canvas'); c.width = 40; c.height = 40;
+    c.getContext('2d').fillStyle = '#3366ff'; c.getContext('2d').fillRect(0, 0, 40, 40);
+    const img = await wed.addImage(c.toDataURL(), { role: 'image', name: 'Layer', fit: 'contain' });
+    img.set({ left: 0, top: 0, scaleX: 1, scaleY: 1, originX: 'left', originY: 'top' });
+    img.setCoords();
+    wed.fc.setActiveObject(img);
+    wed.commit('test-setup');
+    return { id: img.id };
+  });
+
+  await ed(() => window.__mounted.editor().setTool('crop'));
+  await page.waitForTimeout(150);
+  // shrink the box to a known sub-region, then apply
+  await ed(() => { window.__mounted.editor().crop = { x: 10, y: 10, w: 16, h: 16 }; });
+  await ed(() => window.__mounted.editor().applyCrop());
+  await page.waitForTimeout(150);
+  const afterFirstCrop = await ed((id) => {
+    const img = window.__mounted.editor().fc.getObjects().find(o => o.id === id);
+    return { width: img.width, height: img.height, cropX: img.cropX, cropY: img.cropY };
+  }, setup.id);
+  assert.deepEqual(afterFirstCrop, { width: 16, height: 16, cropX: 10, cropY: 10 });
+
+  // re-select the now-cropped image and re-enter crop
+  await ed((id) => { window.__mounted.editor().fc.setActiveObject(window.__mounted.editor().fc.getObjects().find(o => o.id === id)); }, setup.id);
+  await ed(() => window.__mounted.editor().setTool('crop'));
+  await page.waitForTimeout(150);
+
+  const secondEntry = await ed((id) => {
+    const wed = window.__mounted.editor();
+    const img = wed.fc.getObjects().find(o => o.id === id);
+    return { crop: wed.crop, imgWidth: img.width, imgHeight: img.height, imgCropX: img.cropX, imgCropY: img.cropY };
+  }, setup.id);
+  assert.deepEqual({ w: secondEntry.imgWidth, h: secondEntry.imgHeight, cropX: secondEntry.imgCropX, cropY: secondEntry.imgCropY }, { w: 40, h: 40, cropX: 0, cropY: 0 }, 'the image must expand back to its full original size on re-entry');
+  assert.deepEqual(secondEntry.crop, { x: 10, y: 10, w: 16, h: 16 }, 'the crop box must be seeded to the PREVIOUS crop window, not the full image');
+
+  // cancel: leave crop without applying — the image must restore to the first crop's state
+  await ed(() => window.__mounted.editor().setTool('select'));
+  await page.waitForTimeout(150);
+  const afterCancel = await ed((id) => {
+    const img = window.__mounted.editor().fc.getObjects().find(o => o.id === id);
+    return { width: img.width, height: img.height, cropX: img.cropX, cropY: img.cropY };
+  }, setup.id);
+  assert.deepEqual(afterCancel, afterFirstCrop, 'cancelling re-crop must restore the image to its pre-recrop cropped state');
+});
+
 /* ── "Detect & convert to layers" previously failed SILENTLY on any non-'ok' detectRegions()
    status (no provider, rate limit, or zero regions found) — the button just reset with no
    explanation, which read as "doesn't work" even though it was actually erroring out correctly
@@ -557,7 +683,9 @@ test('react: "Detect & convert to layers" shows an error message when the AI cal
 /* ── gap-fill pass: features present in the vanilla demo but missing from the React shell,
    found by diffing every ed.<method>() call the demo makes against what React actually calls ── */
 test('react: SVG export button downloads a real SVG string wrapped in a Blob URL', async () => {
-  const svgBtn = page.locator('button:has-text("SVG")').first();
+  // SVG/JPG/PNG are consolidated behind one "Export image" dropdown now — open it first.
+  await page.locator('.cm-export-btn').click();
+  const svgBtn = page.locator('.cm-export-menu-item:has-text("SVG")');
   assert.ok(await svgBtn.count() > 0);
   const [download] = await Promise.all([
     page.waitForEvent('download').catch(() => null),
@@ -587,11 +715,10 @@ test('react: Clip layer to selection / Clear clip apply and remove a clipPath on
   // deliberately NOT switching to 'select' here — Editor#setTool('select') lifts any live pixel
   // selection into a new floating layer (see selectActiveOrCenter's own doc comment on _lastActiveId
   // for the same discard-on-tool-switch mechanism), which would clear ed.selection before Clip
-  // ever got to use it. The Tool tab (and its Clip/Clear-clip buttons) works from whatever tool is
-  // currently active, same as the vanilla demo's tool-panel — no reason to force 'select' first.
-
-  await page.locator('button:has-text("Tool")').first().click();
-  await page.waitForTimeout(100);
+  // ever got to use it. The left panel's tool options work from whatever tool is currently active,
+  // same as the vanilla demo's tool-panel — no reason to force 'select' first. It's no longer
+  // behind a "Tool" tab either — the left panel is untabbed since the layer list moved to the
+  // right (see the "Layers" tab tests above), so Clip/Clear-clip are already visible here.
   const clipBtn = page.locator('button:has-text("Clip layer to selection")');
   assert.equal(await clipBtn.isDisabled(), false);
   await clipBtn.click();

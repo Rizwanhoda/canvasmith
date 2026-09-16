@@ -7,10 +7,15 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   Editor, ALL_TOOLS, PAINT_TOOLS, SEL_TOOLS, SHAPE_TOOLS, GeminiProvider, installBridge, installDropImport, installKeybindings, TOOL_KEYS,
   selectionPolys, selectionToPath2D, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, STICKER_PALETTE, stickerSpec, STICKER_DEFAULT_LABEL, REGION_COLOR, REGION_NAME, relLum, hexRgb,
-  startSelection, updateSelection, finalizeSelection, startPolyBuild, polyBuildAdd, polyBuildPreview, finishPolyBuild, snapToEdge,
+  startSelection, updateSelection, finalizeSelection, startPolyBuild, polyBuildAdd, polyBuildPreview, finishPolyBuild, snapToEdge, selectionBounds,
 } from '@canvasmith/core';
 
 const CROP_RATIOS = [['Free', 0], ['Original', 'orig'], ['1:1', 1], ['4:5', 4 / 5], ['3:2', 3 / 2], ['16:9', 16 / 9], ['9:16', 9 / 16]];
+// Tools whose toolOpts.color/fill actually paints something on screen: PAINT_TOOLS read all four
+// brush knobs (size/hardness/opacity/color), while bucket/shapes/type only ever read color/fill
+// (their initial fill) — same split as the vanilla demo's COLOR_TOOLS/isPaint.
+const COLOR_TOOLS = [...PAINT_TOOLS, 'bucket', ...SHAPE_TOOLS, 'type'];
+const BRUSH_SWATCHES = ['#ffffff', '#000000', '#4f8ff0', '#d76b8f', '#d4ff45', '#ef6a2d'];
 /* Standard canvas-size presets, grouped by use-case — width/height in px at a nominal
    72-96dpi-ish "design pixel" scale (matches how every web design tool treats these, not
    print-accurate 300dpi). Ported verbatim from the vanilla demo's CANVAS_PRESETS. */
@@ -294,7 +299,22 @@ const THEMES = {
 };
 
 const CSS = `
-.cm-root{--cm-bg:#0b0b0d;--cm-panel:#141417;--cm-line:rgba(255,255,255,.07);--cm-ink:#f5f3ee;--cm-dim:#aeaca4;--cm-accent:#ef6a2d;--cm-accent-ink:#fff;--cm-stage:#0a0a0c;
+/* Theme tokens: dark is the default/fallback (also applied explicitly via [data-cm-mode=dark] so
+   the toggle can switch back to it), light is a soft warm off-white — NOT stark white against the
+   page, matching the fix applied to the vanilla demo's own light theme (a pure #ffffff panel read
+   as glare against its warm beige background; same reasoning applies here even though this shell's
+   "page" is just --cm-bg behind the panels). Extra tokens (--cm-panel-2/--cm-dim-2/--cm-line-soft)
+   support controls added in this pass (checkbox rows, status pill, AI button, swatches) that need
+   a secondary surface/text tone beyond the original bg/panel/ink/dim set. */
+.cm-root, .cm-root[data-cm-mode=dark]{
+  --cm-bg:#0b0b0d; --cm-panel:#141417; --cm-panel-2:#1b1b20; --cm-line:rgba(255,255,255,.07); --cm-line-soft:rgba(255,255,255,.05);
+  --cm-ink:#f5f3ee; --cm-dim:#aeaca4; --cm-dim-2:#76746d; --cm-accent:#ef6a2d; --cm-accent-ink:#fff; --cm-stage:#0a0a0c;
+}
+.cm-root[data-cm-mode=light]{
+  --cm-bg:#ece6d9; --cm-panel:#faf7f0; --cm-panel-2:#f1ebdd; --cm-line:rgba(30,26,18,.11); --cm-line-soft:rgba(30,26,18,.07);
+  --cm-ink:#26221c; --cm-dim:#5e594f; --cm-dim-2:#8c867a; --cm-accent:#c85a24; --cm-accent-ink:#fff; --cm-stage:#e4ddcc;
+}
+.cm-root{
   display:grid;grid-template-columns:52px 220px 1fr 290px;grid-template-rows:44px 1fr;height:100%;min-height:480px;
   background:var(--cm-bg);color:var(--cm-ink);font:13px/1.45 "Hanken Grotesk",system-ui,sans-serif;position:relative}
 .cm-root[data-left-collapsed=true]{grid-template-columns:52px 0px 1fr 290px}
@@ -303,7 +323,7 @@ const CSS = `
 .cm-top{grid-column:1/5;display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid var(--cm-line);background:var(--cm-panel)}
 .cm-rail{display:flex;flex-direction:column;align-items:center;gap:3px;padding:10px 8px;border-right:1px solid var(--cm-line);background:var(--cm-panel);overflow-y:auto;overflow-x:visible;position:relative;z-index:10}
 .cm-rail-group{position:relative}
-.cm-rail-btn{all:unset;box-sizing:border-box;cursor:pointer;width:40px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;position:relative;color:var(--cm-dim);transition:background .12s,color .12s}
+.cm-rail-btn{all:unset;box-sizing:border-box;cursor:pointer;width:40px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;position:relative;color:var(--cm-dim);transition:background .12s}
 .cm-rail-btn:hover{background:var(--cm-bg);color:var(--cm-ink)}
 .cm-rail-btn[data-on=true]{background:var(--cm-accent);color:var(--cm-accent-ink)}
 .cm-rail-caret{position:absolute;right:3px;bottom:3px;width:0;height:0;border-left:4px solid transparent;border-bottom:4px solid var(--cm-dim)}
@@ -327,12 +347,12 @@ const CSS = `
 .cm-tabs button:hover{background:var(--cm-bg)}
 .cm-tabs button[data-on=true]{background:var(--cm-bg);color:var(--cm-ink)}
 .cm-collapse-left{position:absolute;top:50%;left:272px;transform:translateY(-50%);width:22px;height:36px;border-radius:8px;
-  border:1px solid var(--cm-line);background:var(--cm-panel);color:var(--cm-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;transition:left .15s,color .12s,border-color .12s,background .12s}
+  border:1px solid var(--cm-line);background:var(--cm-panel);color:var(--cm-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;transition:left .15s,border-color .12s,background .12s}
 .cm-root[data-left-collapsed=true] .cm-collapse-left{left:52px}
 .cm-collapse-left:hover{color:#fff;border-color:var(--cm-accent);background:var(--cm-accent)}
 .cm-collapse-left[data-flip=true] svg{transform:rotate(180deg)}
 .cm-collapse{position:absolute;top:50%;right:289px;transform:translateY(-50%);width:22px;height:36px;border-radius:8px;
-  border:1px solid var(--cm-line);background:var(--cm-panel);color:var(--cm-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;transition:right .15s,color .12s,border-color .12s,background .12s}
+  border:1px solid var(--cm-line);background:var(--cm-panel);color:var(--cm-dim);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;transition:right .15s,border-color .12s,background .12s}
 .cm-root[data-side-collapsed=true] .cm-collapse{right:0}
 .cm-collapse:hover{color:#fff;border-color:var(--cm-accent);background:var(--cm-accent)}
 .cm-collapse[data-flip=true] svg{transform:rotate(180deg)}
@@ -341,6 +361,31 @@ const CSS = `
 .cm-align button:hover{border-color:var(--cm-accent)}
 .cm-toggle{all:unset;cursor:pointer;padding:6px 12px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--cm-line);color:var(--cm-dim)}
 .cm-toggle[data-on=true]{background:var(--cm-ink);color:var(--cm-panel);border-color:var(--cm-ink)}
+/* status pill next to a section label (e.g. "Active") — small, quiet, accent-tinted */
+.cm-status-pill{display:inline-flex;align-items:center;margin-left:auto;padding:2px 8px;border-radius:999px;background:color-mix(in srgb,var(--cm-accent) 16%,transparent);color:var(--cm-accent);font-size:9.5px;font-weight:700;letter-spacing:.04em}
+/* two-up checkbox row: "Snap to grid" / "Auto-detect" */
+.cm-check-row{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:10px}
+.cm-check-item{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:7px;cursor:pointer;font-size:12px;font-weight:500;color:var(--cm-ink)}
+.cm-check-item .box{flex-shrink:0;width:14px;height:14px;border-radius:4px;border:1px solid var(--cm-dim-2);display:flex;align-items:center;justify-content:center;color:transparent;transition:background .12s,border-color .12s}
+.cm-check-item[data-on=true] .box{background:var(--cm-accent);border-color:var(--cm-accent);color:var(--cm-accent-ink)}
+.cm-check-item:hover .box{border-color:var(--cm-accent)}
+/* AI Vision Engine action: an accent-bordered, subtly glowing button so it reads as the "hero"
+   action of its card rather than a plain .cm-btn */
+.cm-ai-detect-btn{all:unset;box-sizing:border-box;cursor:pointer;width:100%;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:10px;padding:10px 12px;border-radius:10px;border:1px solid color-mix(in srgb,var(--cm-accent) 55%,transparent);background:color-mix(in srgb,var(--cm-accent) 14%,var(--cm-panel));color:var(--cm-ink);font-size:12.5px;font-weight:700;transition:background .12s,border-color .12s,transform .1s}
+.cm-ai-detect-btn:hover{background:color-mix(in srgb,var(--cm-accent) 22%,var(--cm-panel));border-color:var(--cm-accent)}
+.cm-ai-detect-btn:active{transform:translateY(.5px)}
+.cm-ai-detect-btn svg{color:var(--cm-accent);flex-shrink:0}
+/* quick colour-preset row next to the brush colour picker */
+.cm-swatch-btn{all:unset;box-sizing:border-box;width:20px;height:20px;border-radius:50%;cursor:pointer;border:2px solid var(--cm-line);transition:transform .1s,border-color .1s}
+.cm-swatch-btn:hover{transform:scale(1.1)}
+.cm-swatch-btn[data-on=true]{border-color:var(--cm-ink)}
+/* export dropdown menu (single "Export image" button in the header) */
+.cm-export-anchor{position:relative}
+.cm-export-menu{position:absolute;right:0;top:calc(100% + 8px);z-index:60;min-width:150px;background:var(--cm-panel-2);border:1px solid var(--cm-line);border-radius:11px;padding:6px;box-shadow:0 24px 60px rgba(0,0,0,.45)}
+.cm-export-menu-item{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;padding:8px 9px;border-radius:7px;cursor:pointer;font-size:12.5px;font-weight:600;color:var(--cm-ink);transition:background .1s}
+.cm-export-menu-item:hover{background:var(--cm-bg)}
+.cm-export-caret svg{transition:transform .12s}
+.cm-export-btn[data-open=true] .cm-export-caret svg{transform:rotate(180deg)}
 .cm-layer{display:flex;align-items:center;gap:6px;padding:5px 7px;border-radius:7px;cursor:pointer;font-size:12px}
 .cm-layer:hover{background:var(--cm-bg)}.cm-layer[data-on=true]{outline:1px solid var(--cm-accent)}
 .cm-layer[data-dragover=true]{background:color-mix(in srgb,var(--cm-accent) 16%,var(--cm-panel));box-shadow:inset 0 0 0 1px dashed var(--cm-accent),inset 0 0 0 1px var(--cm-accent)}
@@ -398,7 +443,7 @@ const CSS = `
 .cm-btn-spin{display:inline-block;width:11px;height:11px;border-radius:50%;border:1.6px solid color-mix(in srgb,var(--cm-accent-ink) 35%,transparent);border-top-color:var(--cm-accent-ink);animation:cm-btn-spin .6s linear infinite;flex:none}
 @keyframes cm-btn-spin{to{transform:rotate(360deg)}}
 .cm-ai-suggestions{display:flex;flex-direction:column;gap:6px}
-.cm-chip{all:unset;cursor:pointer;display:flex;align-items:center;gap:7px;padding:7px 13px;border-radius:999px;border:1px solid var(--cm-line);font-size:12.5px;font-weight:500;color:var(--cm-ink)}
+.cm-chip{all:unset;cursor:pointer;display:flex;align-items:center;gap:7px;padding:7px 13px;border-radius:4px;border:1px solid var(--cm-line);font-size:12.5px;font-weight:500;color:var(--cm-ink)}
 .cm-chip:hover{border-color:var(--cm-accent)}
 .cm-chip[data-on=true]{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent);font-weight:600}
 /* Region boxes themselves are real Fabric objects rendered by <canvas> (role:'region', styled via
@@ -448,7 +493,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const rootRef = useRef(null);
   const edRef = useRef(null);
   const [tool, setTool] = useState('select');
-  const [opts, setOpts] = useState({ size: 30, opacity: 1, color: '#ef6a2d', tolerance: 32, addMode: false, gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }], cropRatio: 0 });
+  const [opts, setOpts] = useState({ size: 30, opacity: 1, hardness: 0.7, color: '#ef6a2d', tolerance: 32, addMode: false, gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }], cropRatio: 0, paintNewLayer: false });
   const [layers, setLayers] = useState([]);
   // Layer-panel thumbnails: generated on demand from the fabric object itself (toDataURL at a
   // small multiplier), cached per layer id and invalidated on every scene change — same
@@ -513,6 +558,10 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [leftTab, setLeftTab] = useState('tool');
   const [snapOn, setSnapOn] = useState(true);
+  // Cosmetic-only checkbox mirroring the vanilla demo's "Auto-detect" toggle: ed.detectObjects()
+  // has no ambient/always-on mode, so this just tracks UI state next to Snap-to-grid rather than
+  // inventing new editor behaviour (see the demo's autodetect-toggle for the same rationale).
+  const [autodetectOn, setAutodetectOn] = useState(true);
   // Rail flyout: index into TOOLGROUPS of the group whose sub-tool list is currently open (-1 =
   // none), plus the hover tooltip's text/anchor rect — ports the vanilla demo's flyoutGroup/showTip
   // state onto React so the rail behaves identically (click a multi-tool group to open its flyout,
@@ -530,6 +579,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   // the vanilla demo does: busy from mouse:down until the next selection/hover/error settles it.
   const [selCount, setSelCount] = useState(0);
   const [objselectBusy, setObjselectBusy] = useState(false);
+  const [cloneSrc, setCloneSrc] = useState(null);
   const [objCount, setObjCount] = useState(0);   // # of boxes ed.detectObjectBoxes() found, for the "N objects" readout
 
   useEffect(() => {
@@ -556,8 +606,89 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     // Ports the vanilla demo's drawOverlays exactly (its own header comment calls it "the
     // reference implementation other UIs can copy") — kept pixel-for-pixel identical rather than
     // reinvented, so the two shells read as the same editor.
-    let dragGuides = null, hoverPreview = null, penBuild = null;
+    let dragGuides = null, hoverPreview = null, penBuild = null, brushCursor = null, gradAxis = null;
+    /* Gradient axis while dragging — the Figma-style handle: a thin white line, a round nub on the
+       line at every stop, and a colour swatch floating just off it, first stop accented. Radial
+       adds the circle its falloff sweeps. Same drawing as the vanilla demo's. */
+    const drawGradientAxis = (ctx, g, z) => {
+      const px = 1 / z;
+      const dx = g.to.x - g.from.x, dy = g.to.y - g.from.y;
+      const len = Math.hypot(dx, dy);
+      if (g.type === 'radial' && len > 0.5) {
+        ctx.setLineDash([5 * px, 4 * px]);
+        ctx.lineWidth = 2.4 * px; ctx.strokeStyle = 'rgba(0,0,0,.45)';
+        ctx.beginPath(); ctx.arc(g.from.x, g.from.y, len, 0, 7); ctx.stroke();
+        ctx.lineWidth = 1 * px; ctx.strokeStyle = 'rgba(255,255,255,.9)';
+        ctx.beginPath(); ctx.arc(g.from.x, g.from.y, len, 0, 7); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.setLineDash([]);
+      ctx.lineWidth = 3 * px; ctx.strokeStyle = 'rgba(0,0,0,.35)';
+      ctx.beginPath(); ctx.moveTo(g.from.x, g.from.y); ctx.lineTo(g.to.x, g.to.y); ctx.stroke();
+      ctx.lineWidth = 1.5 * px; ctx.strokeStyle = '#ffffff';
+      ctx.beginPath(); ctx.moveTo(g.from.x, g.from.y); ctx.lineTo(g.to.x, g.to.y); ctx.stroke();
+      if (len < 1) return;
+      const nx = -dy / len, ny = dx / len;   // unit perpendicular: the swatch offset direction
+      const nub = 3.4 * px, half = 9 * px, off = 22 * px;
+      const stops = (g.stops && g.stops.length) ? g.stops : [{ offset: 0, color: '#ffffff' }, { offset: 1, color: '#000000' }];
+      stops.forEach((s, i) => {
+        const t = Math.max(0, Math.min(1, s.offset));
+        const px0 = g.from.x + dx * t, py0 = g.from.y + dy * t;
+        const sx = px0 + nx * off, sy = py0 + ny * off;
+        ctx.lineWidth = 1.2 * px; ctx.strokeStyle = 'rgba(0,0,0,.35)';
+        ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(sx, sy); ctx.stroke();
+        // White card under the colour chip: the swatch sits on the very colour it describes, so a
+        // bare coloured square would vanish into the ramp.
+        const bw = 2.2 * px, ob = half + bw / 2, ob2 = half + bw + 0.5 * px;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(sx - half, sy - half, half * 2, half * 2);
+        ctx.fillStyle = s.color;
+        const inset = 2.6 * px;
+        ctx.fillRect(sx - half + inset, sy - half + inset, (half - inset) * 2, (half - inset) * 2);
+        ctx.lineWidth = bw; ctx.strokeStyle = i === 0 ? '#2f8bff' : '#ffffff';
+        ctx.strokeRect(sx - ob, sy - ob, ob * 2, ob * 2);
+        ctx.lineWidth = 1 * px; ctx.strokeStyle = 'rgba(0,0,0,.55)';
+        ctx.strokeRect(sx - ob2, sy - ob2, ob2 * 2, ob2 * 2);
+        ctx.beginPath(); ctx.arc(px0, py0, nub, 0, 7);
+        ctx.fillStyle = '#ffffff'; ctx.fill();
+        ctx.lineWidth = 1.2 * px; ctx.strokeStyle = 'rgba(0,0,0,.5)'; ctx.stroke();
+      });
+    };
     let antsOffset = 0, antsRunning = false;
+    /* Brush-footprint ring at the pointer (paint tools hide the OS cursor — see Editor's
+       _cursorForTool), plus clone/heal's source pin and live sample ring. Same drawing as the
+       vanilla demo's drawBrushCursor. */
+    const drawBrushCursor = (ctx, c, z) => {
+      const r = Math.max(0.5, c.size / 2), px = 1 / z;
+      const ring = (x, y, rad, color) => {
+        ctx.beginPath(); ctx.arc(x, y, rad, 0, 7);
+        ctx.setLineDash([]);
+        ctx.lineWidth = 3 * px; ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.stroke();
+        ctx.lineWidth = 1.3 * px; ctx.strokeStyle = color; ctx.stroke();
+        ctx.setLineDash([]);
+      };
+      const cross = (x, y, rad, color) => {
+        ctx.setLineDash([]);
+        for (const [w, s] of [[3 * px, 'rgba(0,0,0,.55)'], [1.3 * px, color]]) {
+          ctx.lineWidth = w; ctx.strokeStyle = s;
+          ctx.beginPath();
+          ctx.moveTo(x - rad, y); ctx.lineTo(x + rad, y);
+          ctx.moveTo(x, y - rad); ctx.lineTo(x, y + rad);
+          ctx.stroke();
+        }
+      };
+      if (c.tool === 'clone' || c.tool === 'heal') {
+        if (c.picking) { ring(c.x, c.y, r, '#d4ff45'); cross(c.x, c.y, r + 7 * px, '#d4ff45'); }
+        else ring(c.x, c.y, r, '#ffffff');
+        if (c.src) {
+          const pin = 9 * px;
+          ring(c.src.x, c.src.y, pin, '#d4ff45');
+          cross(c.src.x, c.src.y, pin * 1.7, '#d4ff45');
+        }
+        return;
+      }
+      ring(c.x, c.y, r, '#ffffff');
+    };
     const startAntsLoopIfNeeded = () => {
       if (antsRunning || !ed.selection) return;
       antsRunning = true;
@@ -579,18 +710,36 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
         const p = selectionToPath2D(ed.selection, ed.W, ed.H);
         ctx.lineWidth = 1.6 / v[0];
         ctx.setLineDash([7 / v[0], 5 / v[0]]);
+        // Lime (matches REGION_COLOR.product) rather than the accent — a pixel selection needs to
+        // read as a distinct marching-ants marquee against any layer content, not an accent-colored
+        // UI control (same convention the vanilla demo uses).
         ctx.lineDashOffset = -antsOffset / v[0];
-        ctx.strokeStyle = '#ef6a2d'; ctx.stroke(p);
+        ctx.strokeStyle = '#d4ff45'; ctx.stroke(p);
         ctx.lineDashOffset = (6 - antsOffset) / v[0]; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.stroke(p);
         ctx.setLineDash([]);
         const s = ed.selection;
         if ((s.kind === 'rect' || s.kind === 'ellipse') && (ed.tool === 'marquee' || ed.tool === 'marquee-ellipse')) {
-          const hs = 4.5 / v[0]; ctx.fillStyle = '#ef6a2d'; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.lineWidth = 1 / v[0];
+          const hs = 4.5 / v[0]; ctx.fillStyle = '#d4ff45'; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.lineWidth = 1 / v[0];
           for (const [hx, hy] of [[s.x, s.y], [s.x + s.w, s.y], [s.x, s.y + s.h], [s.x + s.w, s.y + s.h],
                                   [s.x + s.w / 2, s.y], [s.x + s.w / 2, s.y + s.h], [s.x, s.y + s.h / 2], [s.x + s.w, s.y + s.h / 2]]) {
             ctx.beginPath(); ctx.arc(hx, hy, hs, 0, 7); ctx.fill(); ctx.stroke();
           }
         }
+        // Live "W × H" readout above the selection, constant SCREEN size regardless of zoom (same
+        // /v[0] inverse-scale trick the crop tool's own dimension label below uses) — every
+        // selection kind gets this now, not just crop.
+        const b = selectionBounds(ed.selection, ed.W, ed.H);
+        const dimLabel = Math.round(b.w) + ' × ' + Math.round(b.h);
+        const dfs = 12 / v[0], dpad = 6 / v[0];
+        ctx.font = dfs + 'px "JetBrains Mono", ui-monospace, monospace';
+        const dtw = ctx.measureText(dimLabel).width;
+        const dlx = b.x + b.w / 2, dly = b.y - dpad * 2 - dfs / 2;
+        ctx.fillStyle = 'rgba(20,20,23,.92)';
+        ctx.beginPath(); ctx.roundRect(dlx - dtw / 2 - dpad, dly - dfs / 2 - dpad * 0.6, dtw + dpad * 2, dfs + dpad * 1.2, dpad);
+        ctx.fill();
+        ctx.fillStyle = '#f1efe9'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(dimLabel, dlx, dly);
+        ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
       }
       if (hoverPreview && (ed.tool === 'objectselect' || ed.tool === 'hoverselect')) {
         const p = selectionToPath2D({ kind: 'poly', pts: hoverPreview.pts }, ed.W, ed.H);
@@ -630,6 +779,8 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
         if (dragGuides.x) { ctx.beginPath(); ctx.moveTo(dragGuides.x.x, dragGuides.x.y0); ctx.lineTo(dragGuides.x.x, dragGuides.x.y1); ctx.stroke(); }
         if (dragGuides.y) { ctx.beginPath(); ctx.moveTo(dragGuides.y.x0, dragGuides.y.y); ctx.lineTo(dragGuides.y.x1, dragGuides.y.y); ctx.stroke(); }
       }
+      if (gradAxis) drawGradientAxis(ctx, gradAxis, v[0]);
+      if (brushCursor) drawBrushCursor(ctx, brushCursor, v[0]);
       if (penBuild && penBuild.pts.length) {
         ctx.strokeStyle = '#ef6a2d'; ctx.lineWidth = 1.4 / v[0]; ctx.setLineDash([]);
         ctx.beginPath();
@@ -686,11 +837,14 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
         if (!compareSnapshotRef.current) { compareSnapshotRef.current = ed.exportPNG(); setCompareReady(true); }
         refreshExtendBanner();
       }),
-      ed.on('tooloptions', o => setOpts({ size: o.size, opacity: o.opacity, color: o.color, tolerance: o.tolerance, addMode: o.addMode, gradientType: o.gradientType, gradientStops: o.gradientStops, cropRatio: o.cropRatio || 0 })),
+      ed.on('tooloptions', o => setOpts({ size: o.size, opacity: o.opacity, hardness: o.hardness != null ? o.hardness : 0.7, color: o.color, tolerance: o.tolerance, addMode: o.addMode, gradientType: o.gradientType, gradientStops: o.gradientStops, cropRatio: o.cropRatio || 0, paintNewLayer: !!o.paintNewLayer })),
       ed.on('guides', g => { dragGuides = g; ed.fc.requestRenderAll(); }),
       ed.on('selection', s => { refreshProps(); setSelMsg(''); setObjselectBusy(false); setSelCount(s ? (selectionPolys(s) || []).length : 0); ed.fc.requestRenderAll(); startAntsLoopIfNeeded(); }),
       ed.on('crop', () => ed.fc.requestRenderAll()),
       ed.on('pen', build => { penBuild = build; ed.fc.requestRenderAll(); }),
+      ed.on('brushcursor', c => { brushCursor = c; ed.fc.requestRenderAll(); }),
+      ed.on('gradientaxis', g => { gradAxis = g; ed.fc.requestRenderAll(); }),
+      ed.on('clonesource', s => setCloneSrc(s)),
       ed.on('maskedit', m => { setMaskEdit(m); setLayers(ed.layers()); }),
       ed.on('aiinsert', ({ pt, region }) => setAiInsert({ pt, region, prompt: '', busy: false, msg: '' })),
       ed.on('hover', h => { hoverPreview = h; ed.fc.requestRenderAll(); setObjselectBusy(false); }),
@@ -797,6 +951,10 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const align = (edge) => activeLayer && ed().alignLayer(activeLayer.id, edge);
   const duplicate = () => activeLayer && ed().duplicateLayer(activeLayer.id);
   const toggleSnap = () => { const on = !snapOn; setSnapOn(on); ed().setSnapEnabled(on); };
+  // Brush/Color section visibility — only show for tools that actually read toolOpts.color/fill,
+  // and only show the Size/Soft/Opacity sliders for the subset that's an actual paint brush.
+  const isColorTool = COLOR_TOOLS.includes(tool);
+  const isPaintTool = PAINT_TOOLS.includes(tool);
 
   // ── zoom pill + fit-to-screen — ports the vanilla demo's setZoomAtCenter/fitToScreen exactly.
   // Matches the reference editor's model: fc's own DOM size always fills the STAGE (grown/shrunk
@@ -977,12 +1135,21 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     setDetectResults(r.result.boxes);
   };
   const selectDetected = (box) => ed().selectDetectedBox(box);
+  const [exportOpen, setExportOpen] = useState(false);
   const [csOpen, setCsOpen] = useState(false);
   const [csW, setCsW] = useState(width);
   const [csH, setCsH] = useState(height);
   const [csLock, setCsLock] = useState(true);
   const openCanvasSize = () => { setCsW(ed().W); setCsH(ed().H); setCsOpen(o => !o); };
   const applyCanvasSize = () => { if (csW > 0 && csH > 0) ed().resizeCanvas(csW, csH); setCsOpen(false); };
+  // Export dropdown: click outside the anchor closes it (picking a format also closes it, handled
+  // inline at each menu item) — same interaction as the vanilla demo's export-menu.
+  useEffect(() => {
+    if (!exportOpen) return;
+    const onDocClick = (e) => { if (!e.target.closest('.cm-export-anchor')) setExportOpen(false); };
+    document.addEventListener('click', onDocClick);
+    return () => document.removeEventListener('click', onDocClick);
+  }, [exportOpen]);
   const runAI = async () => {
     if (!aiPrompt.trim()) return;
     setAiBusy(true); setAiMsg('');
@@ -1549,8 +1716,6 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
         <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
         <button className="cm-icon-btn" title="Undo" disabled={hist.past < 2} onClick={() => ed().undo()}><Icon name="undo" size={14} /></button>
         <button className="cm-icon-btn" title="Redo" disabled={!hist.future} onClick={() => ed().redo()}><Icon name="redo" size={14} /></button>
-        <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
-        <input type="color" value={opts.color} onChange={e => ed().setToolOptions({ color: e.target.value, fill: e.target.value })} title="Colour" />
         {tool === 'crop' && <button className="cm-btn" onClick={() => ed().applyCrop()}>✓ Apply crop</button>}
         <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
         <button className="cm-btn" title="Search tools & actions (⌘K)" onClick={openCmdk}>
@@ -1611,9 +1776,18 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           <Icon name="search" size={13} />
         </button>
         <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
-        <button className="cm-btn" onClick={exportSvg}>⬇ SVG</button>
-        <button className="cm-btn" onClick={() => { const u = ed().exportJPEG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.jpg'); }}>⬇ JPG</button>
-        <button className="cm-btn cm-btn-accent" onClick={() => { const u = ed().exportPNG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.png'); }}>⬇ PNG</button>
+        <span className="cm-export-anchor">
+          <button className="cm-btn cm-btn-accent cm-export-btn" data-open={exportOpen} onClick={() => setExportOpen(o => !o)}>
+            ⬇ Export image <span className="cm-export-caret"><Icon name="chevron" size={10} style={{ transform: 'rotate(-90deg)' }} /></span>
+          </button>
+          {exportOpen && (
+            <div className="cm-export-menu">
+              <button className="cm-export-menu-item" onClick={() => { const u = ed().exportPNG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.png'); setExportOpen(false); }}>⬇ PNG</button>
+              <button className="cm-export-menu-item" onClick={() => { const u = ed().exportJPEG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.jpg'); setExportOpen(false); }}>⬇ JPG</button>
+              <button className="cm-export-menu-item" onClick={() => { exportSvg(); setExportOpen(false); }}>⬇ SVG</button>
+            </div>
+          )}
+        </span>
       </div>
       <div className="cm-rail" onMouseLeave={() => setRailTip(null)}>
         {TOOLGROUPS.map((ids, gi) => {
@@ -1673,14 +1847,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
       </button>
       <div className="cm-left">
         {!leftCollapsed && (
-          <React.Fragment>
-            <div className="cm-tabs">
-              <button data-on={leftTab === 'tool'} onClick={() => setLeftTab('tool')}><Icon name="tool" size={13} /> Tool</button>
-              <button data-on={leftTab === 'layers'} onClick={() => setLeftTab('layers')}><Icon name="layers" size={13} /> Layers {layers.length ? <span style={{ color: 'var(--cm-dim)' }}>{layers.length}</span> : null}</button>
-            </div>
-
-            {leftTab === 'tool' && (
-              <div>
+          <div>
                 {maskEdit && (
                   <div style={{ background: 'var(--cm-accent)', color: 'var(--cm-accent-ink)', borderRadius: 8, padding: '8px 10px', marginBottom: 10, fontSize: 12, fontWeight: 600 }}>
                     Editing layer mask — paint white to reveal, black to hide.
@@ -1694,15 +1861,21 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                     </div>
                   </div>
                 )}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                  <Icon name={tool} />
-                  <strong style={{ textTransform: 'capitalize' }}>{tool}</strong>
+                {/* SELECT & TRANSFORM header + "Active" status pill — names the section rather than
+                    just echoing the raw tool id, matching the demo's tool-name/tool-status-pill. */}
+                <div className="cm-grp" style={{ marginTop: 0, paddingTop: 0, borderTop: 'none', display: 'flex', alignItems: 'center' }}>
+                  <Icon name={tool} size={14} style={{ marginRight: 6 }} />
+                  <span>{tool === 'select' ? 'Select & Transform' : (TOOL_LABELS[tool] || tool)}</span>
+                  <span className="cm-status-pill">Active</span>
                 </div>
                 <div className="cm-note" style={{ marginTop: 0 }}>
-                  {tool === 'select' ? 'Click a layer on the canvas, or drag to move the selected layer.'
+                  {tool === 'select' ? 'Click any layer directly on the artboard or drag a bounding marquee to transform.'
                     : tool === 'crop' ? 'Drag the handles, then Apply crop in the top bar.'
                     : tool === 'aiinsert' ? 'Click a spot to draw there — or make a selection first and click inside it: the AI fills exactly that shape.'
                     : tool === 'pen' ? 'Click to place points; click near the start (or press Enter) to close, Escape to cancel.'
+                    : (tool === 'clone' || tool === 'heal') ? (cloneSrc
+                      ? `Source set at ${Math.round(cloneSrc.x)}, ${Math.round(cloneSrc.y)} — now paint to ${tool === 'heal' ? 'heal with' : 'stamp'} those pixels. ⌥/⇧-click to re-source.`
+                      : `⌥ (Alt)- or ⇧ (Shift)-click to set the source point, then paint ${tool === 'heal' ? 'over the blemish to blend it away' : 'elsewhere to stamp those pixels'}.`)
                     : 'Drag on the canvas to use this tool.'}
                 </div>
                 {tool === 'pen' && (
@@ -1722,9 +1895,79 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                     })}
                   </div>
                 )}
-                <button className="cm-toggle" data-on={snapOn} onClick={toggleSnap} style={{ marginTop: 10 }}>
-                  {snapOn ? 'Snap: on' : 'Snap: off'}
-                </button>
+                {/* Snap to grid / Auto-detect — two-up custom-checkbox row (not native checkboxes),
+                    matching the demo's .check-row/.check-item. Auto-detect is cosmetic-only here too
+                    (see autodetectOn's declaration) — there's no ambient detection mode in the core. */}
+                <div className="cm-check-row">
+                  <button className="cm-check-item" data-on={snapOn} onClick={toggleSnap}>
+                    <span className="box"><Icon name="check" size={9} /></span>Snap to grid
+                  </button>
+                  <button className="cm-check-item" data-on={autodetectOn} onClick={() => setAutodetectOn(v => !v)}>
+                    <span className="box"><Icon name="check" size={9} /></span>Auto-detect
+                  </button>
+                </div>
+
+                {/* Clone/Heal need a source point before they do anything at all, and nothing on
+                    the canvas says so — this states the step you're on and offers a reset. */}
+                {(tool === 'clone' || tool === 'heal') && (
+                  <React.Fragment>
+                    <div className="cm-grp" style={{ marginTop: 16 }}>{tool === 'heal' ? 'Healing brush' : 'Clone stamp'}</div>
+                    <div className="cm-note" style={{ marginTop: 6 }}>
+                      {cloneSrc
+                        ? `Source set at ${Math.round(cloneSrc.x)}, ${Math.round(cloneSrc.y)} — now paint to ${tool === 'heal' ? 'heal with' : 'stamp'} those pixels.`
+                        : 'Step 1 — hold ⌥ (Alt) or ⇧ (Shift) and click the area you want to copy FROM.'}
+                    </div>
+                    <button className="cm-btn" style={{ marginTop: 8, width: '100%', justifyContent: 'center' }}
+                      disabled={!cloneSrc} onClick={() => ed().clearCloneSource()}>
+                      Reset source
+                    </button>
+                    <div className="cm-note" style={{ marginTop: 8 }}>⌥-click or ⇧-click re-sources at any time</div>
+                  </React.Fragment>
+                )}
+
+                {/* Destructive-vs-new-layer, for every pixel tool: by default strokes edit the
+                    image itself (at its own resolution), which is what a photo editor does. */}
+                {isPaintTool && (
+                  <React.Fragment>
+                    <div className="cm-grp" style={{ marginTop: 16 }}>Destination</div>
+                    <button className="cm-check-item" data-on={!!opts.paintNewLayer} style={{ marginTop: 6 }}
+                      onClick={() => ed().setToolOptions({ paintNewLayer: !opts.paintNewLayer })}>
+                      <span className="box"><Icon name="check" size={9} /></span>Paint on a new layer
+                    </button>
+                    <div className="cm-note" style={{ marginTop: 6 }}>
+                      {opts.paintNewLayer
+                        ? 'Strokes go to a separate paint layer — the original image is left untouched.'
+                        : 'Editing the image itself (the selected layer, or the top image), at its own resolution.'}
+                    </div>
+                  </React.Fragment>
+                )}
+
+                {/* Brush/Color section — only the sliders+swatches a given tool can actually read
+                    (see COLOR_TOOLS/isPaintTool below), moved out of the always-visible header. */}
+                {isColorTool && (
+                  <React.Fragment>
+                    <div className="cm-grp" style={{ marginTop: 16 }}>{isPaintTool ? 'Brush' : 'Color'}</div>
+                    {isPaintTool && (
+                      <React.Fragment>
+                        <div className="cm-slider-row">Size <input type="range" min="2" max="220" value={opts.size} onChange={e => ed().setToolOptions({ size: +e.target.value })} /><span className="cm-tag mono">{opts.size}</span></div>
+                        {/* "Soft" is the inverse of the engine's hardness (0 hardness = fully soft
+                            edge) — same knob, flipped so the UI reads as "how soft" not "how hard". */}
+                        <div className="cm-slider-row" style={{ marginTop: 6 }}>Soft <input type="range" min="0" max="100" value={Math.round((1 - opts.hardness) * 100)} onChange={e => ed().setToolOptions({ hardness: 1 - (+e.target.value / 100) })} /><span className="cm-tag mono">{Math.round((1 - opts.hardness) * 100)}%</span></div>
+                        <div className="cm-slider-row" style={{ marginTop: 6 }}>Opacity <input type="range" min="5" max="100" value={Math.round(opts.opacity * 100)} onChange={e => ed().setToolOptions({ opacity: +e.target.value / 100 })} /><span className="cm-tag mono">{Math.round(opts.opacity * 100)}%</span></div>
+                      </React.Fragment>
+                    )}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+                      <input type="color" value={opts.color} onChange={e => ed().setToolOptions({ color: e.target.value, fill: e.target.value })} title="Colour" />
+                      <div style={{ display: 'flex', gap: 6, flex: 1 }}>
+                        {BRUSH_SWATCHES.map(c => (
+                          <button key={c} className="cm-swatch-btn" data-on={c.toLowerCase() === (opts.color || '').toLowerCase()}
+                            style={{ background: c }} title={c}
+                            onClick={() => ed().setToolOptions({ color: c, fill: c })} />
+                        ))}
+                      </div>
+                    </div>
+                  </React.Fragment>
+                )}
 
                 {tool === 'magicwand' && (
                   <React.Fragment>
@@ -1831,34 +2074,30 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                   </React.Fragment>
                 )}
 
-                <h4>Align to canvas</h4>
-                <div className="cm-align">
-                  {[
-                    ['left', 'align-left'], ['center', 'align-h-center'], ['right', 'align-right'],
-                    ['top', 'align-top'], ['middle', 'align-v-center'], ['bottom', 'align-bottom'],
-                  ].map(([edge, icon]) => (
-                    <button key={edge} disabled={!activeLayer} title={'Align ' + edge} onClick={() => align(edge)}>
-                      <Icon name={icon} size={16} />
-                    </button>
-                  ))}
+                {/* Transform: Duplicate + a combined Flip H/V button (plain click flips
+                    horizontal, shift-click flips vertical) — canvas alignment moved to the
+                    Properties panel (right side, next to Stacking) since it acts on the current
+                    selection, same family as Stacking/Group-Ungroup. */}
+                <div className="cm-grp">Transform</div>
+                <div className="cm-row">
+                  <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} disabled={!activeLayer} onClick={duplicate}>
+                    <Icon name="duplicate" size={13} /> Duplicate
+                  </button>
+                  <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} disabled={!activeLayer}
+                    title="Flip horizontal — shift-click to flip vertical"
+                    onClick={e => ed().flipLayer(e.shiftKey ? 'y' : 'x')}>
+                    <Icon name="flip" size={13} /> Flip H / V
+                  </button>
                 </div>
-                {props.hasFill && (
-                  <>
-                    <h4>Fill</h4>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <input type="color" value={props.fill} title="Fill colour"
-                        onChange={e => setFillColor(e.target.value)} />
-                      <span className="cm-note" style={{ margin: 0 }}>Colour of the selected shape or text.</span>
-                    </div>
-                  </>
-                )}
-                <button className="cm-btn" disabled={!activeLayer} onClick={duplicate}>
-                  <Icon name="duplicate" /> Duplicate
-                </button>
 
-                <div className="cm-grp">Auto-detect</div>
-                <button className="cm-btn" style={{ width: '100%', justifyContent: 'center' }} onClick={detectObjects}>
-                  <Icon name="wand" size={13} /> Detect objects
+                {/* AI Vision Engine card — badged "v3.4", with a glowing accent-bordered
+                    "Auto-Detect Subjects" button wrapping the existing detect-objects action. */}
+                <div className="cm-grp" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Icon name="spark" size={13} style={{ color: 'var(--cm-accent)' }} />AI Vision Engine
+                  <span className="cm-tag mono" style={{ marginLeft: 'auto' }}>v3.4</span>
+                </div>
+                <button className="cm-ai-detect-btn" onClick={detectObjects}>
+                  <Icon name="wand" size={13} /> Auto-Detect Subjects
                 </button>
                 {detectResults.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 6 }}>
@@ -1870,13 +2109,13 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                   </div>
                 )}
 
-                <div className="cm-grp">Selection (needs a marquee/lasso/wand selection)</div>
+                <div className="cm-grp">Selection modifiers</div>
                 <div className="cm-row">
                   <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={expandSel}><Icon name="expand" size={13} /> Expand</button>
                   <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={contractSel}><Icon name="contract" size={13} /> Contract</button>
                 </div>
                 <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }} disabled={!props.hasSelectionPixels} onClick={selectSimilar}>
-                  <Icon name="similar" size={13} /> Select similar
+                  <Icon name="similar" size={13} /> Select Similar Colors
                 </button>
                 <label className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center', opacity: props.hasSelectionPixels ? 1 : 0.4, pointerEvents: props.hasSelectionPixels ? 'auto' : 'none' }}>
                   <Icon name="eyedropper" size={13} /> Recolor selection…
@@ -1888,61 +2127,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                   <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={clearClip}><Icon name="close" size={13} /> Clear clip</button>
                 </div>
                 {selMsg && <div className="cm-note">{selMsg}</div>}
-              </div>
-            )}
-
-            {leftTab === 'layers' && (
-              <div>
-                {layers.map(l => {
-                  const thumb = layerThumb(l.id);
-                  return (
-                    <div key={l.id} className="cm-layer" data-on={l.active} data-dragover={dragOverId === l.id} data-dragging={dragLayerId === l.id}
-                      draggable={l.role !== 'bg'}
-                      onDragStart={e => onLayerDragStart(e, l)} onDragOver={e => onLayerDragOver(e, l)}
-                      onDragLeave={() => setDragOverId(id => id === l.id ? null : id)} onDrop={e => onLayerDrop(e, l)} onDragEnd={onLayerDragEnd}
-                      onClick={() => { if (renamingId !== l.id) onLayerRowClick(l); }}>
-                      <span className="cm-layer-thumb">
-                        {thumb ? <img src={thumb} alt="" /> : <Icon name={l.role === 'text' ? 'type' : l.role === 'bg' ? 'duplicate' : 'box'} size={14} />}
-                      </span>
-                      <span className="cm-eye" onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { visible: !l.visible }); }}><Icon name={l.visible ? 'eye' : 'eyeOff'} size={13} /></span>
-                      <span className="cm-eye" title={l.locked ? 'Unlock' : 'Lock'} style={{ opacity: l.locked ? 1 : 0.5 }} onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { locked: !l.locked }); }}><Icon name="lock" size={13} /></span>
-                      {renamingId === l.id ? (
-                        <input className="cm-layer-rename" defaultValue={l.name} autoFocus
-                          onClick={e => e.stopPropagation()}
-                          onFocus={e => e.target.select()}
-                          onKeyDown={e => { if (e.key === 'Enter') commitRename(l.id, e.target.value); else if (e.key === 'Escape') setRenamingId(null); }}
-                          onBlur={e => commitRename(l.id, e.target.value)} />
-                      ) : (
-                        <span style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: l.visible ? 1 : 0.4 }}>{l.name}</span>
-                          <span style={{ fontSize: 10, color: 'var(--cm-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{layerSubtitle(l)}</span>
-                        </span>
-                      )}
-                      {l.maskable && (l.hasMask ? (
-                        <React.Fragment>
-                          <span className="cm-eye" title={l.editingMask ? 'Stop editing mask' : 'Edit mask'}
-                            style={{ opacity: (l.editingMask || !l.maskEnabled) ? 1 : 0.7, color: l.editingMask ? 'var(--cm-accent)' : undefined }}
-                            onClick={e => { e.stopPropagation(); if (l.editingMask) ed().exitMaskEdit(); else { ed().activate(l.id); ed().enterMaskEdit(l.id); } }}>
-                            <Icon name="mask" size={13} />
-                          </span>
-                          <span className="cm-eye" title="Delete mask" onClick={e => { e.stopPropagation(); ed().removeMask(l.id); }}><Icon name="close" size={13} /></span>
-                        </React.Fragment>
-                      ) : (
-                        <span className="cm-eye" title="Add layer mask" onClick={e => { e.stopPropagation(); ed().addMask(l.id); ed().enterMaskEdit(l.id); }}>
-                          <Icon name="mask" size={13} />
-                        </span>
-                      ))}
-                      <span className="cm-eye" title="Up" onClick={e => { e.stopPropagation(); ed().moveLayer(l.id, 'up'); }}><Icon name="up" size={13} /></span>
-                      {l.role !== 'bg' && <span className="cm-eye" title="Delete" onClick={e => { e.stopPropagation(); ed().removeLayer(l.id); }}><Icon name="close" size={13} /></span>}
-                    </div>
-                  );
-                })}
-                <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} onClick={() => ed().addAdjustmentLayer()}>
-                  <Icon name="contrast" size={13} /> Add adjustment layer
-                </button>
-              </div>
-            )}
-          </React.Fragment>
+          </div>
         )}
       </div>
       <div className="cm-stage" ref={stageRef} onDragOver={onStageDragOver} onDrop={onStageDrop}>
@@ -2125,7 +2310,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
         {!sideCollapsed && !reviewOn && (
           <React.Fragment>
             <div className="cm-tabs">
-              <button data-on={sideTab === 'layer'} onClick={() => setSideTab('layer')}><Icon name="layers" size={13} /> Layer</button>
+              <button data-on={sideTab === 'layer'} onClick={() => setSideTab('layer')}><Icon name="layers" size={13} /> Layers</button>
               <button data-on={sideTab === 'design'} onClick={() => setSideTab('design')}><Icon name="palette" size={13} /> Design</button>
               <button data-on={sideTab === 'stickers'} onClick={() => setSideTab('stickers')}><Icon name="star" size={13} /> Stickers</button>
               <button data-on={sideTab === 'ai'} onClick={() => setSideTab('ai')}><Icon name="spark" size={13} /> AI</button>
@@ -2133,15 +2318,70 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
 
             {sideTab === 'layer' && (
               <div>
+                {/* Layer list — moved here from the left panel's old Tool/Layers tab split so the
+                    layer list sits directly above that same layer's own Properties, rather than
+                    living in a separate tab pair from the tool options (matches the vanilla
+                    demo's #layers-panel content having moved into #layer-panel). */}
+                <div className="cm-grp" style={{ marginTop: 0, paddingTop: 0, borderTop: 'none' }}>Layers</div>
+                <div style={{ minHeight: 60, maxHeight: 220, overflowY: 'auto' }}>
+                  {layers.map(l => {
+                    const thumb = layerThumb(l.id);
+                    return (
+                      <div key={l.id} className="cm-layer" data-on={l.active} data-dragover={dragOverId === l.id} data-dragging={dragLayerId === l.id}
+                        draggable={l.role !== 'bg'}
+                        onDragStart={e => onLayerDragStart(e, l)} onDragOver={e => onLayerDragOver(e, l)}
+                        onDragLeave={() => setDragOverId(id => id === l.id ? null : id)} onDrop={e => onLayerDrop(e, l)} onDragEnd={onLayerDragEnd}
+                        onClick={() => { if (renamingId !== l.id) onLayerRowClick(l); }}>
+                        <span className="cm-layer-thumb">
+                          {thumb ? <img src={thumb} alt="" /> : <Icon name={l.role === 'text' ? 'type' : l.role === 'bg' ? 'duplicate' : 'box'} size={14} />}
+                        </span>
+                        <span className="cm-eye" onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { visible: !l.visible }); }}><Icon name={l.visible ? 'eye' : 'eyeOff'} size={13} /></span>
+                        <span className="cm-eye" title={l.locked ? 'Unlock' : 'Lock'} style={{ opacity: l.locked ? 1 : 0.5 }} onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { locked: !l.locked }); }}><Icon name="lock" size={13} /></span>
+                        {renamingId === l.id ? (
+                          <input className="cm-layer-rename" defaultValue={l.name} autoFocus
+                            onClick={e => e.stopPropagation()}
+                            onFocus={e => e.target.select()}
+                            onKeyDown={e => { if (e.key === 'Enter') commitRename(l.id, e.target.value); else if (e.key === 'Escape') setRenamingId(null); }}
+                            onBlur={e => commitRename(l.id, e.target.value)} />
+                        ) : (
+                          <span style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: l.visible ? 1 : 0.4 }}>{l.name}</span>
+                            <span style={{ fontSize: 10, color: 'var(--cm-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{layerSubtitle(l)}</span>
+                          </span>
+                        )}
+                        {l.maskable && (l.hasMask ? (
+                          <React.Fragment>
+                            <span className="cm-eye" title={l.editingMask ? 'Stop editing mask' : 'Edit mask'}
+                              style={{ opacity: (l.editingMask || !l.maskEnabled) ? 1 : 0.7, color: l.editingMask ? 'var(--cm-accent)' : undefined }}
+                              onClick={e => { e.stopPropagation(); if (l.editingMask) ed().exitMaskEdit(); else { ed().activate(l.id); ed().enterMaskEdit(l.id); } }}>
+                              <Icon name="mask" size={13} />
+                            </span>
+                            <span className="cm-eye" title="Delete mask" onClick={e => { e.stopPropagation(); ed().removeMask(l.id); }}><Icon name="close" size={13} /></span>
+                          </React.Fragment>
+                        ) : (
+                          <span className="cm-eye" title="Add layer mask" onClick={e => { e.stopPropagation(); ed().addMask(l.id); ed().enterMaskEdit(l.id); }}>
+                            <Icon name="mask" size={13} />
+                          </span>
+                        ))}
+                        <span className="cm-eye" title="Up" onClick={e => { e.stopPropagation(); ed().moveLayer(l.id, 'up'); }}><Icon name="up" size={13} /></span>
+                        {l.role !== 'bg' && <span className="cm-eye" title="Delete" onClick={e => { e.stopPropagation(); ed().removeLayer(l.id); }}><Icon name="close" size={13} /></span>}
+                      </div>
+                    );
+                  })}
+                </div>
+                <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} onClick={() => ed().addAdjustmentLayer()}>
+                  <Icon name="contrast" size={13} /> Add adjustment layer
+                </button>
+
                 {!props.active ? (
                   <React.Fragment>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 16, marginBottom: 10 }}>
                       <strong style={{ fontSize: 13 }}>Properties</strong>
                     </div>
                     <div className="cm-props-empty">
                       <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="4" y="4" width="16" height="16" rx="2" /><path d="M4 15l4-4 4 4 4-6 4 4" /></svg>
                       <span className="h">Nothing selected</span>
-                      <span className="d">Select a layer on the canvas or from the Layers tab to see and edit its properties.</span>
+                      <span className="d">Select a layer above, or on the canvas, to see and edit its properties.</span>
                     </div>
                   </React.Fragment>
                 ) : (
@@ -2160,6 +2400,18 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                     <div className="cm-row" style={{ marginTop: 6 }}>
                       <button className="cm-btn" disabled={!props.canGroup} onClick={groupSel}><Icon name="box" size={13} /> Group</button>
                       <button className="cm-btn" disabled={!props.canUngroup} onClick={ungroupSel}><Icon name="grid" size={13} /> Ungroup</button>
+                    </div>
+
+                    <div className="cm-grp">Canvas alignment</div>
+                    <div className="cm-align">
+                      {[
+                        ['left', 'align-left'], ['center', 'align-h-center'], ['right', 'align-right'],
+                        ['top', 'align-top'], ['middle', 'align-v-center'], ['bottom', 'align-bottom'],
+                      ].map(([edge, icon]) => (
+                        <button key={edge} title={'Align ' + edge} onClick={() => align(edge)}>
+                          <Icon name={icon} size={16} />
+                        </button>
+                      ))}
                     </div>
 
                     {(props.isImage || props.isAdjustment) && (
