@@ -30,6 +30,14 @@ import { makeCTA, makeBadge, makePrice, makeBrandLockup } from './adtext.js';
 import { buildPromoLayout, buildLayerFromSpec } from './templates.js';
 
 export const SEL_TOOLS = ['marquee', 'marquee-ellipse', 'lasso', 'lasso-poly', 'lasso-mag', 'wand', 'objectselect-bbox', 'magicwand', 'objectselect', 'hoverselect'];
+/* Default wand/object-select tolerance. Was 32, which is fine on flat synthetic colour but
+   measurably WRONG on photographs: a soft-edged, noisy subject came back ~22-28% smaller than
+   the object on every side, so the wand visibly cut inside the thing the user clicked.
+   Photographic edges are gradients, and a low tolerance stops at the first shading step.
+   Measured across 600/800/1000/1200/1598px images (subject = 48% of width), error vs. the true
+   subject size: tol 32 ~-37%, tol 48 ~-22%, tol 64 within 1% at EVERY size. Flat synthetic
+   shapes stay within 2% at all of these, so raising it costs nothing on the easy case.
+   Scrub with [ and ] or the Tolerance slider. */
 export const SHAPE_TOOLS = ['rect', 'ellipse', 'line', 'triangle', 'polygon', 'star'];
 export const ALL_TOOLS = ['select', 'hand', ...PAINT_TOOLS, ...SEL_TOOLS, ...SHAPE_TOOLS, 'type', 'bucket', 'gradient', 'eyedropper', 'crop', 'pen', 'aiinsert'];
 const CLICK_LASSOS = ['lasso-poly', 'lasso-mag'];
@@ -143,6 +151,7 @@ export class Editor {
       controlsAboveOverlay: true,
     });
     this._voidColor = voidColor;   // see setVoidColor() / the off-canvas mask below
+    this._background = background; // the artboard's starting page colour — reset() paints it back after fc.clear() nulls it
     // fabric.Canvas's OWN _renderBackground paints fc.backgroundColor across (0,0)-(fc.width,
     // fc.height) — fc's own DOM size, i.e. the host's stage — not the artboard, so it paints the
     // wrong region entirely once those two diverge (see the W/H comment above: a small artboard
@@ -224,7 +233,7 @@ export class Editor {
     this.cv = new CvEngine(openCvUrl ? { openCvUrl } : undefined);
     this.tool = 'select';
     this.toolOpts = {
-      size: 30, opacity: 1, hardness: 0.7, color: '#ef6a2d', fill: '#ef6a2d', tolerance: 32, fontSize: 48, aligned: true,
+      size: 30, opacity: 1, hardness: 0.7, color: '#ef6a2d', fill: '#ef6a2d', tolerance: 64, fontSize: 48, aligned: true,
       gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }],
       addMode: false,   // sticky "keep adding every click to the selection" toggle for wand/objectselect/hoverselect
       paintNewLayer: false,   // paint tools retouch the image itself by default — see _bindPaintTarget
@@ -2295,7 +2304,7 @@ export class Editor {
   }
   addImage(src, opts = {}) { return addImageLayer(this.fabric, this.fc, src, { W: this.W, H: this.H, ...opts }).then(i => { if (!this._destroyed) this.commit('image'); return i; }); }
   exportPNG(mult = 1) { return exportImage(this.fc, this.W, this.H, { format: 'png', multiplier: mult }); }
-  exportJPEG(quality = 0.92) { return exportImage(this.fc, this.W, this.H, { format: 'jpeg', quality }); }
+  exportJPEG(quality = 0.92, mult = 1) { return exportImage(this.fc, this.W, this.H, { format: 'jpeg', quality, multiplier: mult }); }
   /* Vector export via Fabric's own toSVG — returns an SVG string (wrap in a Blob to download). */
   exportSVG() {
     this.fc.discardActiveObject();
@@ -2304,6 +2313,56 @@ export class Editor {
   }
   toJSON() { return serialize(this.fc, this.W, this.H); }
   loadJSON(json) { restore(this.fc, json, { engine: this.engine, history: this.history, onDone: (w, h) => { this._afterRestore(w, h); this.commit('load'); } }); }
+
+  /* Back to a blank document — what a host's "New" command calls. Everything that survives is
+     the things that aren't the DOCUMENT: the registered AI provider/key, the cv engine, the
+     host's own event subscriptions, and the fabric canvas element itself (fc's DOM size belongs
+     to the host's stage, not the artboard — see the constructor).
+
+     History is emptied rather than kept, because "New" is not an edit: leaving the old document
+     on the undo stack would let Ctrl+Z resurrect a document the user explicitly discarded, and
+     the whole point of the button is to get rid of it. The blank state is then committed as the
+     single baseline entry, exactly as the constructor does for a fresh Editor.
+
+     Every transient cache keyed to the OLD scene's geometry is dropped for the same reason
+     resizeCanvas() drops them — they're scene-space coordinates that no longer refer to
+     anything, and a stale hover/edge-map entry would otherwise snap the first selection in the
+     new document against geometry from the discarded one. */
+  reset({ width = this.W, height = this.H, background } = {}) {
+    this.history.lock = true;                 // the teardown below is not a sequence of undo steps
+    if (this.tool === 'crop') this._restoreCropTarget();
+    if (this._maskEdit) this.exitMaskEdit();
+    this.fc.discardActiveObject();
+    this.fc.clear();                          // drops every object AND fc.backgroundColor
+    this.W = Math.max(1, Math.round(width));
+    this.H = Math.max(1, Math.round(height));
+    this.engine.W = this.W; this.engine.H = this.H;
+    // fc.clear() nulls backgroundColor; restore it so the artboard paints as a page again rather
+    // than as a transparent hole over the void (see the _renderBackground override above).
+    this.fc.backgroundColor = background != null ? background : this._background;
+    this.clearSelection();
+    this._edgeMap = null;
+    this._lastWandSeed = null;
+    this._edgeMapSeq++;
+    this._objBoxes = []; this._objRegion = null; this._objSrc = null; this._objCycle = null;
+    this._objSeq++;
+    this.objCount = 0; this.multiCount = 0;
+    this._lastActiveId = null;
+    this._cropTarget = null;
+    this._cropRestore = null;
+    this._polyBuild = null;
+    this._penBuild = null;
+    if (this._hoverCache) this._hoverCache.clear();
+    this.history.past = []; this.history.future = [];
+    this.history.lock = false;
+    this.fc.renderAll();
+    this.commit('new');                       // single baseline entry, like the constructor's commit('init')
+    this._emit('resize', { width: this.W, height: this.H });
+    this._emit('objcount', 0);
+    this._emit('pen', null);
+    this._emit('selection', null);
+    return this;
+  }
 
   /* ── AI conveniences (thin sugar over the registry) ───────────────────────────────────── */
   async aiEdit(instruction) {

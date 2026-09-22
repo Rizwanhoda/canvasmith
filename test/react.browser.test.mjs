@@ -47,6 +47,18 @@ let page;
 beforeEach(async () => {
   page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   page.on('pageerror', (e) => { throw new Error('page error: ' + e.message); });
+  /* Pages in this file share one browser context, so IndexedDB persists between tests and the
+     session autosave would restore the PREVIOUS test's document into this one's "blank" canvas.
+     That is not hypothetical: it made the detectRegions tests flaky, because the local CV
+     fallback found a region in the leaked artwork and the "no regions" error path never ran.
+     Wipe the store before the app boots, so every test starts from a genuinely empty document. */
+  // Wipe before the app's first boot only — NOT via addInitScript, which would also run on the
+  // in-test reloads that the persistence tests rely on to prove a document survives one.
+  await page.goto(baseURL + '/test/fixtures/blank.html');
+  await page.evaluate(() => new Promise(res => {
+    const r = indexedDB.deleteDatabase('canvasmith');
+    r.onsuccess = r.onerror = r.onblocked = () => res();
+  }));
   await page.goto(baseURL + '/test/fixtures/browser-react.html');
   await page.waitForFunction(() => window.__mounted && window.__mounted.editor() && window.__mounted.editor().fc, null, { timeout: 15000 });
   // CanvasmithEditor runs fitToScreen() on mount (the zoom-pill feature) — reset the viewport to
@@ -218,8 +230,7 @@ test('react: the layers tab shows a thumbnail image for each layer', async () =>
   await page.mouse.move(box.x + 150, box.y + 150, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(150);
-  const layersTabBtn = page.locator('button:has-text("Layers")').first();
-  await layersTabBtn.click();
+  // The layer list lives in the always-visible left panel now (no tab click needed).
   await page.waitForTimeout(150);
   const thumbImgs = await page.locator('.cm-layer-thumb img').count();
   assert.ok(thumbImgs > 0);
@@ -235,7 +246,6 @@ test('react: the lock toggle in the layer row calls setLayer({locked}) without a
   await page.mouse.move(box.x + 150, box.y + 150, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(150);
-  await page.locator('button:has-text("Layers")').first().click();
   await page.waitForTimeout(150);
   const lockBtn = page.locator('.cm-layer .cm-eye[title="Lock"]').first();
   assert.ok(await lockBtn.count() > 0);
@@ -253,7 +263,6 @@ test('react: double-clicking a layer row\'s name enters rename mode, Enter commi
   await page.mouse.move(box.x + 150, box.y + 150, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(150);
-  await page.locator('button:has-text("Layers")').first().click();
   await page.waitForTimeout(150);
   const row = page.locator('.cm-layer').first();
   await row.click();
@@ -284,7 +293,6 @@ test('react: dragging one layer row onto another reorders the stack via reorderL
     return wed.fc.getObjects().map(o => o.id);
   });
   assert.deepEqual(ids, ['layer-a', 'layer-b']);   // a below b, bottom-to-top fc order
-  await page.locator('button:has-text("Layers")').first().click();
   await page.waitForTimeout(150);
   // reorderLayerTo is exercised directly (core already has dedicated coverage for its geometry);
   // this test is specifically about the React row wiring calling it correctly on a drop.
@@ -303,7 +311,7 @@ test('react: the Layer tab shows a Border section for a shape, with a colour swa
   await page.mouse.move(box.x + 150, box.y + 150, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(150);
-  await page.locator('button:has-text("Layers")').first().click();
+  await page.locator('button:has-text("Properties")').first().click();
   await page.waitForTimeout(150);
   assert.ok(await page.locator('.cm-grp:has-text("Border")').count() > 0);
   // width still 0 -> no colour swatch row yet
@@ -656,7 +664,10 @@ test('react: "Detect & convert to layers" shows an error message instead of sile
   await ed(() => { window.__mounted.editor().ai.provider().detectRegions = async () => []; });
 
   await page.locator('button:has-text("Detect & convert to layers")').first().click();
-  await page.waitForTimeout(300);
+  /* Wait for the message rather than sleeping a fixed 300ms: detectRegions() flattens the canvas
+     and round-trips the CV worker before it can report "no regions", and that takes longer on a
+     cold worker or a loaded machine — a fixed sleep made this test flaky, not the code. */
+  await page.locator('.cm-note', { hasText: 'No regions detected' }).first().waitFor({ timeout: 10000 });
 
   assert.equal(await page.locator('.cm-review-box').count(), 0);   // review did NOT silently open
   const notes = await page.locator('.cm-note').allTextContents();
@@ -672,7 +683,8 @@ test('react: "Detect & convert to layers" shows an error message when the AI cal
   await ed(() => { window.__mounted.editor().ai.provider().detectRegions = async () => { throw new Error('network unreachable'); }; });
 
   await page.locator('button:has-text("Detect & convert to layers")').first().click();
-  await page.waitForTimeout(300);
+  // Same reason as the test above: wait for the message, don't sleep a fixed interval.
+  await page.locator('.cm-note', { hasText: 'network unreachable' }).first().waitFor({ timeout: 10000 });
 
   const notes = await page.locator('.cm-note').allTextContents();
   // AIRegistry#run catches the throw and reports it as a 'provider_failed' status with the
@@ -813,4 +825,157 @@ test('react: the Canvas size popover has a grouped preset picker (Social/Print/S
   await page.waitForTimeout(150);
   const dims = await ed(() => ({ W: window.__mounted.editor().W, H: window.__mounted.editor().H }));
   assert.deepEqual(dims, { W: 1280, H: 720 });
+});
+
+/* ── session autosave + New ────────────────────────────────────────────────────────────────
+   Parity check against the vanilla demo's own session behaviour: the React shell must persist
+   a document across a reload and offer the same one-click way out of it. */
+
+test('react: the document survives a reload, and New clears it (canvas, history and the save)', async () => {
+  // This test is the only one that deliberately leaves a saved session behind, so it owns
+  // clearing it — page contexts here share an origin, and a leftover scene would restore itself
+  // into whichever test ran next. The store is IndexedDB (see session.js), not localStorage.
+  const clearSaved = () => page.evaluate(() => new Promise(res => {
+    const r = indexedDB.deleteDatabase('canvasmith');
+    r.onsuccess = r.onerror = r.onblocked = () => res();
+  }));
+  await clearSaved();
+  await ed(() => window.__mounted.editor().setTool('rect'));
+  const canvasBox = await page.locator('canvas').first().boundingBox();
+  await page.mouse.move(canvasBox.x + 40, canvasBox.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + 140, canvasBox.y + 120, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(1200);        // outlast installAutosave's debounce
+
+  assert.equal(await page.locator('.cm-save-note').count(), 1);
+
+  await page.reload();
+  await page.waitForFunction(() => window.__mounted && window.__mounted.editor() && window.__mounted.editor().fc, null, { timeout: 15000 });
+  await page.waitForTimeout(1500);        // restoreSession settles on loadJSON's own commit
+  assert.deepEqual(await ed(() => window.__mounted.editor().fc.getObjects().map(o => o.type)), ['rect']);
+
+  // Undo must not walk back past the restore into a blank canvas the user never made.
+  // The restored scene is the FLOOR of the undo stack (History#rebase), so there is nothing
+  // behind it to walk back into.
+  assert.equal(await ed(() => window.__mounted.editor().history.past.length), 1);
+  await ed(() => window.__mounted.editor().undo());
+  await page.waitForTimeout(400);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getObjects().length), 1);
+
+  // New: confirmed, then everything goes — canvas, undo stack and the saved copy.
+  page.on('dialog', d => d.accept());
+  await page.locator('button:has-text("New")').first().click();
+  await page.waitForTimeout(500);
+  const after = await ed(() => ({
+    objects: window.__mounted.editor().fc.getObjects().length,
+    past: window.__mounted.editor().history.past.length,
+  }));
+  assert.deepEqual(after, { objects: 0, past: 1 });
+
+  // New must wipe the stored copy too, not just the canvas — a reload here must stay empty.
+  await page.reload();
+  await page.waitForFunction(() => window.__mounted && window.__mounted.editor() && window.__mounted.editor().fc, null, { timeout: 15000 });
+  await page.waitForTimeout(1500);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getObjects().length), 0);
+
+  await clearSaved();
+});
+
+/* ── accessible names ──────────────────────────────────────────────────────────────────────
+   Nearly every control in this editor is an icon with a `title`. A title is a mouse
+   affordance — screen readers treat it as a last-resort fallback and several ignore it when
+   the element has no other name — so without an explicit accessible name the tool rail, zoom
+   pill, stacking and alignment controls all announce as an unlabelled "button". */
+
+test('react: every icon-only button exposes an accessible name, including after panels re-render', async () => {
+  const unlabeled = () => page.evaluate(() => {
+    const out = [];
+    document.querySelectorAll('button').forEach(b => {
+      if ((b.textContent || '').trim()) return;          // a visible text label is its own name
+      if (b.getAttribute('aria-label')) return;
+      out.push(b.className + (b.id ? '#' + b.id : '') + ' title=' + (b.getAttribute('title') || ''));
+    });
+    return out;
+  });
+  assert.deepEqual(await unlabeled(), []);
+
+  // The panels re-render constantly as tools/selections change, so a one-shot pass at mount
+  // would miss most of these — re-check after the tool panels have swapped out.
+  await ed(() => window.__mounted.editor().setTool('gradient'));
+  await page.waitForTimeout(400);
+  assert.deepEqual(await unlabeled(), []);
+
+  await ed(() => window.__mounted.editor().setTool('select'));
+  await page.waitForTimeout(400);
+  assert.deepEqual(await unlabeled(), []);
+
+  // The tool rail's own names come from the tooltip text, and its state must reach AT too:
+  // aria-pressed says which tool is active, aria-expanded which group is showing its flyout.
+  const rail = await page.evaluate(() => [...document.querySelectorAll('.cm-rail-btn')].map(b => ({
+    name: b.getAttribute('aria-label'), pressed: b.getAttribute('aria-pressed'),
+  })));
+  assert.ok(rail.length > 0);
+  assert.ok(rail.every(r => r.name && r.name.length > 1), 'every rail button needs a name');
+  assert.equal(rail.filter(r => r.pressed === 'true').length, 1, 'exactly one tool reads as active');
+
+  // Icons are decorative — they must not leak into the accessibility tree alongside the name.
+  const barecSvg = await page.evaluate(() => [...document.querySelectorAll('button svg')].filter(s => s.getAttribute('aria-hidden') !== 'true').length);
+  assert.equal(barecSvg, 0);
+});
+
+/* ── UX fixes: recoverable New, project file, export scale, drop cue ───────────────────── */
+
+test('react: New is recoverable — the toast Undo brings the discarded document back', async () => {
+  await page.evaluate(() => new Promise(res => {
+    const r = indexedDB.deleteDatabase('canvasmith'); r.onsuccess = r.onerror = r.onblocked = () => res();
+  }));
+  page.on('dialog', d => d.accept());
+  await ed(() => window.__mounted.editor().setTool('rect'));
+  const box = await page.locator('canvas').first().boundingBox();
+  await page.mouse.move(box.x + 40, box.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 130, box.y + 130, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(1300);                       // outlast the autosave debounce
+  assert.equal(await ed(() => window.__mounted.editor().fc.getObjects().length), 1);
+
+  await page.locator('button:has-text("New")').first().click();
+  await page.waitForTimeout(1200);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getObjects().length), 0);
+
+  // reset() empties the undo stack by design, so the ONLY way back is the toast's Undo —
+  // without it New would destroy the document outright.
+  assert.equal(await page.locator('.cm-toast').count(), 1);
+  await page.locator('.cm-toast button').click();
+  await page.waitForTimeout(2200);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getObjects().length), 1);
+
+  await page.evaluate(() => new Promise(res => {
+    const r = indexedDB.deleteDatabase('canvasmith'); r.onsuccess = r.onerror = r.onblocked = () => res();
+  }));
+});
+
+test('react: the export menu offers a real pixel scale and a layers-preserving project file', async () => {
+  await page.locator('.cm-export-btn').click();
+  await page.waitForTimeout(250);
+  // The readout must state the actual output size — "2x" alone doesn't say whether it clears a
+  // retina/print requirement.
+  const at1 = await page.locator('.cm-export-dims').textContent();
+  await page.locator('.cm-export-scale-btn', { hasText: '2×' }).click();
+  await page.waitForTimeout(200);
+  const at2 = await page.locator('.cm-export-dims').textContent();
+  assert.notEqual(at1, at2);
+
+  // …and the multiplier must reach the real exporter, not just the label.
+  const px = await page.evaluate(() => {
+    const read = (src) => new Promise(r => { const i = new Image(); i.onload = () => r(i.naturalWidth); i.src = src; });
+    const e = window.__mounted.editor();
+    return Promise.all([read(e.exportPNG(1)), read(e.exportPNG(2))]);
+  });
+  assert.equal(px[1], px[0] * 2);
+
+  const items = await page.locator('.cm-export-menu-item').allTextContents();
+  assert.ok(items.some(t => /Project file/.test(t)), 'can save an editable project');
+  assert.ok(items.some(t => /Open project/.test(t)), 'can open one back');
 });

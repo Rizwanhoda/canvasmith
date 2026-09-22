@@ -44,6 +44,34 @@
   header label { display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--dim); font-weight:500 }
   header > .note { color:var(--dim-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex-shrink:1 }
   header .hdiv, header .act, header label, header b, header .icon-btn { flex-shrink:0 }
+  /* Responsive header. Everything above is flex-shrink:0 in a fixed-height row, so below about
+     1100px the row simply overflowed and Export — the primary action — ran off the right edge
+     with no scrollbar to reach it (1024x768 laptops and any half-screen window hit this).
+     Rather than let it overflow, shed the optional chrome in order of how easily it is reached
+     another way, so the irreplaceable controls always fit:
+       <1180px  the app subtitle and the Compare label (Compare is also in the ⌘K palette)
+       <1080px  the Search button (⌘K opens it anyway) and the autosave note
+       <980px   the Canvas size button (also in ⌘K), the New label, and the zoom pill's +/-/fit
+                buttons — the percentage stays, and clicking it still fits to screen, so zoom
+                remains reachable there (as do the +/-/0 keyboard shortcuts)
+     Export, Open image, New, undo/redo and the zoom readout survive every step. */
+  @media (max-width: 1180px) {
+    header { gap:10px; padding:0 12px }
+    header > .note { display:none }
+    #compare-btn span { display:none }
+  }
+  @media (max-width: 1080px) {
+    #cmdk-open { display:none }
+    #save-note { display:none }
+  }
+  @media (max-width: 980px) {
+    header { gap:8px }
+    #canvas-size-btn { display:none }
+    #newdoc .lbl, #openfile .lbl { display:none }   /* icons remain, with title/aria-label intact */
+    header .hdiv { display:none }
+    #zoom-out, #zoom-in, #zoom-fit, #zoom-div { display:none }
+    #zoom-pill { border:none; background:none; padding:0 }
+  }
   /* rail | Tool/Layers (left, tab-driven) | canvas | Properties (right, selection-driven) — same
      4-column split as the reference editor, with each side panel independently collapsible. */
   main { display:grid; grid-template-columns:56px 290px 1fr 322px; min-height:0; transition:grid-template-columns .18s cubic-bezier(.4,0,.2,1); position:relative }
@@ -65,6 +93,10 @@
   #left-scroll-cue svg { color:var(--dim-2); animation:cue-bob 1.4s ease-in-out infinite }
   @keyframes cue-bob { 0%,100% { transform:translateY(0) } 50% { transform:translateY(3px) } }
   #tool-panel, #layer-panel { overflow-y:auto; min-height:0 }
+  /* Layers sits above the Tool panel and keeps its own height: flex-shrink:0 so a long tool
+     panel cannot squash the list, and the rule below divides the two. */
+  #layers-block { flex:0 0 auto; margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--line) }
+  main[data-left-collapsed=true] #layers-block { display:none }
   #right-panel { border-left:1px solid var(--line); overflow:hidden; padding:14px; transition:padding .18s; display:flex; flex-direction:column; min-height:0; position:relative }
   #right-scroll-cue { position:absolute; left:0; right:8px; bottom:0; height:36px; cursor:pointer;
     background:linear-gradient(to bottom, transparent, var(--panel) 75%);
@@ -86,7 +118,15 @@
   .rail-btn:active { transform:scale(.94) }
   .rail-btn[data-on=true] { background:var(--accent); color:var(--accent-ink); box-shadow:var(--shadow-sm) }
   .rail-btn:focus-visible { outline:none; box-shadow:var(--ring) }
-  .rail-caret { position:absolute; right:3px; bottom:3px; width:0; height:0; border-left:4px solid transparent; border-bottom:4px solid var(--dim-2) }
+  /* "This slot holds more tools" marker. Was a 4px triangle in --dim-2 — technically present,
+     but so low-contrast that 8 of the 15 rail slots read as single-tool buttons and their
+     alternates (pencil, the other lassos, burn/dodge…) were effectively undiscoverable without
+     already knowing they existed. Bigger, brighter, and it strengthens further on hover so the
+     "there's more here" cue lands right when the pointer is over it. */
+  .rail-caret { position:absolute; right:2.5px; bottom:2.5px; width:0; height:0;
+    border-left:5px solid transparent; border-bottom:5px solid var(--dim);
+    transition:border-bottom-color .12s }
+  .rail-btn:hover .rail-caret { border-bottom-color:var(--ink) }
   .rail-btn[data-on=true] .rail-caret { border-bottom-color:var(--accent-ink) }
   .rail-group { position:relative }
   .rail-flyout { position:absolute; left:48px; top:0; z-index:60; min-width:194px; background:var(--panel-2); border:1px solid var(--line); border-radius:11px; padding:6px; box-shadow:var(--shadow-lg); animation:pop-in .12s cubic-bezier(.2,.8,.3,1) }
@@ -102,7 +142,7 @@
   .font-item .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
   .font-item .ag { flex:none; font-size:13px; color:var(--dim-2) }
   .popover-anchor { position:relative }
-  .export-menu { position:absolute; right:0; top:calc(100% + 8px); z-index:60; min-width:150px; background:var(--panel-2); border:1px solid var(--line); border-radius:11px; padding:6px; box-shadow:var(--shadow-lg); animation:pop-in .12s cubic-bezier(.2,.8,.3,1) }
+  .export-menu { position:absolute; right:0; top:calc(100% + 8px); z-index:60; min-width:208px; background:var(--panel-2); border:1px solid var(--line); border-radius:11px; padding:6px; box-shadow:var(--shadow-lg); animation:pop-in .12s cubic-bezier(.2,.8,.3,1) }
   .export-menu-item { all:unset; box-sizing:border-box; display:flex; align-items:center; gap:8px; width:100%; padding:8px 9px; border-radius:7px; cursor:pointer; font-size:12.5px; font-weight:600; color:var(--ink); transition:background .1s }
   .export-menu-item:hover { background:var(--bg) }
   #export-caret svg { transition:transform .12s }
@@ -157,14 +197,17 @@
     background-size:24px 24px }
   /* floating zoom pill (bottom-right) + canvas-size badge (top-left) — matches the reference
      editor's overlay chrome, drawn over the canvas rather than living in the header. */
-  #zoom-pill { position:absolute; bottom:16px; right:16px; z-index:15; display:flex; align-items:center; gap:2px;
-    background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:4px; box-shadow:var(--shadow-lg) }
-  #zoom-pill button { all:unset; box-sizing:border-box; cursor:pointer; width:26px; height:26px; border-radius:999px; display:flex; align-items:center; justify-content:center; color:var(--dim); transition:background .1s }
+  /* Lives in the header now, so it is an inline control rather than a floating overlay: no
+     absolute position, no drop shadow (nothing to lift it off), and a flat border matching the
+     other header clusters. Moving it also frees the bottom-right corner of the canvas, which it
+     used to cover. */
+  #zoom-pill { display:flex; align-items:center; gap:2px; flex:none;
+    background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:3px }
+  #zoom-pill button { all:unset; box-sizing:border-box; cursor:pointer; width:24px; height:24px; border-radius:999px; display:flex; align-items:center; justify-content:center; color:var(--dim); transition:background .1s }
   #zoom-pill button:hover { background:var(--panel-2); color:var(--ink) }
-  #zoom-pct { all:unset; box-sizing:border-box; cursor:pointer; min-width:48px; padding:0 6px; height:26px; border-radius:999px; display:flex; align-items:center; justify-content:center; font-size:11.5px; font-weight:600; color:var(--ink); font-family:"JetBrains Mono",ui-monospace,monospace; transition:background .1s }
+  #zoom-pct { all:unset; box-sizing:border-box; cursor:pointer; min-width:46px; padding:0 6px; height:24px; border-radius:999px; display:flex; align-items:center; justify-content:center; font-size:11.5px; font-weight:600; color:var(--ink); font-family:"JetBrains Mono",ui-monospace,monospace; transition:background .1s }
   #zoom-pct:hover { background:var(--panel-2) }
   #zoom-div { width:1px; height:18px; background:var(--line); margin:0 3px }
-  #dim-badge { position:absolute; top:14px; left:14px; z-index:15; background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:5px 11px; font-size:11px; font-weight:600; font-family:"JetBrains Mono",ui-monospace,monospace; color:var(--dim); box-shadow:var(--shadow-sm) }
   #extend-banner { position:absolute; top:14px; left:50%; transform:translateX(-50%); z-index:16; display:flex; align-items:center; gap:7px; background:var(--accent); color:var(--accent-ink); border:none; border-radius:999px; padding:8px 14px; font-size:12px; font-weight:700; box-shadow:var(--shadow-lg); animation:pop-in .15s cubic-bezier(.2,.8,.3,1) }
   #extend-banner[hidden] { display:none }
   #extend-banner:hover { filter:brightness(1.06) }
@@ -344,6 +387,43 @@
 
   /* ── header: vertical dividers between control clusters ─────────────────────────────────── */
   header .hdiv { width:1px; height:22px; background:var(--line); flex:none }
+  /* Autosave readout — quiet when things are fine, amber when the document is too big to save
+     (or storage is blocked), since that's the only case the user has to act on. */
+  /* Toast: a transient confirmation with an optional action. Exists mainly so "New" can offer
+     an Undo instead of being a one-click point of no return — a confirm() dialog can only ask
+     BEFORE the fact, which trains people to click through it. */
+  /* Drop cue: dragging a file over the canvas produced no visual response at all, so there was
+     no way to know a drop would work until after letting go. Covers the stage (not just the
+     artboard) because that is the whole drop target. */
+  #stage[data-dropping=true]::after {
+    content:"Drop image to add it"; position:absolute; inset:10px; z-index:30; pointer-events:none;
+    display:flex; align-items:center; justify-content:center; gap:8px;
+    border:2px dashed var(--accent); border-radius:14px;
+    background:color-mix(in srgb, var(--accent) 10%, transparent);
+    color:var(--ink); font-size:14px; font-weight:700; letter-spacing:-.01em;
+  }
+  #toast-wrap { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); z-index:400; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none }
+  .toast { display:flex; align-items:center; gap:12px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 14px; font-size:12.5px; color:var(--ink); box-shadow:var(--shadow-lg); pointer-events:auto; animation:toast-in .16s ease-out }
+  @keyframes toast-in { from { opacity:0; transform:translateY(6px) } to { opacity:1; transform:none } }
+  .toast button { all:unset; cursor:pointer; font-weight:700; color:var(--accent); padding:2px 4px; border-radius:5px }
+  .toast button:hover { text-decoration:underline }
+  .toast button:focus-visible { outline:none; box-shadow:var(--ring) }
+  .export-scale-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:7px 10px 5px; font-size:11px; color:var(--dim) }
+  .export-scale { display:flex; gap:3px }
+  .export-scale-btn { all:unset; box-sizing:border-box; cursor:pointer; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:600; color:var(--dim); border:1px solid var(--line) }
+  .export-scale-btn:hover { color:var(--ink); border-color:var(--dim-2) }
+  .export-scale-btn[data-on=true] { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) }
+  .export-scale-btn:focus-visible { outline:none; box-shadow:var(--ring) }
+  /* The exact pixel size the chosen scale produces — "2x" alone doesn't tell you whether the
+     result clears a print or retina requirement. */
+  .export-dims { padding:0 10px 7px; font-size:10.5px; color:var(--dim-2); font-variant-numeric:tabular-nums }
+  .export-sep { height:1px; background:var(--line); margin:5px 0 }
+  .export-hint { margin-left:auto; padding-left:10px; font-size:9.5px; color:var(--dim-2); font-weight:500; white-space:nowrap }
+  .export-menu-item { display:flex; align-items:center; gap:6px; white-space:nowrap }
+  .save-note { font-size:11px; color:var(--dim-2); white-space:nowrap; flex:none; display:flex; align-items:center; gap:5px }
+  .save-note::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--dim-2) }
+  .save-note[data-warn=true] { color:#e0a02a }
+  .save-note[data-warn=true]::before { background:#e0a02a }
   header .act { margin-top:0; padding:7px 13px; font-size:12.5px; white-space:nowrap; flex:none }
 </style>
 </head>
@@ -351,7 +431,8 @@
 <header>
   <b>Canvasmith</b>
   <span class="hdiv"></span>
-  <button class="act" id="openfile"><span id="openfile-icon"></span>Open image…</button>
+  <button class="act" id="newdoc" title="Start a new document (clears the current one)"><span id="newdoc-icon"></span><span class="lbl">New</span></button>
+  <button class="act" id="openfile" title="Open image as a new document"><span id="openfile-icon"></span><span class="lbl">Open image…</span></button>
   <input type="file" id="file" accept="image/*" hidden>
   <span class="sp"></span>
   <button class="icon-btn" id="undo" title="Undo"></button>
@@ -379,25 +460,52 @@
       </div>
     </div>
   </div>
+  <div id="zoom-pill">
+    <button id="zoom-out" title="Zoom out (−)"></button>
+    <button id="zoom-pct" title="Reset to fit"></button>
+    <button id="zoom-in" title="Zoom in (+)"></button>
+    <span id="zoom-div"></span>
+    <button id="zoom-fit" title="Fit to screen (0)"></button>
+  </div>
   <button class="icon-btn" id="theme-toggle" title="Toggle light/dark theme"></button>
   <span class="hdiv"></span>
+  <span class="save-note" id="save-note" hidden></span>
   <button class="act" id="compare-btn" title="Compare with the first-loaded version" disabled></button>
   <span class="hdiv"></span>
   <div class="popover-anchor">
     <button class="act act-accent" id="export-btn">⬇ Export image <span id="export-caret"></span></button>
     <div class="export-menu" id="export-menu" hidden>
+      <div class="export-scale-row">
+        <span>Size</span>
+        <div class="export-scale" id="export-scale" role="group" aria-label="Export size">
+          <button class="export-scale-btn" data-scale="1" data-on="true">1&times;</button>
+          <button class="export-scale-btn" data-scale="2">2&times;</button>
+          <button class="export-scale-btn" data-scale="3">3&times;</button>
+        </div>
+      </div>
+      <div class="export-dims" id="export-dims"></div>
       <button class="export-menu-item" data-format="png">⬇ PNG</button>
       <button class="export-menu-item" data-format="jpg">⬇ JPG</button>
-      <button class="export-menu-item" data-format="svg">⬇ SVG</button>
+      <button class="export-menu-item" data-format="svg">⬇ SVG <span class="export-hint">vector</span></button>
+      <div class="export-sep"></div>
+      <button class="export-menu-item" data-format="project">⬇ Project file <span class="export-hint">keeps layers</span></button>
+      <button class="export-menu-item" id="open-project">⬆ Open project…</button>
     </div>
   </div>
 </header>
 <main>
   <nav id="tools"></nav>
 
-  <!-- LEFT: tool-specific hints & actions for whatever's active on the rail — the layer list now
-       lives in the right panel's Layers tab, alongside that layer's own properties. -->
+  <!-- LEFT: the layer list (scene state, always visible) above tool-specific hints & actions for
+       whatever's active on the rail; the right panel holds that layer's own properties. -->
   <div id="left-panel">
+    <!-- Layers list lives on the LEFT, above the (per-tool) Tool panel: it is scene state, not
+         tool state, so it stays put as tools change while the right panel keeps Properties. -->
+    <div id="layers-block">
+      <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Layers</div>
+      <div id="layers" style="min-height:60px; max-height:220px; overflow-y:auto"></div>
+      <button class="act" id="add-adjustment" style="width:100%;margin-top:8px"></button>
+    </div>
     <div id="tool-panel">
       <div id="maskedit-banner" style="display:none;background:var(--accent);color:var(--accent-ink);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12px;font-weight:600">
         Editing layer mask — paint white to reveal, black to hide.
@@ -446,7 +554,7 @@
           <button class="chip" id="objselect-add"></button>
         </div>
         <label style="display:block;margin-top:8px;font-size:11px;color:var(--dim)">Tolerance
-          <input type="range" id="objselect-tolerance" min="4" max="128" value="32" style="width:100%">
+          <input type="range" id="objselect-tolerance" min="4" max="128" value="64" style="width:100%">
         </label>
         <div class="note" style="margin-top:8px">⇧ add · ⌥ subtract · [ ] tolerance</div>
       </div>
@@ -494,28 +602,20 @@
 
   <div id="stage">
     <canvas id="cv"></canvas>
-    <span id="dim-badge"></span>
     <button id="extend-banner" hidden></button>
     <span id="aiinsert-dot" hidden></span>
     <div id="aiinsert-popover" hidden>
-      <div class="aiinsert-title"><span id="aiinsert-title-text"></span><button class="aiinsert-close" id="aiinsert-close"></button></div>
+      <div class="aiinsert-title"><span id="aiinsert-title-text"></span><button class="aiinsert-close" id="aiinsert-close" title="Close" aria-label="Close"></button></div>
       <div class="note" id="aiinsert-note" style="display:none"></div>
       <input type="text" id="aiinsert-prompt" placeholder="Describe what to draw here…">
       <button class="act act-accent" id="aiinsert-run"></button>
-    </div>
-    <div id="zoom-pill">
-      <button id="zoom-out" title="Zoom out (−)"></button>
-      <button id="zoom-pct" title="Reset to fit"></button>
-      <button id="zoom-in" title="Zoom in (+)"></button>
-      <span id="zoom-div"></span>
-      <button id="zoom-fit" title="Fit to screen (0)"></button>
     </div>
     <svg id="review-hover-preview" hidden width="1" height="1"><polygon fill="rgba(212,255,69,.28)" stroke="#d4ff45" stroke-width="2"></polygon></svg>
   </div>
   <button class="collapse-btn" id="collapse-left" title="Hide side panel"></button>
   <button class="collapse-btn" id="collapse-right" title="Hide Properties panel"></button>
 
-  <!-- RIGHT: Layer (properties) / Design / Stickers / AI — tabbed, matching the reference editor's
+  <!-- RIGHT: Properties / Design / Stickers / AI — tabbed, matching the reference editor's
        right-hand panel (ditto's own rail keeps Tool/Layers on the left and everything else here). -->
   <div id="right-panel">
     <div class="tabs" id="right-tabs">
@@ -525,11 +625,7 @@
       <button data-tab="ai"></button>
     </div>
     <div id="layer-panel">
-    <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Layers</div>
-    <div id="layers" style="min-height:60px; max-height:220px; overflow-y:auto"></div>
-    <button class="act" id="add-adjustment" style="width:100%;margin-top:8px"></button>
-
-    <div style="display:flex;align-items:center;gap:8px;margin-top:16px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;gap:8px;margin-top:0;margin-bottom:10px">
       <strong id="props-title" style="font-size:13px">Properties</strong>
     </div>
 
@@ -786,6 +882,7 @@
 </div>
 
 <!-- Compare: side-by-side view of the first-loaded image vs. the current canvas render. -->
+<div id="toast-wrap" aria-live="polite"></div>
 <div id="compare-backdrop" hidden>
   <div id="compare-box">
     <div id="compare-header">
@@ -805,7 +902,8 @@
 <script type="module">
 import { Editor, GeminiProvider, installBridge, installDropImport, selectionToPath2D, selectionPolys, makeShape, makeText, installKeybindings, TOOL_KEYS, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, stickerSpec, STICKER_DEFAULT_LABEL, REGION_COLOR, REGION_NAME,
   startSelection, updateSelection, finalizeSelection, startPolyBuild, polyBuildAdd, polyBuildPreview, finishPolyBuild,
-  snapToEdge, selectionBounds, uid, PAINT_TOOLS, SHAPE_TOOLS }
+  snapToEdge, selectionBounds, uid, PAINT_TOOLS, SHAPE_TOOLS, installAutosave, restoreSession,
+  discardToTrash, restoreDiscarded, exportProject, loadProject }
   from '../../packages/core/src/index.js';
 
 /* The fabric <canvas> element is sized to fill the STAGE (like the reference editor's fitView),
@@ -1279,7 +1377,18 @@ function renderRail() {
     wrap.innerHTML = `<button class="rail-btn" data-on="${on}" data-gi="${gi}">${iconSVG(shown.icon, 18)}${tools.length > 1 ? '<span class="rail-caret"></span>' : ''}</button>`;
     const btn = wrap.querySelector('.rail-btn');
     const shownLabel = (TOOL_LABELS[shown.id] || shown.id) + (TOOL_SHORTCUT[shown.id] ? '  (' + TOOL_SHORTCUT[shown.id] + ')' : '');
-    btn.addEventListener('mouseenter', () => showTip(btn, shownLabel));
+    /* The rail buttons are icon-only, so the tooltip text is ALSO their accessible name — without
+       it a screen reader announces "button" thirteen times and the whole toolbar is unusable.
+       aria-pressed carries the data-on highlight (which tool is active) to assistive tech, and a
+       multi-tool group additionally reports that clicking it opens the flyout. */
+    /* Say out loud that a slot has alternates. The caret alone is a 5px triangle; on hover the
+       user is already reading the tooltip, so that is the cheapest place to make the hidden
+       tools discoverable instead of relying on someone noticing the marker. */
+    const tipText = tools.length > 1 ? shownLabel + '  \u00b7  click for ' + (tools.length - 1) + ' more' : shownLabel;
+    btn.setAttribute('aria-label', shownLabel);
+    btn.setAttribute('aria-pressed', String(on));
+    if (tools.length > 1) btn.setAttribute('aria-expanded', String(flyoutGroup === gi));
+    btn.addEventListener('mouseenter', () => showTip(btn, tipText));
     btn.addEventListener('mouseleave', hideTip);
     btn.addEventListener('click', () => {
       hideTip();
@@ -1289,7 +1398,17 @@ function renderRail() {
     if (flyoutGroup === gi) {
       const fly = document.createElement('div');
       fly.className = 'rail-flyout';
-      fly.innerHTML = tools.map(t => `<div class="rail-flyout-item" data-on="${t.id === ed.tool}" data-tool="${t.id}">${iconSVG(t.icon, 15)}<span style="flex:1">${TOOL_LABELS[t.id] || t.id}</span>${TOOL_SHORTCUT[t.id] ? `<span class="sc">${TOOL_SHORTCUT[t.id]}</span>` : ''}</div>`).join('');
+      /* role/tabindex/aria-checked: these are <div>s doing a menu's job, so without them a
+         keyboard or screen-reader user can't reach the non-primary tools at all — they exist
+         only behind this flyout. The visible text label doubles as the accessible name. */
+      fly.setAttribute('role', 'menu');
+      fly.innerHTML = tools.map(t => `<div class="rail-flyout-item" role="menuitemradio" tabindex="0" aria-checked="${t.id === ed.tool}" data-on="${t.id === ed.tool}" data-tool="${t.id}">${iconSVG(t.icon, 15)}<span style="flex:1">${TOOL_LABELS[t.id] || t.id}</span>${TOOL_SHORTCUT[t.id] ? `<span class="sc">${TOOL_SHORTCUT[t.id]}</span>` : ''}</div>`).join('');
+      // Enter/Space must activate a menu item the same way a click does.
+      fly.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const t = e.target.closest('[data-tool]')?.dataset.tool;
+        if (t) { e.preventDefault(); ed.setTool(t); flyoutGroup = -1; renderRail(); }
+      });
       fly.addEventListener('mouseleave', () => { flyoutGroup = -1; renderRail(); });
       fly.addEventListener('click', e => { const t = e.target.closest('[data-tool]')?.dataset.tool; if (t) { ed.setTool(t); flyoutGroup = -1; renderRail(); } });
       wrap.appendChild(fly);
@@ -1392,7 +1511,11 @@ function refreshObjselectStatus() {
 objselectAddBtn.onclick = () => { ed.setToolOptions({ addMode: !ed.toolOpts.addMode }); refreshObjselectStatus(); };
 objselectTolerance.oninput = () => ed.setToolOptions({ tolerance: +objselectTolerance.value });
 ed.on('tooloptions', refreshObjselectStatus);
-ed.on('selection', refreshObjselectStatus);
+/* A completed pick ends the busy state. Without clearing the flag here the status sat on
+   "Finding object…" for the full 4s safety timeout after every successful magicwand click —
+   the tool had already selected the object, so a working tool read as a stuck one. ('hover'
+   below covers objectselect/hoverselect, which also emit hover; magicwand never does.) */
+ed.on('selection', () => { objselectBusy = false; refreshObjselectStatus(); });
 ed.on('tool', refreshObjselectStatus);
 ed.on('hover', () => { if (objselectBusy) { objselectBusy = false; refreshObjselectStatus(); } });
 // wandPick/_hoverMove don't currently emit a busy/idle event of their own — approximate "busy" as
@@ -1629,22 +1752,76 @@ document.addEventListener('click', e => {
 const exportBtn = document.getElementById('export-btn'), exportMenu = document.getElementById('export-menu');
 document.getElementById('export-caret').innerHTML = iconSVG('chevron', 10);
 document.getElementById('export-caret').firstChild.style.transform = 'rotate(-90deg)';
+/* Export scale. The core has always supported a multiplier (Editor#exportPNG(mult)) but the UI
+   hardcoded 1x, so every export came out at artboard size — soft on retina, unusable for print,
+   with nothing on screen explaining why. The picker exposes the capability that already exists;
+   SVG ignores it (vector output has no pixel scale to pick). */
+let exportScale = 1;
+const dl = (href, name) => { const a = document.createElement('a'); a.href = href; a.download = name; a.click(); };
+const scaleSuffix = () => (exportScale === 1 ? '' : '@' + exportScale + 'x');
 const EXPORTERS = {
-  png: () => { const a = document.createElement('a'); a.href = ed.exportPNG(); a.download = 'canvasmith.png'; a.click(); },
-  jpg: () => { const a = document.createElement('a'); a.href = ed.exportJPEG(); a.download = 'canvasmith.jpg'; a.click(); },
+  png: () => dl(ed.exportPNG(exportScale), `canvasmith${scaleSuffix()}.png`),
+  jpg: () => dl(ed.exportJPEG(0.92, exportScale), `canvasmith${scaleSuffix()}.jpg`),
   svg: () => {
     const blob = new Blob([ed.exportSVG()], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'canvasmith.svg'; a.click();
+    dl(url, 'canvasmith.svg');
+    URL.revokeObjectURL(url);
+  },
+  /* Save the editable document itself. PNG/JPG/SVG are all flattened or lossy, so before this
+     there was no way to get layers, masks and adjustments out of the browser at all — no backup,
+     no moving machines, no handing the file to someone else. */
+  project: () => {
+    const blob = new Blob([exportProject(ed, { assets })], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    dl(url, 'canvasmith-project.canvasmith');
     URL.revokeObjectURL(url);
   },
 };
-const setExportMenuOpen = open => { exportMenu.hidden = !open; exportBtn.dataset.open = String(open); };
+const exportDims = document.getElementById('export-dims');
+function refreshExportDims() {
+  exportDims.textContent = Math.round(ed.W * exportScale) + ' \u00d7 ' + Math.round(ed.H * exportScale) + ' px';
+}
+const setExportMenuOpen = open => { exportMenu.hidden = !open; exportBtn.dataset.open = String(open); if (open) refreshExportDims(); };
 exportBtn.onclick = () => setExportMenuOpen(exportMenu.hidden);
+document.getElementById('export-scale').addEventListener('click', e => {
+  const b = e.target.closest('[data-scale]'); if (!b) return;
+  exportScale = +b.dataset.scale;
+  [...e.currentTarget.children].forEach(c => { c.dataset.on = String(c === b); });
+  refreshExportDims();
+});
 exportMenu.addEventListener('click', e => {
+  if (e.target.closest('[data-scale]')) return;                 // the size picker is not a download
+  if (e.target.closest('#open-project')) { projectInput.click(); setExportMenuOpen(false); return; }
   const format = e.target.closest('[data-format]')?.dataset.format;
   if (format) { EXPORTERS[format](); setExportMenuOpen(false); }
 });
+/* Opening a project replaces the whole document, so it warns when there's unsaved work to lose
+   — same bargain as New, which is the other action that can discard a document. */
+const projectInput = document.createElement('input');
+projectInput.type = 'file';
+projectInput.accept = '.canvasmith,application/json';
+projectInput.hidden = true;
+document.body.appendChild(projectInput);
+projectInput.onchange = () => {
+  const f = projectInput.files[0]; if (!f) return;
+  projectInput.value = '';                                       // re-picking the same file must re-fire
+  if (ed.fc.getObjects().length && !confirm('Open this project?\n\nIt replaces the current document.')) return;
+  const r = new FileReader();
+  r.onload = async () => {
+    try {
+      const extras = await loadProject(ed, r.result);
+      if (Array.isArray(extras.assets)) { assets = extras.assets; renderAssets(); }
+      if (extras.compare) { _compareSnapshot = extras.compare; compareBtn.disabled = false; }
+      fitToScreen();
+      toast('Project opened');
+    } catch (err) {
+      // parseProject throws messages written for the user — show them rather than a console trace.
+      alert(err.message || 'Could not open that project.');
+    }
+  };
+  r.readAsText(f);
+};
 document.addEventListener('click', e => {
   if (!exportMenu.hidden && !exportMenu.contains(e.target) && e.target !== exportBtn && !exportBtn.contains(e.target)) setExportMenuOpen(false);
 });
@@ -1699,7 +1876,6 @@ new ResizeObserver(() => {
 }).observe(stageEl);
 function refreshZoomUI() {
   zoomPctBtn.textContent = Math.round((ed.fc.getZoom() || 1) * 100) + '%';
-  document.getElementById('dim-badge').textContent = ed.W + '×' + ed.H;
 }
 document.getElementById('zoom-out').onclick = () => setZoomAtCenter(ed.fc.getZoom() * 0.83);
 document.getElementById('zoom-in').onclick = () => setZoomAtCenter(ed.fc.getZoom() * 1.2);
@@ -1718,12 +1894,11 @@ document.addEventListener('keydown', e => {
 });
 
 /* ── sidebar tabs + collapse ──────────────────────────────────────────────────────────────
-   LEFT is just the active tool's own options/hints now (no tabs — the layer list moved into the
-   right panel's Layers tab, alongside that layer's own properties). RIGHT holds
-   Layers(=list+properties)/Design/Stickers/AI — everything that's about WHAT you're adding or
-   editing rather than HOW you're interacting with the canvas right now. */
+   LEFT is the layer list above the active tool's own options/hints (no tabs). RIGHT holds
+   Properties/Design/Stickers/AI — everything that's about WHAT you're adding or editing rather
+   than HOW you're interacting with the canvas right now (the layer list itself sits on the left). */
 const rightTabBtns = document.querySelectorAll('#right-tabs button');
-rightTabBtns[0].innerHTML = iconSVG('layerstab') + '<span>Layers</span>';
+rightTabBtns[0].innerHTML = iconSVG('tool') + '<span>Properties</span>';
 rightTabBtns[1].innerHTML = iconSVG('palette') + '<span>Design</span>';
 rightTabBtns[2].innerHTML = iconSVG('star') + '<span>Stickers</span>';
 rightTabBtns[3].innerHTML = iconSVG('spark') + '<span>AI</span>';
@@ -2979,11 +3154,13 @@ openfile.onclick = () => { file.dataset.mode = 'open'; file.click(); };
    Every OTHER image entry point (sidebar "Add image" tool, asset tray, drag/drop) adds a layer
    that fits inside the CURRENT artboard instead — the canvas size never changes underneath you
    there, since those are inserting into an existing composition, not starting one. */
-/* ── asset tray: every image source added to the document this session, click or drag back in ──
-   Session-only (no localStorage) — a generic library has no "generated ad" / "product photo"
-   asset taxonomy of its own, so this tracks exactly what the user has actually brought into THIS
-   document rather than inventing categories. Deduped by src. */
-const assets = [];
+/* ── asset tray: every image source added to the document, click or drag back in ───────────
+   A generic library has no "generated ad" / "product photo" asset taxonomy of its own, so this
+   tracks exactly what the user has actually brought into THIS document rather than inventing
+   categories. Deduped by src. Persisted with the scene by the autosave block below (as part of
+   the same single stored record, not its own key — see session.js), so reopening the tab
+   brings the tray back alongside the document it belongs to; "New" clears both together. */
+let assets = [];
 const assetsEl = document.getElementById('assets-tray');
 function trackAsset(src, name) {
   if (assets.some(a => a.src === src)) return;
@@ -3034,7 +3211,122 @@ file.onchange = () => {
   r.readAsDataURL(f);
 };
 installDropImport(document.getElementById('stage'), src => { ed.addImage(src); trackAsset(src, 'Dropped image'); });
+/* Visible drop affordance (see #stage[data-dropping] above). dragenter/dragleave fire for every
+   child element the cursor crosses, so a plain enter/leave pair flickers — a depth counter is
+   the standard fix: only the outermost leave clears the state. Filtered to real FILE drags so
+   dragging a layer or an asset thumbnail doesn't light up the whole stage. */
+(() => {
+  const stage = document.getElementById('stage');
+  let depth = 0;
+  const isFileDrag = e => [...(e.dataTransfer?.types || [])].includes('Files');
+  stage.addEventListener('dragenter', e => { if (!isFileDrag(e)) return; depth++; stage.dataset.dropping = 'true'; });
+  stage.addEventListener('dragleave', () => { if (depth && --depth === 0) delete stage.dataset.dropping; });
+  stage.addEventListener('drop', () => { depth = 0; delete stage.dataset.dropping; });
+  stage.addEventListener('dragover', e => { if (isFileDrag(e)) e.preventDefault(); });
+})();
 installBridge(src => { ed.addImage(src); trackAsset(src, 'Opened image'); });   // ?image= / #img= / postMessage / localStorage handoff
+
+/* ── session autosave: survive a refresh / tab close ──────────────────────────────────────
+   The scene is already fully described by ed.toJSON(); installAutosave just debounces that into
+   IndexedDB on 'change' and flushes on pagehide (IndexedDB, not localStorage — a single photo
+   blows the ~5MB localStorage budget; see session.js). getExtras folds the two other pieces of
+   session state (the asset tray and the Compare baseline) into the SAME write, so they can never
+   drift out of sync with the scene they belong to. See packages/core/src/session.js for the
+   quota-shedding behaviour — a document too big to autosave degrades to "not saved", never to a
+   broken editor. */
+const session = installAutosave(ed, {
+  getExtras: () => ({ assets, compare: _compareSnapshot }),
+  onStatus: s => { autosaveNote(s); },
+});
+
+/* One shared line of feedback in the header: the user needs to know when their work is NOT being
+   saved (storage blocked, or a document past even IndexedDB's quota), otherwise autosave is a promise the page
+   quietly breaks. 'ok-trimmed' still saved the scene — only the tray/compare thumbnails were shed
+   — so it reads as saved rather than as a failure. */
+const saveNote = document.getElementById('save-note');
+function autosaveNote(status) {
+  if (!saveNote) return;
+  if (status === 'failed' || status === 'unavailable') {
+    saveNote.textContent = status === 'unavailable' ? 'Not autosaved (storage blocked)' : 'Too large to autosave';
+    saveNote.dataset.warn = 'true';
+    saveNote.title = status === 'unavailable'
+      ? 'This browser is blocking local storage, so this document will not be restored if you close the tab.'
+      : 'This document is past the browser\u2019s local-storage budget, so it will not be restored if you close the tab. Export it to keep it.';
+  } else {
+    saveNote.textContent = 'Saved';
+    saveNote.dataset.warn = 'false';
+    saveNote.title = 'This document is autosaved in this browser and will be restored if you close the tab.';
+  }
+  saveNote.hidden = false;
+}
+
+/* Restore last session on boot. Deliberately NOT gated behind a "restore?" prompt: the promise
+   this feature makes is that closing the tab and coming back just works, and a modal on every
+   load undermines that — "New" is the one-click escape hatch. Restoring an empty document would
+   be indistinguishable from a fresh boot, so a session with no objects is skipped (and the
+   asset tray/compare baseline with it) to keep the first-run experience clean. */
+restoreSession(ed).then(extras => {
+  if (!extras) return;
+  if (Array.isArray(extras.assets) && extras.assets.length) { assets = extras.assets; renderAssets(); }
+  if (extras.compare) { _compareSnapshot = extras.compare; compareBtn.disabled = false; }
+  fitToScreen();
+});
+
+/* ── New: discard the current document ───────────────────────────────────────────
+   Confirmed first: Editor#reset() empties the undo stack by design (you must not be able to
+   Ctrl+Z back into a document you explicitly discarded), which makes this the one irreversible
+   action in the editor — and with autosave on, it also wipes the saved copy. A document that's
+   already empty has nothing to lose, so that case skips the prompt. */
+/* toast(message, actionLabel?, onAction?, ms?) — transient confirmation with an optional action.
+   The action button is the point: it gives destructive commands an after-the-fact way out,
+   which a pre-emptive confirm() cannot (people click through those on autopilot). */
+const toastWrap = document.getElementById('toast-wrap');
+function toast(message, actionLabel, onAction, ms = 4000) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = `<span></span>`;
+  el.firstChild.textContent = message;
+  let timer = setTimeout(() => el.remove(), ms);
+  if (actionLabel && onAction) {
+    const b = document.createElement('button');
+    b.textContent = actionLabel;
+    b.onclick = () => { clearTimeout(timer); el.remove(); onAction(); };
+    el.appendChild(b);
+    // Hovering pauses the countdown — the action is useless if it expires while being read.
+    el.addEventListener('mouseenter', () => clearTimeout(timer));
+    el.addEventListener('mouseleave', () => { timer = setTimeout(() => el.remove(), 2000); });
+  }
+  toastWrap.appendChild(el);
+  return el;
+}
+
+const newdocBtn = document.getElementById('newdoc');
+document.getElementById('newdoc-icon').innerHTML = iconSVG('plus', 15);
+newdocBtn.onclick = async () => {
+  const empty = !ed.fc.getObjects().length;
+  // An empty document has nothing to lose, so it neither warns nor leaves anything to undo.
+  if (empty) { ed.reset({ width: 960, height: 640 }); ed.setTool('select'); fitToScreen(); return; }
+  // Park the current document BEFORE clearing, so "Undo" below has something to bring back.
+  // This is what turns New from irreversible into recoverable: reset() empties the undo stack
+  // by design, so without this the only copy of the work is gone the instant it is clicked.
+  await session.saveNow();
+  const parked = await discardToTrash();
+  ed.reset({ width: 960, height: 640 });
+  assets = []; renderAssets();
+  _compareSnapshot = null; compareBtn.disabled = true;
+  await session.clear();
+  if (saveNote) saveNote.hidden = true;
+  ed.setTool('select');
+  fitToScreen();
+  if (!parked) return;
+  toast('Started a new document', 'Undo', async () => {
+    const extras = await restoreDiscarded(ed);
+    if (!extras) return;
+    if (Array.isArray(extras.assets) && extras.assets.length) { assets = extras.assets; renderAssets(); }
+    if (extras.compare) { _compareSnapshot = extras.compare; compareBtn.disabled = false; }
+    fitToScreen();
+  }, 12000);
+};
 
 /* ── AI box: free Gemini key flow ──────────────────────────────────── */
 const gem = new GeminiProvider();
@@ -3328,6 +3620,36 @@ cmdkBackdrop.addEventListener('click', e => { if (e.target === cmdkBackdrop) cmd
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); cmdkOpen(); }
 });
+
+/* ── accessible names for icon-only controls ─────────────────────────────────────────
+   Most of this editor's buttons are a bare icon plus a `title`. A title is a MOUSE affordance:
+   screen readers treat it as a last-resort fallback (and several ignore it outright when the
+   element has no other name), so undo/redo, the zoom pill, stacking, alignment and the colour
+   swatches all announce as an unlabelled "button". The icons themselves are already
+   aria-hidden (see iconSVG), which is correct — but it leaves nothing behind to announce.
+
+   Rather than hand-write 37 duplicate strings that would drift from their titles, this derives
+   the accessible name from the title that's already there and already maintained. Buttons with
+   real text, or an aria-label authored on the spot (the tool rail, where the name differs from
+   the tooltip), are left alone.
+
+   A MutationObserver keeps it applied: the rail, the layers list, the sticker tray and the
+   gradient stops are all re-rendered from JS, so a one-shot pass at boot would cover only the
+   buttons that happen to exist at that moment. */
+function labelIconButtons(root = document) {
+  root.querySelectorAll('button[title]:not([aria-label]), [role="button"][title]:not([aria-label])').forEach(el => {
+    if ((el.textContent || '').trim()) return;          // already has a visible name
+    const t = el.getAttribute('title');
+    if (t) el.setAttribute('aria-label', t);
+  });
+}
+labelIconButtons();
+new MutationObserver(muts => {
+  for (const m of muts) {
+    if (m.type === 'attributes') { labelIconButtons(m.target.parentNode || document); continue; }
+    m.addedNodes.forEach(n => { if (n.nodeType === 1) labelIconButtons(n.matches?.('button') ? n.parentNode : n); });
+  }
+}).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['title'] });
 </script>
 </body>
 </html>

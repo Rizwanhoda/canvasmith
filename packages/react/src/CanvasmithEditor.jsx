@@ -8,6 +8,7 @@ import {
   Editor, ALL_TOOLS, PAINT_TOOLS, SEL_TOOLS, SHAPE_TOOLS, GeminiProvider, installBridge, installDropImport, installKeybindings, TOOL_KEYS,
   selectionPolys, selectionToPath2D, FONT_GROUPS, FONT_STYLESHEET_URL, STICKER_GROUPS, STICKER_PALETTE, stickerSpec, STICKER_DEFAULT_LABEL, REGION_COLOR, REGION_NAME, relLum, hexRgb,
   startSelection, updateSelection, finalizeSelection, startPolyBuild, polyBuildAdd, polyBuildPreview, finishPolyBuild, snapToEdge, selectionBounds,
+  installAutosave, restoreSession, discardToTrash, restoreDiscarded, exportProject, loadProject,
 } from '@canvasmith/core';
 
 const CROP_RATIOS = [['Free', 0], ['Original', 'orig'], ['1:1', 1], ['4:5', 4 / 5], ['3:2', 3 / 2], ['16:9', 16 / 9], ['9:16', 9 / 16]];
@@ -326,8 +327,29 @@ const CSS = `
 .cm-rail-btn{all:unset;box-sizing:border-box;cursor:pointer;width:40px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;position:relative;color:var(--cm-dim);transition:background .12s}
 .cm-rail-btn:hover{background:var(--cm-bg);color:var(--cm-ink)}
 .cm-rail-btn[data-on=true]{background:var(--cm-accent);color:var(--cm-accent-ink)}
-.cm-rail-caret{position:absolute;right:3px;bottom:3px;width:0;height:0;border-left:4px solid transparent;border-bottom:4px solid var(--cm-dim)}
+/* "This slot holds more tools" marker — was so low-contrast that 8 of 15 rail slots read as
+   single-tool buttons and their alternates were undiscoverable. Brighter, and stronger on
+   hover so the cue lands while the pointer is on it. */
+.cm-rail-caret{position:absolute;right:2.5px;bottom:2.5px;width:0;height:0;border-left:5px solid transparent;border-bottom:5px solid var(--cm-dim);transition:border-bottom-color .12s}
+.cm-rail-btn:hover .cm-rail-caret{border-bottom-color:var(--cm-ink)}
 .cm-rail-btn[data-on=true] .cm-rail-caret{border-bottom-color:var(--cm-accent-ink)}
+/* Export menu: size picker + project-file rows. */
+.cm-export-scale-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 10px 5px;font-size:11px;color:var(--cm-dim)}
+.cm-export-scale{display:flex;gap:3px}
+.cm-export-scale-btn{all:unset;box-sizing:border-box;cursor:pointer;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600;color:var(--cm-dim);border:1px solid var(--cm-line)}
+.cm-export-scale-btn:hover{color:var(--cm-ink);border-color:var(--cm-dim-2)}
+.cm-export-scale-btn[data-on=true]{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent)}
+.cm-export-dims{padding:0 10px 7px;font-size:10.5px;color:var(--cm-dim-2);font-variant-numeric:tabular-nums}
+.cm-export-sep{height:1px;background:var(--cm-line);margin:5px 0}
+.cm-export-hint{margin-left:auto;padding-left:10px;font-size:9.5px;color:var(--cm-dim-2);font-weight:500;white-space:nowrap}
+.cm-export-menu-item{white-space:nowrap}
+/* Drop cue — dragging a file over the canvas previously produced no response at all. */
+.cm-stage[data-dropping=true]::after{content:"Drop image to add it";position:absolute;inset:10px;z-index:30;pointer-events:none;display:flex;align-items:center;justify-content:center;border:2px dashed var(--cm-accent);border-radius:14px;background:color-mix(in srgb, var(--cm-accent) 10%, transparent);color:var(--cm-ink);font-size:14px;font-weight:700}
+/* Toast */
+.cm-toast-wrap{position:absolute;grid-area:1/1/-1/-1;justify-self:center;align-self:end;left:auto;bottom:26px;transform:translateX(-50%);z-index:400;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
+.cm-toast{display:flex;align-items:center;gap:12px;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:10px;padding:10px 14px;font-size:12.5px;color:var(--cm-ink);box-shadow:0 8px 24px rgba(0,0,0,.35);pointer-events:auto}
+.cm-toast button{all:unset;cursor:pointer;font-weight:700;color:var(--cm-accent);padding:2px 4px;border-radius:5px}
+.cm-toast button:hover{text-decoration:underline}
 .cm-rail-flyout{position:absolute;left:48px;top:0;z-index:60;min-width:194px;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:11px;padding:6px;box-shadow:0 24px 60px rgba(0,0,0,.45)}
 .cm-rail-flyout-item{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:7px;cursor:pointer;font-size:12.5px;color:var(--cm-ink)}
 .cm-rail-flyout-item:hover,.cm-rail-flyout-item[data-on=true]{background:var(--cm-bg)}
@@ -338,6 +360,7 @@ const CSS = `
 .cm-rail-bottom{display:flex;flex-direction:column;align-items:center;gap:3px;margin-top:8px;padding-top:8px;border-top:1px solid var(--cm-line)}
 .cm-stage{position:relative;overflow:hidden;display:grid;place-items:center;background:var(--cm-stage)}
 .cm-left{border-right:1px solid var(--cm-line);background:var(--cm-panel);overflow-y:auto;overflow-x:hidden;padding:18px;transition:padding .15s}
+.cm-layers-block{flex:0 0 auto;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--cm-line)}
 .cm-root[data-left-collapsed=true] .cm-left{padding:0;width:0}
 .cm-side{border-left:1px solid var(--cm-line);background:var(--cm-panel);overflow-y:auto;overflow-x:hidden;padding:18px;transition:padding .15s}
 .cm-root[data-side-collapsed=true] .cm-side{padding:0;width:0}
@@ -381,7 +404,7 @@ const CSS = `
 .cm-swatch-btn[data-on=true]{border-color:var(--cm-ink)}
 /* export dropdown menu (single "Export image" button in the header) */
 .cm-export-anchor{position:relative}
-.cm-export-menu{position:absolute;right:0;top:calc(100% + 8px);z-index:60;min-width:150px;background:var(--cm-panel-2);border:1px solid var(--cm-line);border-radius:11px;padding:6px;box-shadow:0 24px 60px rgba(0,0,0,.45)}
+.cm-export-menu{position:absolute;right:0;top:calc(100% + 8px);z-index:60;min-width:208px;background:var(--cm-panel-2);border:1px solid var(--cm-line);border-radius:11px;padding:6px;box-shadow:0 24px 60px rgba(0,0,0,.45)}
 .cm-export-menu-item{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;padding:8px 9px;border-radius:7px;cursor:pointer;font-size:12.5px;font-weight:600;color:var(--cm-ink);transition:background .1s}
 .cm-export-menu-item:hover{background:var(--cm-bg)}
 .cm-export-caret svg{transition:transform .12s}
@@ -406,8 +429,19 @@ const CSS = `
 .cm-icon-btn:hover{border-color:var(--cm-accent)}
 .cm-icon-btn[data-active=true]{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent)}
 .cm-top input[type=range]{width:90px}.cm-top input[type=color]{width:26px;height:26px;border:none;background:none;cursor:pointer}
-.cm-zoom-pill{position:absolute;bottom:16px;right:16px;z-index:15;display:flex;align-items:center;gap:2px;padding:2px;border-radius:999px;background:var(--cm-bg);border:1px solid var(--cm-line);box-shadow:0 8px 24px rgba(0,0,0,.35)}
-.cm-dim-badge{position:absolute;top:14px;left:14px;z-index:15;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:999px;padding:5px 11px;font-size:11px;font-weight:600;font-family:"JetBrains Mono",ui-monospace,monospace;color:var(--cm-dim);box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 4px 12px rgba(0,0,0,.35);pointer-events:none}
+/* Lives in the header now, so it is an inline control rather than a floating overlay: no
+   absolute position and no drop shadow. Moving it also frees the canvas's bottom-right corner,
+   which it used to sit on top of. */
+.cm-zoom-pill{display:flex;align-items:center;gap:2px;flex:none;padding:3px;border-radius:999px;background:var(--cm-bg);border:1px solid var(--cm-line)}
+.cm-zoom-pill .cm-icon-btn{width:24px;height:24px;border:none;background:none}
+.cm-zoom-pct{min-width:46px;height:24px;justify-content:center;padding:0 6px;border:none;background:none;font-variant-numeric:tabular-nums}
+.cm-zoom-div{width:1px;height:16px;background:var(--cm-line)}
+/* Narrow headers keep only the percentage — clicking it still fits to screen, and the +/-/0
+   shortcuts still work, so zoom stays reachable without crowding out Export. */
+@media (max-width:980px){
+  .cm-zoom-pill .cm-icon-btn,.cm-zoom-div{display:none}
+  .cm-zoom-pill{border:none;background:none;padding:0}
+}
 .cm-cmdk-backdrop{position:fixed;inset:0;z-index:200;background:rgba(8,8,12,.5);display:flex;align-items:flex-start;justify-content:center;padding-top:14vh}
 .cm-cmdk-box{width:min(560px,92vw);max-height:min(60vh,420px);background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.45);overflow:hidden;display:flex;flex-direction:column}
 .cm-cmdk-search-row{display:flex;align-items:center;gap:9px;padding:12px 14px;border-bottom:1px solid var(--cm-line);flex:none;color:var(--cm-dim)}
@@ -434,6 +468,12 @@ const CSS = `
 .cm-extend-banner:hover{filter:brightness(1.06)}
 .cm-ai{display:flex;gap:6px;margin-top:6px}.cm-ai input{flex:1;background:var(--cm-bg);border:1px solid var(--cm-line);border-radius:7px;color:var(--cm-ink);padding:5px 8px;font-size:12px}
 .cm-note{font-size:11px;color:var(--cm-dim);margin-top:6px;line-height:1.5}
+/* Autosave readout — quiet when things are fine, amber when the document is too big to save (or
+   storage is blocked), since that's the only case the user has to act on. */
+.cm-save-note{font-size:11px;color:var(--cm-dim-2);white-space:nowrap;flex:none;display:flex;align-items:center;gap:5px}
+.cm-save-note::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--cm-dim-2)}
+.cm-save-note[data-warn=true]{color:#e0a02a}
+.cm-save-note[data-warn=true]::before{background:#e0a02a}
 .cm-ai-card{padding:14px;border-radius:16px;border:1px solid var(--cm-line);background:linear-gradient(160deg,color-mix(in srgb,var(--cm-accent) 16%,transparent),var(--cm-bg));margin-bottom:14px}
 .cm-ai-card-title{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:700;margin-bottom:8px}
 .cm-ai-card p{margin:0;font-size:11.5px;color:var(--cm-dim);line-height:1.5}
@@ -487,7 +527,7 @@ input[type=range]:disabled::-webkit-slider-thumb{background:var(--cm-dim);border
 input[type=range]:disabled::-moz-range-thumb{background:var(--cm-dim);border-color:var(--cm-line)}
 `;
 
-export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = null, ai = 'gemini', theme = {}, mode, bridge = true, openCvUrl, onReady, onExport }) {
+export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = null, ai = 'gemini', theme = {}, mode, bridge = true, autosave = true, openCvUrl, onReady, onExport }) {
   const canvasRef = useRef(null);
   const stageRef = useRef(null);
   const rootRef = useRef(null);
@@ -517,19 +557,59 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const [compareAfter, setCompareAfter] = useState(null);
   // Asset tray: every image source successfully added to the document this session (opened,
   // dropped/pasted, picked via the file input, or handed in via the bridge/postMessage import) —
-  // click or drag one back onto the canvas to insert it again. Session-only by design (no
-  // localStorage persistence): a generic library has no "generated ad" / "product photo" asset
-  // taxonomy of its own the way a specific ad-generation product would, so this tracks exactly
-  // what the user has actually brought into THIS document rather than inventing categories.
+  // click or drag one back onto the canvas to insert it again. A generic library has no
+  // "generated ad" / "product photo" asset taxonomy of its own the way a specific ad-generation
+  // product would, so this tracks exactly what the user has actually brought into THIS document
+  // rather than inventing categories. Persisted with the scene by the autosave below, in the
+  // same stored record, so it comes back with the document it belongs to.
   // Deduped by src so re-adding the same image doesn't grow the tray forever.
   const [assets, setAssets] = useState([]);
   const trackAsset = useCallback((src, name) => {
     setAssets(prev => prev.some(a => a.src === src) ? prev : [...prev, { id: 'asset' + Date.now() + Math.random().toString(36).slice(2, 6), src, name: name || 'Image' }]);
   }, []);
+  // Mirror of `assets` for the autosave's getExtras: that callback is created once inside the
+  // mount effect, so reading the state variable there would capture the empty array from mount.
+  const assetsRef = useRef(assets);
+  useEffect(() => { assetsRef.current = assets; }, [assets]);
+  // Autosave handle + its last status ('ok' | 'ok-trimmed' | 'failed' | 'unavailable'), so the
+  // header can warn when a document cannot be stored rather than quietly not saving it.
+  const sessionRef = useRef(null);
+  const [saveStatus, setSaveStatus] = useState(null);
+  /* Export scale. The core always supported a multiplier (Editor#exportPNG(mult)) but the UI
+     hardcoded 1x, so every export came out at artboard size — soft on retina, unusable for
+     print, with nothing explaining why. SVG ignores it (vector has no pixel scale). */
+  const [exportScale, setExportScale] = useState(1);
+  /* Transient confirmations with an optional action. Exists mainly so New can offer an Undo
+     after the fact — a confirm() can only ask beforehand, which people click through. */
+  const [toasts, setToasts] = useState([]);
+  const toastIdRef = useRef(0);
+  const toast = useCallback((message, action) => {
+    const id = ++toastIdRef.current;
+    setToasts(t => [...t, { id, message, action }]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), action ? 12000 : 4000);
+    return id;
+  }, []);
+  const dismissToast = useCallback((id) => setToasts(t => t.filter(x => x.id !== id)), []);
   // Only intercept our own asset drag payload — an unrelated drag (a real OS file, which
   // installDropImport already handles) must fall through untouched, same guard the vanilla
   // demo's onStageDragOver uses.
-  const onStageDragOver = (e) => { if (e.dataTransfer.types.includes('text/x-canvasmith-asset')) e.preventDefault(); };
+  const onStageDragOver = (e) => {
+    const t = e.dataTransfer.types;
+    if (t.includes('text/x-canvasmith-asset') || t.includes('Files')) e.preventDefault();
+  };
+  /* Visible drop affordance. dragenter/dragleave fire for every child the cursor crosses, so a
+     plain enter/leave pair flickers — a depth counter is the standard fix: only the outermost
+     leave clears it. Filtered to real FILE drags so dragging a layer or an asset thumbnail
+     doesn't light up the whole stage. */
+  const [dropDepth, setDropDepth] = useState(0);
+  const [dropping, setDropping] = useState(false);
+  const onStageDragEnter = (e) => {
+    if (!e.dataTransfer.types.includes('Files')) return;
+    setDropDepth(d => { setDropping(true); return d + 1; });
+  };
+  const onStageDragLeave = () => {
+    setDropDepth(d => { const n = Math.max(0, d - 1); if (n === 0) setDropping(false); return n; });
+  };
   const onStageDrop = (e) => {
     const src = e.dataTransfer.getData('text/x-canvasmith-asset');
     if (!src) return;
@@ -871,7 +951,32 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
       stops.push(installBridge(src => { ed.openImage(src); trackAsset(src, 'Opened image'); }));
       stops.push(installDropImport(stageRef.current, src => { ed.addImage(src); trackAsset(src, 'Dropped image'); }));
     }
+    /* Session autosave — survive a refresh / tab close. installAutosave debounces ed.toJSON()
+       into IndexedDB on 'change' and flushes on pagehide (IndexedDB, not localStorage — one photo
+       exceeds the ~5MB localStorage budget); getExtras folds the asset tray and
+       the Compare baseline into the SAME write so they can't drift out of sync with the scene.
+       Both are read through refs, not state: this effect runs once with [] deps, so a closure
+       over the state values would autosave the empty arrays they held at mount forever. */
+    if (autosave) {
+      const session = installAutosave(ed, {
+        getExtras: () => ({ assets: assetsRef.current, compare: compareSnapshotRef.current }),
+        onStatus: st => setSaveStatus(st),
+      });
+      sessionRef.current = session;
+      stops.push(() => session.stop());
+    }
+    /* An explicit `image` prop wins over a restored session — the host asked for that specific
+       document, so silently replacing it with whatever was last edited in this browser would be
+       wrong. Restoring an empty scene is skipped too (indistinguishable from a fresh boot). */
     if (image) { ed.openImage(image); trackAsset(image, 'Opened image'); }
+    else if (autosave) {
+      restoreSession(ed).then(extras => {
+        if (!extras || edRef.current !== ed) return;
+        if (Array.isArray(extras.assets) && extras.assets.length) setAssets(extras.assets);
+        if (extras.compare) { compareSnapshotRef.current = extras.compare; setCompareReady(true); }
+        if (fitRef.current) fitRef.current();
+      });
+    }
     setLayers(ed.layers());
     onReady && onReady(ed);
     // The stage may not have its final layout box on the very first paint (fonts/panels still
@@ -921,6 +1026,27 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     return () => ro.disconnect();
   }, []);
 
+  /* Accessible names for icon-only controls. Most buttons here are a bare icon plus a `title`,
+     which is a MOUSE affordance: screen readers treat it as a last-resort fallback and several
+     ignore it entirely when the element has no other name, so undo/redo, the zoom pill,
+     stacking, alignment and the sticker tray all announce as an unlabelled "button". The icons
+     are already aria-hidden (see Icon), which is right — but it leaves nothing to announce.
+
+     Derived from the title that is already there and already maintained, rather than 40-odd
+     duplicated aria-label props that would drift from their tooltips. Runs with no dep array
+     (after every render) because these buttons mount and unmount constantly as tools, panels
+     and selections change; it is a cheap attribute pass over one subtree. Anything with visible
+     text, or an aria-label authored at the call site (the tool rail, whose name differs from
+     its tooltip), is skipped. */
+  useEffect(() => {
+    const root = rootRef.current; if (!root) return;
+    root.querySelectorAll('button[title]:not([aria-label])').forEach(el => {
+      if ((el.textContent || '').trim()) return;
+      const t = el.getAttribute('title');
+      if (t) el.setAttribute('aria-label', t);
+    });
+  });
+
   // Keeps the off-canvas mask (see Editor's constructor) matching the stage colour when the
   // light/dark toggle flips — otherwise the mask would show a mismatched patch around the
   // artboard after a theme switch instead of blending into the new stage background.
@@ -962,10 +1088,6 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   // transform's scale/pan on top — the artboard is just a W×H region drawn somewhere inside that
   // stage-sized canvas. fitToScreen resizes fc to the stage, THEN fits the artboard inside it.
   const [zoomPct, setZoomPct] = useState(100);
-  // Stage dim-badge (top-left "960×640" readout) — mirrors ed.W/ed.H, refreshed alongside the
-  // zoom pill (same refreshZoomUI call sites as the vanilla demo) since both only change together
-  // (zoom/fit) or on an explicit canvas-size/crop apply, never independently of a render pass.
-  const [dims, setDims] = useState({ w: width, h: height });
   const fittedRef = useRef(false);
   const setZoomAtCenter = (z) => {
     z = Math.min(5, Math.max(0.1, z));
@@ -973,7 +1095,6 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     ed().fc.zoomToPoint({ x: stage.clientWidth / 2, y: stage.clientHeight / 2 }, z);
     ed().fc.requestRenderAll();
     setZoomPct(Math.round(z * 100));
-    setDims({ w: ed().W, h: ed().H });
   };
   const fitToScreen = useCallback(() => {
     const e = edRef.current, stage = stageRef.current; if (!e || !stage || !stage.clientWidth) return false;
@@ -989,7 +1110,6 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     e.fc.calcOffset();
     e.fc.requestRenderAll();
     setZoomPct(Math.round(z * 100));
-    setDims({ w: e.W, h: e.H });
     return true;
   }, []);
   // Always points at the latest fitToScreen so the resize observer below reframes to current dims
@@ -1049,6 +1169,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const cmdkInputRef = useRef(null);
   const ALL_TOOL_ITEMS = GROUPS.flatMap(g => g.tools).map(([id, label]) => ({ group: 'Tool', icon: id, label, run: () => ed().setTool(id) }));
   const buildActionItems = () => [
+    { group: 'Edit', icon: 'plus', label: 'New document', run: newDocument },
     { group: 'Edit', icon: 'undo', label: 'Undo', run: () => ed().undo() },
     { group: 'Edit', icon: 'redo', label: 'Redo', run: () => ed().redo() },
     { group: 'Edit', icon: 'duplicate', label: 'Duplicate layer', run: duplicate },
@@ -1209,6 +1330,73 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
      image (Editor#openImage's fit-artboard behavior), same as the vanilla demo's header button.
      addImagePick above stays the "insert into the current artboard" tool. */
   const openImagePick = () => pickImage(src => { ed().openImage(src); trackAsset(src, 'Opened image'); });
+  /* "New" — discard the current document. Confirmed first: Editor#reset() empties the undo stack
+     by design (you must not be able to Ctrl+Z back into a document you explicitly discarded),
+     which makes this the one irreversible action in the editor — and with autosave on it wipes
+     the saved copy too. An already-empty document has nothing to lose, so it skips the prompt.
+     Ports the vanilla demo's own newdoc handler. */
+  const newDocument = async () => {
+    const e = ed(); if (!e) return;
+    const blank = () => {
+      e.reset({ width, height });
+      setAssets([]);
+      compareSnapshotRef.current = null; setCompareReady(false); setCompareOpen(false);
+      setSaveStatus(null);
+      e.setTool('select');
+      if (fitRef.current) fitRef.current();
+    };
+    // An empty document has nothing to lose: no prompt, nothing to undo.
+    if (!e.fc.getObjects().length) { blank(); return; }
+    /* Park the current document BEFORE clearing so the Undo below has something to restore.
+       This is what makes New recoverable: reset() empties the undo stack by design, so without
+       it the only copy of the work is gone the moment the button is clicked. */
+    if (sessionRef.current) await sessionRef.current.saveNow();
+    const parked = await discardToTrash();
+    blank();
+    if (sessionRef.current) await sessionRef.current.clear();
+    if (!parked) return;
+    toast('Started a new document', async () => {
+      const extras = await restoreDiscarded(e);
+      if (!extras) return;
+      if (Array.isArray(extras.assets) && extras.assets.length) setAssets(extras.assets);
+      if (extras.compare) { compareSnapshotRef.current = extras.compare; setCompareReady(true); }
+      if (fitRef.current) fitRef.current();
+    });
+  };
+
+  /* Project file: PNG/JPG/SVG are all flattened or lossy, so before this there was no way to get
+     layers, masks and adjustments out of the browser — no backup, no moving machines, no
+     handing the document to someone else. */
+  const saveProject = () => {
+    const blob = new Blob([exportProject(ed(), { assets })], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    downloadURL(url, 'canvasmith-project.canvasmith');
+    URL.revokeObjectURL(url);
+  };
+  const openProject = () => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.canvasmith,application/json';
+    inp.onchange = () => {
+      const f = inp.files[0]; if (!f) return;
+      const e = ed();
+      if (e.fc.getObjects().length && !window.confirm('Open this project?\n\nIt replaces the current document.')) return;
+      const r = new FileReader();
+      r.onload = async () => {
+        try {
+          const extras = await loadProject(e, r.target.result);
+          if (Array.isArray(extras.assets)) setAssets(extras.assets);
+          if (extras.compare) { compareSnapshotRef.current = extras.compare; setCompareReady(true); }
+          if (fitRef.current) fitRef.current();
+          toast('Project opened');
+        } catch (err) {
+          // parseProject's messages are written to be shown, not logged.
+          window.alert(err.message || 'Could not open that project.');
+        }
+      };
+      r.readAsText(f);
+    };
+    inp.click();
+  };
   // Vector export — exportSVG() returns a plain SVG string (not a dataURL, unlike PNG/JPEG), so
   // it needs wrapping in a Blob URL before it can be downloaded — same as the vanilla demo's own
   // svg.onclick. Previously absent from the React shell entirely (only PNG/JPG existed here).
@@ -1698,6 +1886,63 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const palette = THEMES[mode_] || THEMES.dark;
   const style = Object.fromEntries(Object.entries({ ...palette, 'accent-ink': palette.accentInk, ...theme })
     .filter(([k]) => k !== 'accentInk').map(([k, v]) => ['--cm-' + k, v]));
+  /* Layer list lives in the LEFT panel, above the tool options: it is scene state, not tool
+     state, so it stays put as the active tool changes, while the right panel keeps Properties
+     (matches the vanilla demo, where #layers-block sits above #tool-panel). */
+  const layersBlock = (
+    <div className="cm-layers-block">
+      <div className="cm-grp" style={{ marginTop: 0, paddingTop: 0, borderTop: 'none' }}>Layers</div>
+      <div style={{ minHeight: 60, maxHeight: 220, overflowY: 'auto' }}>
+        {layers.map(l => {
+          const thumb = layerThumb(l.id);
+          return (
+            <div key={l.id} className="cm-layer" data-on={l.active} data-dragover={dragOverId === l.id} data-dragging={dragLayerId === l.id}
+              draggable={l.role !== 'bg'}
+              onDragStart={e => onLayerDragStart(e, l)} onDragOver={e => onLayerDragOver(e, l)}
+              onDragLeave={() => setDragOverId(id => id === l.id ? null : id)} onDrop={e => onLayerDrop(e, l)} onDragEnd={onLayerDragEnd}
+              onClick={() => { if (renamingId !== l.id) onLayerRowClick(l); }}>
+              <span className="cm-layer-thumb">
+                {thumb ? <img src={thumb} alt="" /> : <Icon name={l.role === 'text' ? 'type' : l.role === 'bg' ? 'duplicate' : 'box'} size={14} />}
+              </span>
+              <span className="cm-eye" onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { visible: !l.visible }); }}><Icon name={l.visible ? 'eye' : 'eyeOff'} size={13} /></span>
+              <span className="cm-eye" title={l.locked ? 'Unlock' : 'Lock'} style={{ opacity: l.locked ? 1 : 0.5 }} onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { locked: !l.locked }); }}><Icon name="lock" size={13} /></span>
+              {renamingId === l.id ? (
+                <input className="cm-layer-rename" defaultValue={l.name} autoFocus
+                  onClick={e => e.stopPropagation()}
+                  onFocus={e => e.target.select()}
+                  onKeyDown={e => { if (e.key === 'Enter') commitRename(l.id, e.target.value); else if (e.key === 'Escape') setRenamingId(null); }}
+                  onBlur={e => commitRename(l.id, e.target.value)} />
+              ) : (
+                <span style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: l.visible ? 1 : 0.4 }}>{l.name}</span>
+                  <span style={{ fontSize: 10, color: 'var(--cm-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{layerSubtitle(l)}</span>
+                </span>
+              )}
+              {l.maskable && (l.hasMask ? (
+                <React.Fragment>
+                  <span className="cm-eye" title={l.editingMask ? 'Stop editing mask' : 'Edit mask'}
+                    style={{ opacity: (l.editingMask || !l.maskEnabled) ? 1 : 0.7, color: l.editingMask ? 'var(--cm-accent)' : undefined }}
+                    onClick={e => { e.stopPropagation(); if (l.editingMask) ed().exitMaskEdit(); else { ed().activate(l.id); ed().enterMaskEdit(l.id); } }}>
+                    <Icon name="mask" size={13} />
+                  </span>
+                  <span className="cm-eye" title="Delete mask" onClick={e => { e.stopPropagation(); ed().removeMask(l.id); }}><Icon name="close" size={13} /></span>
+                </React.Fragment>
+              ) : (
+                <span className="cm-eye" title="Add layer mask" onClick={e => { e.stopPropagation(); ed().addMask(l.id); ed().enterMaskEdit(l.id); }}>
+                  <Icon name="mask" size={13} />
+                </span>
+              ))}
+              <span className="cm-eye" title="Up" onClick={e => { e.stopPropagation(); ed().moveLayer(l.id, 'up'); }}><Icon name="up" size={13} /></span>
+              {l.role !== 'bg' && <span className="cm-eye" title="Delete" onClick={e => { e.stopPropagation(); ed().removeLayer(l.id); }}><Icon name="close" size={13} /></span>}
+            </div>
+          );
+        })}
+      </div>
+      <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} onClick={() => ed().addAdjustmentLayer()}>
+        <Icon name="contrast" size={13} /> Add adjustment layer
+      </button>
+    </div>
+  );
   return (
     <div className="cm-root" ref={rootRef} style={style} data-cm-mode={mode_}>
       <style>{CSS}</style>
@@ -1712,6 +1957,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           Canvasmith
         </strong>
         <span className="cm-note" title="Every control on this page is a public Editor API call — no framework, no build step." style={{ margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>React shell on the headless core</span>
+        <button className="cm-btn" title="Start a new document (clears the current one)" onClick={newDocument}><Icon name="plus" size={13} /> New</button>
         <button className="cm-btn" title="Open image…" onClick={openImagePick}><Icon name="duplicate" size={13} /> Open image…</button>
         <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
         <button className="cm-icon-btn" title="Undo" disabled={hist.past < 2} onClick={() => ed().undo()}><Icon name="undo" size={14} /></button>
@@ -1768,10 +2014,27 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           )}
         </span>
         <span style={{ flex: 1 }} />
+        <div className="cm-zoom-pill">
+          <button className="cm-icon-btn" title="Zoom out (−)" onClick={() => setZoomAtCenter(ed().fc.getZoom() * 0.83)}><Icon name="minus" size={14} /></button>
+          <button className="cm-btn cm-zoom-pct" title="Reset to fit" onClick={fitToScreen}>{zoomPct}%</button>
+          <button className="cm-icon-btn" title="Zoom in (+)" onClick={() => setZoomAtCenter(ed().fc.getZoom() * 1.2)}><Icon name="plus" size={14} /></button>
+          <span className="cm-zoom-div" />
+          <button className="cm-icon-btn cm-zoom-extra" title="Fit to screen (0)" onClick={fitToScreen}><Icon name="maximize" size={14} /></button>
+        </div>
         <button className="cm-icon-btn" title={mode_ === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} onClick={() => setMode(mode_ === 'dark' ? 'light' : 'dark')}>
           <Icon name={mode_ === 'dark' ? 'sun' : 'moon'} />
         </button>
         <span style={{ width: 1, height: 20, background: 'var(--cm-line)' }} />
+        {saveStatus && (
+          <span className="cm-save-note" data-warn={saveStatus === 'failed' || saveStatus === 'unavailable'}
+            title={saveStatus === 'unavailable'
+              ? 'This browser is blocking local storage, so this document will not be restored if you close the tab.'
+              : saveStatus === 'failed'
+                ? 'This document is past the browser\u2019s local-storage budget, so it will not be restored if you close the tab. Export it to keep it.'
+                : 'This document is autosaved in this browser and will be restored if you close the tab.'}>
+            {saveStatus === 'unavailable' ? 'Not autosaved (storage blocked)' : saveStatus === 'failed' ? 'Too large to autosave' : 'Saved'}
+          </span>
+        )}
         <button className="cm-icon-btn" disabled={!compareReady} title="Compare with the first-loaded version" onClick={openCompare}>
           <Icon name="search" size={13} />
         </button>
@@ -1782,9 +2045,24 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           </button>
           {exportOpen && (
             <div className="cm-export-menu">
-              <button className="cm-export-menu-item" onClick={() => { const u = ed().exportPNG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.png'); setExportOpen(false); }}>⬇ PNG</button>
-              <button className="cm-export-menu-item" onClick={() => { const u = ed().exportJPEG(); onExport ? onExport(u) : downloadURL(u, 'canvasmith.jpg'); setExportOpen(false); }}>⬇ JPG</button>
-              <button className="cm-export-menu-item" onClick={() => { exportSvg(); setExportOpen(false); }}>⬇ SVG</button>
+              <div className="cm-export-scale-row">
+                <span>Size</span>
+                <div className="cm-export-scale" role="group" aria-label="Export size">
+                  {[1, 2, 3].map(sc => (
+                    <button key={sc} className="cm-export-scale-btn" data-on={exportScale === sc}
+                      onClick={() => setExportScale(sc)}>{sc}&times;</button>
+                  ))}
+                </div>
+              </div>
+              {/* The exact pixel size the chosen scale produces — "2x" alone doesn't say whether
+                  the result clears a retina or print requirement. */}
+              <div className="cm-export-dims">{Math.round(ed().W * exportScale)} × {Math.round(ed().H * exportScale)} px</div>
+              <button className="cm-export-menu-item" onClick={() => { const u = ed().exportPNG(exportScale); onExport ? onExport(u) : downloadURL(u, `canvasmith${exportScale === 1 ? '' : '@' + exportScale + 'x'}.png`); setExportOpen(false); }}>⬇ PNG</button>
+              <button className="cm-export-menu-item" onClick={() => { const u = ed().exportJPEG(0.92, exportScale); onExport ? onExport(u) : downloadURL(u, `canvasmith${exportScale === 1 ? '' : '@' + exportScale + 'x'}.jpg`); setExportOpen(false); }}>⬇ JPG</button>
+              <button className="cm-export-menu-item" onClick={() => { exportSvg(); setExportOpen(false); }}>⬇ SVG <span className="cm-export-hint">vector</span></button>
+              <div className="cm-export-sep" />
+              <button className="cm-export-menu-item" onClick={() => { saveProject(); setExportOpen(false); }}>⬇ Project file <span className="cm-export-hint">keeps layers</span></button>
+              <button className="cm-export-menu-item" onClick={() => { openProject(); setExportOpen(false); }}>⬆ Open project…</button>
             </div>
           )}
         </span>
@@ -1800,6 +2078,13 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                 className="cm-rail-btn"
                 data-on={!!activeId}
                 data-tool={shownId}
+                /* Icon-only, so the tooltip text is also the accessible name — without it a
+                   screen reader announces "button" once per tool group and the rail is
+                   unusable. aria-pressed carries the data-on active highlight; a multi-tool
+                   group also reports that clicking opens its flyout. */
+                aria-label={shownLabel}
+                aria-pressed={!!activeId}
+                aria-expanded={ids.length > 1 ? railFlyout === gi : undefined}
                 onMouseEnter={(e) => setRailTip({ text: shownLabel, rect: e.currentTarget.getBoundingClientRect() })}
                 onMouseLeave={() => setRailTip(null)}
                 onClick={() => { setRailTip(null); pick(shownId); setRailFlyout(f => (ids.length > 1 ? (f === gi ? -1 : gi) : -1)); }}
@@ -1808,9 +2093,14 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                 {ids.length > 1 && <span className="cm-rail-caret" />}
               </button>
               {railFlyout === gi && (
-                <div className="cm-rail-flyout" onMouseLeave={() => setRailFlyout(-1)}>
+                <div className="cm-rail-flyout" role="menu" onMouseLeave={() => setRailFlyout(-1)}>
                   {ids.map(id => (
+                    /* These <div>s do a menu's job: without a role, tabindex and a key handler
+                       the non-primary tools are unreachable without a mouse — they exist only
+                       behind this flyout. The visible label is the accessible name. */
                     <div key={id} className="cm-rail-flyout-item" data-on={id === tool} data-tool={id}
+                      role="menuitemradio" aria-checked={id === tool} tabIndex={0}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(id); setRailFlyout(-1); } }}
                       onClick={() => { pick(id); setRailFlyout(-1); }}>
                       <Icon name={id} size={15} />
                       <span style={{ flex: 1 }}>{TOOL_LABELS[id] || id}</span>
@@ -1848,6 +2138,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
       <div className="cm-left">
         {!leftCollapsed && (
           <div>
+            {!reviewOn && layersBlock}
                 {maskEdit && (
                   <div style={{ background: 'var(--cm-accent)', color: 'var(--cm-accent-ink)', borderRadius: 8, padding: '8px 10px', marginBottom: 10, fontSize: 12, fontWeight: 600 }}>
                     Editing layer mask — paint white to reveal, black to hide.
@@ -2130,16 +2421,21 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           </div>
         )}
       </div>
-      <div className="cm-stage" ref={stageRef} onDragOver={onStageDragOver} onDrop={onStageDrop}>
-        <canvas ref={canvasRef} />
-        <span className="cm-dim-badge">{dims.w}×{dims.h}</span>
-        <div className="cm-zoom-pill">
-          <button className="cm-icon-btn" title="Zoom out (−)" onClick={() => setZoomAtCenter(ed().fc.getZoom() * 0.83)}><Icon name="minus" size={14} /></button>
-          <button className="cm-btn" style={{ minWidth: 44, justifyContent: 'center' }} title="Reset to fit" onClick={fitToScreen}>{zoomPct}%</button>
-          <button className="cm-icon-btn" title="Zoom in (+)" onClick={() => setZoomAtCenter(ed().fc.getZoom() * 1.2)}><Icon name="plus" size={14} /></button>
-          <span style={{ width: 1, height: 16, background: 'var(--cm-line)' }} />
-          <button className="cm-icon-btn" title="Fit to screen (0)" onClick={fitToScreen}><Icon name="maximize" size={14} /></button>
+      {toasts.length > 0 && (
+        <div className="cm-toast-wrap" aria-live="polite">
+          {toasts.map(t => (
+            <div className="cm-toast" key={t.id}>
+              <span>{t.message}</span>
+              {t.action && <button onClick={() => { dismissToast(t.id); t.action(); }}>Undo</button>}
+            </div>
+          ))}
         </div>
+      )}
+      <div className="cm-stage" ref={stageRef}
+        data-dropping={dropping || undefined}
+        onDragEnter={onStageDragEnter} onDragLeave={onStageDragLeave}
+        onDragOver={onStageDragOver} onDrop={(e) => { setDropDepth(0); setDropping(false); onStageDrop(e); }}>
+        <canvas ref={canvasRef} />
         {showExtendBanner && (
           <button className="cm-extend-banner" onClick={onExtendBannerClick}>
             <Icon name="search" size={13} />Background doesn't fill the canvas — AI-extend it
@@ -2175,7 +2471,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                 <div className="cm-row" style={{ gap: 6, fontSize: 12.5, fontWeight: 700 }}>
                   <Icon name="spark" size={13} style={{ color: 'var(--cm-accent)' }} />
                   <span style={{ flex: 1 }}>{aiInsert.region ? 'Fill the selection with AI' : 'Draw here with AI'}</span>
-                  <button className="cm-icon-btn" onClick={() => setAiInsert(null)}><Icon name="close" size={12} /></button>
+                  <button className="cm-icon-btn" title="Close" aria-label="Close" onClick={() => setAiInsert(null)}><Icon name="close" size={12} /></button>
                 </div>
                 {aiInsert.region && <div className="cm-note" style={{ fontSize: 10.5, marginBottom: 6 }}>The result is clipped to your selection — the AI draws only inside that shape.</div>}
                 {aiInsert.msg && <div className="cm-note" style={{ fontSize: 10.5, marginBottom: 6, color: '#e0607a' }}>{aiInsert.msg}</div>}
@@ -2310,7 +2606,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
         {!sideCollapsed && !reviewOn && (
           <React.Fragment>
             <div className="cm-tabs">
-              <button data-on={sideTab === 'layer'} onClick={() => setSideTab('layer')}><Icon name="layers" size={13} /> Layers</button>
+              <button data-on={sideTab === 'layer'} onClick={() => setSideTab('layer')}><Icon name="tool" size={13} /> Properties</button>
               <button data-on={sideTab === 'design'} onClick={() => setSideTab('design')}><Icon name="palette" size={13} /> Design</button>
               <button data-on={sideTab === 'stickers'} onClick={() => setSideTab('stickers')}><Icon name="star" size={13} /> Stickers</button>
               <button data-on={sideTab === 'ai'} onClick={() => setSideTab('ai')}><Icon name="spark" size={13} /> AI</button>
@@ -2318,60 +2614,6 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
 
             {sideTab === 'layer' && (
               <div>
-                {/* Layer list — moved here from the left panel's old Tool/Layers tab split so the
-                    layer list sits directly above that same layer's own Properties, rather than
-                    living in a separate tab pair from the tool options (matches the vanilla
-                    demo's #layers-panel content having moved into #layer-panel). */}
-                <div className="cm-grp" style={{ marginTop: 0, paddingTop: 0, borderTop: 'none' }}>Layers</div>
-                <div style={{ minHeight: 60, maxHeight: 220, overflowY: 'auto' }}>
-                  {layers.map(l => {
-                    const thumb = layerThumb(l.id);
-                    return (
-                      <div key={l.id} className="cm-layer" data-on={l.active} data-dragover={dragOverId === l.id} data-dragging={dragLayerId === l.id}
-                        draggable={l.role !== 'bg'}
-                        onDragStart={e => onLayerDragStart(e, l)} onDragOver={e => onLayerDragOver(e, l)}
-                        onDragLeave={() => setDragOverId(id => id === l.id ? null : id)} onDrop={e => onLayerDrop(e, l)} onDragEnd={onLayerDragEnd}
-                        onClick={() => { if (renamingId !== l.id) onLayerRowClick(l); }}>
-                        <span className="cm-layer-thumb">
-                          {thumb ? <img src={thumb} alt="" /> : <Icon name={l.role === 'text' ? 'type' : l.role === 'bg' ? 'duplicate' : 'box'} size={14} />}
-                        </span>
-                        <span className="cm-eye" onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { visible: !l.visible }); }}><Icon name={l.visible ? 'eye' : 'eyeOff'} size={13} /></span>
-                        <span className="cm-eye" title={l.locked ? 'Unlock' : 'Lock'} style={{ opacity: l.locked ? 1 : 0.5 }} onClick={e => { e.stopPropagation(); ed().setLayer(l.id, { locked: !l.locked }); }}><Icon name="lock" size={13} /></span>
-                        {renamingId === l.id ? (
-                          <input className="cm-layer-rename" defaultValue={l.name} autoFocus
-                            onClick={e => e.stopPropagation()}
-                            onFocus={e => e.target.select()}
-                            onKeyDown={e => { if (e.key === 'Enter') commitRename(l.id, e.target.value); else if (e.key === 'Escape') setRenamingId(null); }}
-                            onBlur={e => commitRename(l.id, e.target.value)} />
-                        ) : (
-                          <span style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: l.visible ? 1 : 0.4 }}>{l.name}</span>
-                            <span style={{ fontSize: 10, color: 'var(--cm-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{layerSubtitle(l)}</span>
-                          </span>
-                        )}
-                        {l.maskable && (l.hasMask ? (
-                          <React.Fragment>
-                            <span className="cm-eye" title={l.editingMask ? 'Stop editing mask' : 'Edit mask'}
-                              style={{ opacity: (l.editingMask || !l.maskEnabled) ? 1 : 0.7, color: l.editingMask ? 'var(--cm-accent)' : undefined }}
-                              onClick={e => { e.stopPropagation(); if (l.editingMask) ed().exitMaskEdit(); else { ed().activate(l.id); ed().enterMaskEdit(l.id); } }}>
-                              <Icon name="mask" size={13} />
-                            </span>
-                            <span className="cm-eye" title="Delete mask" onClick={e => { e.stopPropagation(); ed().removeMask(l.id); }}><Icon name="close" size={13} /></span>
-                          </React.Fragment>
-                        ) : (
-                          <span className="cm-eye" title="Add layer mask" onClick={e => { e.stopPropagation(); ed().addMask(l.id); ed().enterMaskEdit(l.id); }}>
-                            <Icon name="mask" size={13} />
-                          </span>
-                        ))}
-                        <span className="cm-eye" title="Up" onClick={e => { e.stopPropagation(); ed().moveLayer(l.id, 'up'); }}><Icon name="up" size={13} /></span>
-                        {l.role !== 'bg' && <span className="cm-eye" title="Delete" onClick={e => { e.stopPropagation(); ed().removeLayer(l.id); }}><Icon name="close" size={13} /></span>}
-                      </div>
-                    );
-                  })}
-                </div>
-                <button className="cm-btn" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }} onClick={() => ed().addAdjustmentLayer()}>
-                  <Icon name="contrast" size={13} /> Add adjustment layer
-                </button>
 
                 {!props.active ? (
                   <React.Fragment>
