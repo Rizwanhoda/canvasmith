@@ -79,7 +79,7 @@ afterEach(async () => { if (page) await page.close(); });
    Enter), clearing needKey the same way a real user would — several tests below need the AI tab's
    gated controls (Replace background, Apply magic edit) actually rendered. */
 const setFakeAiKey = async () => {
-  await page.locator('button:has-text("AI")').first().click();
+  await page.locator('.cm-tabs button:has-text("AI")').first().click();
   await page.waitForTimeout(150);
   await page.locator('input.cm-ai-key').fill('fake-key-for-test');
   await page.locator('input.cm-ai-key').press('Enter');
@@ -222,7 +222,7 @@ test('react: hoverselect tool wiring reaches the hover-preview overlay state', a
 
 /* ── layer panel: thumbnails, lock toggle, rename, drag-to-reorder — all previously absent from
    the React shell (only eye/up/delete existed; see readme/report gap notes) ────────────────── */
-test('react: the layers tab shows a thumbnail image for each layer', async () => {
+test('react: layer rows show real pixels for images and a fill-tinted tile for shapes', async () => {
   await ed(() => window.__mounted.editor().setTool('rect'));
   const box = await canvasBox();
   await page.mouse.move(box.x + 50, box.y + 50);
@@ -230,12 +230,18 @@ test('react: the layers tab shows a thumbnail image for each layer', async () =>
   await page.mouse.move(box.x + 150, box.y + 150, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(150);
-  // The layer list lives in the always-visible left panel now (no tab click needed).
-  await page.waitForTimeout(150);
-  const thumbImgs = await page.locator('.cm-layer-thumb img').count();
-  assert.ok(thumbImgs > 0);
+  await ed(async () => {
+    const c = document.createElement('canvas'); c.width = 20; c.height = 20;
+    c.getContext('2d').fillStyle = '#00aa00'; c.getContext('2d').fillRect(0, 0, 20, 20);
+    await window.__mounted.editor().addImage(c.toDataURL());
+  });
+  await page.waitForTimeout(200);
+  // The layer list lives in the always-visible left panel (Layers tab, the default).
   const src = await page.locator('.cm-layer-thumb img').first().getAttribute('src');
-  assert.ok(src.startsWith('data:image/png'));
+  assert.ok(src.startsWith('data:image/png'), 'image row shows its own pixels');
+  assert.ok(await page.locator('.cm-layer-thumb[data-tint]').count() > 0, 'shape row shows a tinted glyph tile');
+  const subs = await page.locator('.cm-layer-meta .sub').allTextContents();
+  assert.ok(subs.some(t => /Image$/.test(t)) && subs.includes('Vector Shape'), subs.join(' | '));
 });
 
 test('react: the lock toggle in the layer row calls setLayer({locked}) without activating the layer', async () => {
@@ -323,6 +329,45 @@ test('react: the Layer tab shows a Border section for a shape, with a colour swa
   assert.equal(colorInputsAfter, 1);
   const width = await ed(() => window.__mounted.editor().fc.getActiveObject().strokeWidth);
   assert.equal(width, 6);
+});
+
+test('react: fill and border opacity fields write an rgba colour and keep it across recolours', async () => {
+  await ed(() => window.__mounted.editor().setTool('rect'));
+  const box = await canvasBox();
+  await page.mouse.move(box.x + 50, box.y + 50);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 150, box.y + 150, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  await page.locator('button:has-text("Properties")').first().click();
+  await page.waitForTimeout(150);
+  await ed(() => window.__mounted.editor().setFill('#ef6a2d'));
+  await ed(() => window.__mounted.editor().setStroke({ color: '#000000', width: 4 }));
+  await page.waitForTimeout(100);
+
+  const fillPct = page.locator('input[aria-label="Fill opacity"]');
+  assert.equal(await fillPct.inputValue(), '100');
+  await fillPct.fill('40'); await fillPct.press('Enter');
+  await page.waitForTimeout(100);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getActiveObject().fill), 'rgba(239,106,45,0.4)');
+  assert.equal(await fillPct.inputValue(), '40');
+
+  // recolouring via the hex field keeps the 40%
+  const fillHex = page.locator('input[aria-label="Fill colour hex"]');
+  await fillHex.fill('#ffffff'); await fillHex.press('Enter');
+  await page.waitForTimeout(100);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getActiveObject().fill), 'rgba(255,255,255,0.4)');
+
+  const borderPct = page.locator('input[aria-label="Border opacity"]');
+  await borderPct.fill('25'); await borderPct.press('Enter');
+  await page.waitForTimeout(100);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getActiveObject().stroke), 'rgba(0,0,0,0.25)');
+  assert.equal(await ed(() => window.__mounted.editor().fc.getActiveObject().strokeWidth), 4);
+
+  // back to 100% stores a plain hex again
+  await fillPct.fill('100'); await fillPct.press('Enter');
+  await page.waitForTimeout(100);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getActiveObject().fill), '#ffffff');
 });
 
 /* ── zoom pill + fit-to-screen: previously absent from the React shell entirely (only the mouse-
@@ -435,7 +480,7 @@ test('react: mounting with an `image` prop tracks it as an asset, and clicking t
    live canvas — same architecture as the vanilla demo — with a side panel offering the full
    product/logo/text/sticker/decorative taxonomy for whichever region is currently selected. */
 test('react: the region-review side panel offers all 5 region types for the selected region', async () => {
-  const aiTab = page.locator('button:has-text("AI")').first();
+  const aiTab = page.locator('.cm-tabs button:has-text("AI")').first();
   await aiTab.click();
   await page.waitForTimeout(150);
   const manualBtn = page.locator('button:has-text("Select one object manually")').first();
@@ -656,7 +701,7 @@ test('react: re-entering crop on an already-cropped image shows the full image a
    explanation, which read as "doesn't work" even though it was actually erroring out correctly
    under the hood. Fixed to surface a real message for every failure reason. ─────────────────── */
 test('react: "Detect & convert to layers" shows an error message instead of silently doing nothing when no regions are found', async () => {
-  await page.locator('button:has-text("AI")').first().click();
+  await page.locator('.cm-tabs button:has-text("AI")').first().click();
   await page.waitForTimeout(150);
   await page.locator('input.cm-ai-key').fill('fake-key-for-test');
   await page.locator('input.cm-ai-key').press('Enter');
@@ -675,7 +720,7 @@ test('react: "Detect & convert to layers" shows an error message instead of sile
 });
 
 test('react: "Detect & convert to layers" shows an error message when the AI call itself throws', async () => {
-  await page.locator('button:has-text("AI")').first().click();
+  await page.locator('.cm-tabs button:has-text("AI")').first().click();
   await page.waitForTimeout(150);
   await page.locator('input.cm-ai-key').fill('fake-key-for-test');
   await page.locator('input.cm-ai-key').press('Enter');
@@ -755,12 +800,13 @@ test('react: "Replace background" runs aiBgSwap and reports success', async () =
       return out.toDataURL();
     };
   });
-  const input = page.locator('input[placeholder*="marble table"]');
+  // The AI tab's one prompt box describes the new background; the Replace BG quick action uses it.
+  const input = page.locator('textarea[aria-label="Describe the change"]');
   assert.ok(await input.count() > 0);
   await input.fill('a sunset');
-  await page.locator('button:has-text("Replace background")').click();
+  await page.locator('.cm-aix-qa button:has-text("Replace BG")').click();
   await page.waitForTimeout(400);
-  const notes = await page.locator('.cm-note').allTextContents();
+  const notes = await page.locator('.cm-aix-msg').allTextContents();
   assert.ok(notes.some(t => t.includes('Applied')));
 });
 
@@ -978,4 +1024,48 @@ test('react: the export menu offers a real pixel scale and a layers-preserving p
   const items = await page.locator('.cm-export-menu-item').allTextContents();
   assert.ok(items.some(t => /Project file/.test(t)), 'can save an editable project');
   assert.ok(items.some(t => /Open project/.test(t)), 'can open one back');
+});
+
+/* ── left panel: tabs, contextual tool dock, active row, AI card ─────────────────────────────── */
+test('react: left panel — tool dock only opens for tools with options; the active row follows the canvas selection', async () => {
+  await ed(() => window.__mounted.editor().setTool('select'));
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('.cm-dock').count(), 0, 'no dock with plain Select');
+  await ed(() => window.__mounted.editor().setTool('brush'));
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('.cm-dock').count(), 1, 'dock opens for Brush');
+  assert.ok((await page.locator('.cm-dock').textContent()).includes('Opacity'));
+  await ed(() => {
+    const w = window.__mounted.editor(); w.setTool('select');
+    const a = new w.fabric.Rect({ left: 10, top: 10, width: 30, height: 30, fill: '#ff0000' });
+    const b = new w.fabric.Rect({ left: 60, top: 10, width: 30, height: 30, fill: '#0000ff', name: 'Blue', renamed: true });
+    w.fc.add(a, b); w.commit('two');
+    w.fc.setActiveObject(b);   // a canvas-side selection change: no scene change, no 'change' event
+  });
+  await page.waitForTimeout(150);
+  const active = await page.locator('.cm-layer[data-on=true] .nm').textContent();
+  assert.equal(active, 'Blue');
+});
+
+test('react: left panel — AI Vision tab, Auto Shadow toggle and Remove BG enablement', async () => {
+  assert.equal(await page.locator('.cm-lp-tab[aria-selected=true]').textContent().then(t => t.startsWith('Layers')), true);
+  await page.locator('.cm-lp-tab', { hasText: 'AI Vision' }).click();
+  await page.waitForTimeout(100);
+  assert.ok((await page.locator('.cm-lp-ai').textContent()).includes('Detected subjects'));
+  await page.locator('.cm-lp-tab', { hasText: 'Layers' }).click();
+  await ed(() => { const w = window.__mounted.editor(); const r = new w.fabric.Rect({ left: 10, top: 10, width: 40, height: 40, fill: '#ff0000' }); w.fc.add(r); w.fc.setActiveObject(r); w.commit('r'); });
+  await page.waitForTimeout(150);
+  const removeBg = page.locator('.cm-lp-card-row .cm-btn', { hasText: 'Remove BG' });
+  assert.equal(await removeBg.isDisabled(), true, 'Remove BG needs an image/paint layer');
+  const shadow = page.locator('.cm-lp-card-row .cm-btn', { hasText: 'Auto Shadow' });
+  await shadow.click();
+  await page.waitForTimeout(150);
+  assert.equal(await ed(() => !!window.__mounted.editor().fc.getActiveObject().shadow), true);
+  assert.equal(await shadow.getAttribute('data-on'), 'true');
+  await ed(async () => {
+    const c = document.createElement('canvas'); c.width = 20; c.height = 20; c.getContext('2d').fillRect(0, 0, 20, 20);
+    const img = await window.__mounted.editor().addImage(c.toDataURL()); window.__mounted.editor().fc.setActiveObject(img);
+  });
+  await page.waitForTimeout(150);
+  assert.equal(await removeBg.isDisabled(), false, 'enabled for an image');
 });

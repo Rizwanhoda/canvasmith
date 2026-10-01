@@ -71,6 +71,9 @@ keys server-side (see `adapters/ditto` for a real example); individuals can use 
 | `apps/demo` | vanilla-JS shell over the core: `npm run demo` → localhost:8901/apps/demo/ |
 | `plugins/bookmarklet` | "Edit in Canvasmith" from any site (works on auth-gated images) |
 | `plugins/browser-extension` | MV3 right-click → edit |
+| `plugins/claude-extension` | Claude Desktop Extension (`.mcpb`): the editor rendered inside the Claude conversation (MCP App) |
+| `plugins/gemini-extension` | Gemini CLI extension: the editor in a browser tab, with exports handed back to Gemini over MCP |
+| `plugins/chatgpt-app` | ChatGPT app: a remote MCP server (Streamable HTTP) that renders the editor inside the ChatGPT conversation, with exports as download links |
 | `plugins/integrations` | per-platform recipes (Midjourney, ChatGPT, SD-WebUI, ComfyUI…) |
 | `adapters/ditto` | reference: plugging a SaaS backend in as the AI provider |
 

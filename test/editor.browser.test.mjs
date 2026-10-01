@@ -355,6 +355,100 @@ test('browser: installKeybindings wires delete/backspace on the active layer', a
   assert.equal(await page.evaluate(() => window.__ed.layers().length), 0);
 });
 
+test('browser: installKeybindings wires ⌘G group / ⌘⇧G ungroup on a multi-selection', async () => {
+  await page.evaluate(() => window.__ed.setTool('rect'));
+  const canvasBox = await page.locator('#cv').boundingBox();
+  for (const [x, y] of [[40, 40], [140, 140]]) {
+    await page.mouse.move(canvasBox.x + x, canvasBox.y + y);
+    await page.mouse.down();
+    await page.mouse.move(canvasBox.x + x + 40, canvasBox.y + y + 40, { steps: 4 });
+    await page.mouse.up();
+  }
+  await page.evaluate(() => {
+    const ed = window.__ed;
+    ed.setTool('select');
+    const objs = ed.fc.getObjects().filter(o => o.role !== 'artboard' && o.selectable !== false);
+    ed.fc.setActiveObject(new fabric.ActiveSelection(objs, { canvas: ed.fc }));
+  });
+  await page.keyboard.press('Meta+g');
+  await page.waitForTimeout(50);
+  assert.equal(await page.evaluate(() => window.__ed.fc.getActiveObject()?.type), 'group');
+  await page.keyboard.press('Meta+Shift+g');
+  await page.waitForTimeout(50);
+  assert.equal(await page.evaluate(() => window.__ed.fc.getActiveObject()?.type), 'activeSelection');
+  await page.evaluate(() => { window.__ed.fc.discardActiveObject(); window.__ed.layers().forEach(l => window.__ed.removeLayer(l.id)); });
+});
+
+test('browser: layers() nests group members as children, and member ops stay inside the group', async () => {
+  const r = await page.evaluate(async () => {
+    const ed = window.__ed;
+    const a = new fabric.Rect({ left: 20, top: 20, width: 40, height: 40, fill: '#f00', id: 'ga', role: 'shape' });
+    const b = new fabric.Rect({ left: 90, top: 90, width: 40, height: 40, fill: '#00f', id: 'gb', role: 'shape' });
+    ed.fc.add(a, b);
+    ed.fc.setActiveObject(new fabric.ActiveSelection([a, b], { canvas: ed.fc }));
+    ed.groupSelection();
+    const out = {};
+    const top = () => ed.layers().filter(l => l.role !== 'bg');
+    const g = top()[0];
+    out.topCount = top().length;
+    out.group = { name: g.name, isGroup: g.isGroup, kids: g.children.map(c => c.id), parent: g.children[0].parentId === g.id };
+    ed.setLayer('ga', { visible: false });
+    out.hidden = ed.layers().find(l => l.isGroup).children.find(c => c.id === 'ga').visible;
+    ed.moveLayer('ga', 'up');   // ga was bottom member -> now top
+    out.afterMove = ed.layers().find(l => l.isGroup).children.map(c => c.id);
+    ed.activate('gb');
+    const g2 = ed.layers().find(l => l.isGroup);
+    out.focus = { groupActive: g2.active, childActive: g2.childActive, gbActive: g2.children.find(c => c.id === 'gb').active };
+    ed.undo();   // back to before activate/move? activate doesn't commit, so this undoes the move
+    await new Promise(res => setTimeout(res, 150));
+    out.afterUndo = ed.layers().find(l => l.isGroup)?.children.map(c => c.id);
+    ed.removeLayer('ga');
+    out.afterRemove = ed.layers().find(l => l.isGroup)?.children.map(c => c.id);
+    ed.removeLayer('gb');
+    out.afterRemoveLast = ed.layers().filter(l => l.role !== 'bg').length;
+    return out;
+  });
+  assert.equal(r.topCount, 1);
+  assert.deepEqual(r.group, { name: 'Group', isGroup: true, kids: ['gb', 'ga'], parent: true });
+  assert.equal(r.hidden, false);
+  assert.deepEqual(r.afterMove, ['ga', 'gb']);
+  assert.deepEqual(r.focus, { groupActive: true, childActive: true, gbActive: true });
+  assert.deepEqual(r.afterUndo, ['gb', 'ga']);   // member ids survive a history round-trip
+  assert.deepEqual(r.afterRemove, ['gb']);
+  assert.equal(r.afterRemoveLast, 0);   // removing the last member removes the group
+});
+
+test('browser: toggleLayerSelection builds a multi-selection from layer ids, which then groups', async () => {
+  const r = await page.evaluate(() => {
+    const ed = window.__ed;
+    ed.fc.add(
+      new fabric.Rect({ left: 10, top: 10, width: 30, height: 30, id: 'sa', role: 'shape' }),
+      new fabric.Rect({ left: 60, top: 60, width: 30, height: 30, id: 'sb', role: 'shape' }),
+      new fabric.Rect({ left: 110, top: 110, width: 30, height: 30, id: 'sc', role: 'shape' }));
+    const sel = () => ed.layers().filter(l => l.selected).map(l => l.id).sort();
+    const out = {};
+    ed.toggleLayerSelection('sa'); out.one = sel();
+    ed.toggleLayerSelection('sc'); out.two = sel(); out.type = ed.fc.getActiveObject().type;
+    ed.toggleLayerSelection('sb'); out.three = sel();
+    ed.toggleLayerSelection('sa'); out.dropped = sel();
+    ed.moveLayer('sb', 'top');   // a multi-selection member is still a top-level layer, not a group member
+    out.movedTop = ed.fc.getObjects().filter(o => o.role !== 'bg').map(o => o.id).includes('sb');
+    ed.toggleLayerSelection('sb'); ed.toggleLayerSelection('sb');   // re-sync the selection after the restack
+    out.group = ed.groupSelection().status;
+    out.kids = ed.layers().find(l => l.isGroup).children.map(c => c.id).sort();
+    ed.layers().forEach(l => ed.removeLayer(l.id));
+    return out;
+  });
+  assert.deepEqual(r.one, ['sa']);
+  assert.deepEqual(r.two, ['sa', 'sc']);
+  assert.equal(r.type, 'activeSelection');
+  assert.deepEqual(r.three, ['sa', 'sb', 'sc']);
+  assert.deepEqual(r.dropped, ['sb', 'sc']);
+  assert.equal(r.movedTop, true);
+  assert.equal(r.group, 'ok');
+  assert.deepEqual(r.kids, ['sb', 'sc']);
+});
+
 test('browser: holding Space pans the canvas with any tool active, without switching tools', async () => {
   await page.evaluate(() => window.__ed.setTool('brush'));
   const canvasBox = await page.locator('#cv').boundingBox();
@@ -1861,4 +1955,246 @@ test('browser: the wand picks the element under the cursor, not a bigger same-co
     return { x: Math.round(minx), y: Math.round(miny) };
   });
   assert.ok(box.y < 300, `selection started at y=${box.y}; the pill is at y=120, the card at y=500`);
+});
+
+/* ── tone filter (tone.js): exposure / white balance / curves / HSL on a real Fabric image ─────── */
+const addGreyImage = () => page.evaluate(async () => {
+  const c = document.createElement('canvas'); c.width = 20; c.height = 20;
+  const x = c.getContext('2d'); x.fillStyle = 'rgb(118,118,118)'; x.fillRect(0, 0, 20, 20);
+  const img = await window.__ed.addImage(c.toDataURL());
+  window.__ed.fc.setActiveObject(img);
+  return img.id;
+});
+const imgPixel = (id) => page.evaluate((id) => {
+  const o = window.__ed.fc.getObjects().find(x => x.id === id);
+  const el = o._filteredEl || o._element;
+  return Array.from(el.getContext ? el.getContext('2d').getImageData(10, 10, 1, 1).data : []);
+}, id);
+
+test('browser: setImageFilters exposure/temperature/curves/hsl bake through the Tone filter', async () => {
+  const id = await addGreyImage();
+  await page.evaluate(() => window.__ed.setImageFilters({ exposure: 1 }));
+  const [e] = await imgPixel(id);
+  assert.ok(Math.abs(e - 161) <= 2, 'exposure +1 on mid grey: ' + e);
+
+  await page.evaluate(() => window.__ed.setImageFilters({ exposure: 0, temperature: 60 }));
+  const [r, , b] = await imgPixel(id);
+  assert.ok(r > 118 && b < 118, `warm: r=${r} b=${b}`);
+
+  await page.evaluate(() => window.__ed.setImageFilters({ temperature: 0, curves: { rgb: [[0, 255], [255, 0]] } }));
+  const [inv] = await imgPixel(id);
+  assert.equal(inv, 137);
+
+  const fx = await page.evaluate(() => window.__ed.getImageFilters());
+  assert.deepEqual(fx.curves, { rgb: [[0, 255], [255, 0]] });
+  assert.equal(fx.hsl, null);
+});
+
+test('browser: Tone filter survives undo/redo and a toJSON/loadJSON round-trip', async () => {
+  const id = await addGreyImage();
+  await page.evaluate(() => window.__ed.setImageFilters({ exposure: 1 }));
+  await page.evaluate(() => window.__ed.setImageFilters({ exposure: -1 }));
+  await page.evaluate(() => window.__ed.undo());
+  await page.waitForTimeout(150);
+  const [afterUndo] = await imgPixel(id);
+  assert.ok(Math.abs(afterUndo - 161) <= 2, 'undo restores +1 EV: ' + afterUndo);
+  const types = await page.evaluate((id) => window.__ed.fc.getObjects().find(x => x.id === id).filters.map(f => f.type), id);
+  assert.ok(types.includes('Tone'));
+});
+
+test('browser: an adjustment layer applies tone params to everything below', async () => {
+  await addGreyImage();
+  await page.evaluate(() => window.__ed.addAdjustmentLayer({ exposure: -1 }));
+  await page.waitForTimeout(50);
+  const [v] = await page.evaluate(() => Array.from(window.__ed.fc.toCanvasElement().getContext('2d').getImageData(200, 150, 1, 1).data));
+  assert.ok(Math.abs(v - 84) <= 3, '-1 EV adjustment layer on mid grey: ' + v);
+});
+
+/* ── geometry filter (geometry.js): straighten / keystone / 4-corner perspective ──────────────── */
+const addSplitImage = () => page.evaluate(async () => {
+  // left half red, right half blue — easy to see a resample move pixels
+  const c = document.createElement('canvas'); c.width = 40; c.height = 20;
+  const x = c.getContext('2d'); x.fillStyle = '#ff0000'; x.fillRect(0, 0, 20, 20); x.fillStyle = '#0000ff'; x.fillRect(20, 0, 20, 20);
+  const img = await window.__ed.addImage(c.toDataURL());
+  window.__ed.fc.setActiveObject(img);
+  return img.id;
+});
+const elPixel = (id, x, y) => page.evaluate(([id, x, y]) => {
+  const o = window.__ed.fc.getObjects().find(q => q.id === id), el = o._filteredEl || o._element;
+  // with no active filters Fabric's element is the plain <img> — read it through a canvas
+  const c = document.createElement('canvas'); c.width = el.naturalWidth || el.width; c.height = el.naturalHeight || el.height;
+  c.getContext('2d').drawImage(el, 0, 0);
+  return Array.from(c.getContext('2d').getImageData(x, y, 1, 1).data);
+}, [id, x, y]);
+
+test('browser: straighten keeps the frame size, fills every corner, and is one undo step', async () => {
+  const id = await addSplitImage();
+  const before = await page.evaluate(() => { const o = window.__ed.fc.getActiveObject(); return { w: o.width, h: o.height, l: o.left, t: o.top, d: window.__ed.history.depth().past }; });
+  await page.evaluate(() => { window.__ed.setImageGeometry({ angle: 5 }, { live: true }); window.__ed.setImageGeometry({ angle: 10 }, { live: true }); });
+  assert.ok(await page.evaluate(() => Array.isArray(window.__ed.geometryGuide)), 'guide grid while live');
+  await page.evaluate(() => window.__ed.setImageGeometry({}));
+  const after = await page.evaluate(() => { const o = window.__ed.fc.getActiveObject(); return { w: o.width, h: o.height, l: o.left, t: o.top, d: window.__ed.history.depth().past, guide: window.__ed.geometryGuide }; });
+  assert.deepEqual([after.w, after.h, after.l, after.t], [before.w, before.h, before.l, before.t]);
+  assert.equal(after.d, before.d + 1);
+  assert.equal(after.guide, null);
+  for (const [x, y] of [[0, 0], [39, 0], [0, 19], [39, 19]]) assert.equal((await elPixel(id, x, y))[3], 255, `corner ${x},${y} filled`);
+});
+
+test('browser: geometry survives undo/redo and composes with tone + mask in the right order', async () => {
+  const id = await addSplitImage();
+  await page.evaluate(() => window.__ed.setImageGeometry({ quad: [[1, 0], [0, 0], [0, 1], [1, 1]] }));   // mirror
+  assert.deepEqual((await elPixel(id, 2, 10)).slice(0, 3), [0, 0, 255]);
+  await page.evaluate(() => window.__ed.setImageFilters({ exposure: -1 }));
+  await page.evaluate((id) => window.__ed.addMask(id), id);
+  const order = await page.evaluate((id) => window.__ed.fc.getObjects().find(q => q.id === id).filters.map(f => f.type), id);
+  assert.deepEqual(order.slice(0, 3), ['Geometry', 'MaskFilter', 'Tone']);
+  await page.evaluate(() => window.__ed.undo()); await page.waitForTimeout(150);   // mask
+  await page.evaluate(() => window.__ed.undo()); await page.waitForTimeout(150);   // exposure
+  const px = await elPixel(id, 2, 10);
+  assert.deepEqual(px.slice(0, 3), [0, 0, 255], 'still mirrored after undoing later edits');
+  await page.evaluate(() => window.__ed.undo()); await page.waitForTimeout(150);   // geometry
+  assert.deepEqual((await elPixel(id, 2, 10)).slice(0, 3), [255, 0, 0]);
+  await page.evaluate(() => window.__ed.redo()); await page.waitForTimeout(150);
+  assert.deepEqual((await elPixel(id, 2, 10)).slice(0, 3), [0, 0, 255]);
+  const geom = await page.evaluate(() => { const o = window.__ed.fc.getObjects().find(q => q.type === 'image'); window.__ed.fc.setActiveObject(o); return window.__ed.getImageGeometry(); });
+  assert.deepEqual(geom.quad, [[1, 0], [0, 0], [0, 1], [1, 1]]);
+});
+
+test('browser: perspective edit — drag a handle, apply sets quad; cancel/Escape restores', async () => {
+  await addSplitImage();
+  await page.evaluate(() => window.__ed.setImageGeometry({ angle: 3 }));
+  const d0 = await page.evaluate(() => window.__ed.history.depth().past);
+  assert.equal(await page.evaluate(() => window.__ed.enterPerspectiveEdit()), true);
+  const screen = await page.evaluate(() => {
+    const p = window.__ed.perspective, v = window.__ed.fc.viewportTransform, r = window.__ed.fc.upperCanvasEl.getBoundingClientRect();
+    return p.corners.map(c => [r.left + c.x * v[0] + v[4], r.top + c.y * v[3] + v[5]]);
+  });
+  await page.mouse.move(screen[0][0], screen[0][1]); await page.mouse.down();
+  await page.mouse.move(screen[0][0] + 40, screen[0][1] + 20, { steps: 4 }); await page.mouse.up();
+  const quad0 = await page.evaluate(() => window.__ed._persp.corners[0]);
+  assert.ok(quad0[0] > 0.05 && quad0[1] > 0.05, 'handle moved: ' + quad0);
+  await page.evaluate(() => window.__ed.applyPerspectiveEdit());
+  const g = await page.evaluate(() => ({ g: window.__ed.getImageGeometry(), d: window.__ed.history.depth().past, active: !!window.__ed.fc.getActiveObject(), p: window.__ed.perspective }));
+  assert.equal(g.g.angle, 3, 'straighten kept');
+  assert.ok(g.g.quad && g.g.quad[0][0] > 0.05);
+  assert.equal(g.d, d0 + 1); assert.equal(g.active, true); assert.equal(g.p, null);
+
+  await page.evaluate(() => window.__ed.enterPerspectiveEdit());
+  await page.evaluate(() => window.__ed.resetPerspectiveCorners());
+  await page.keyboard.press('Escape');
+  const g2 = await page.evaluate(() => ({ quad: window.__ed.getImageGeometry().quad, p: window.__ed.perspective, d: window.__ed.history.depth().past }));
+  assert.equal(g2.p, null); assert.ok(g2.quad && g2.quad[0][0] > 0.05, 'Escape kept the applied quad'); assert.equal(g2.d, d0 + 1);
+});
+
+/* ── left-panel AI card actions: removeBackground (mask, AI or local) / toggleAutoShadow ─────── */
+const addTestImage = (draw, w = 80, h = 60) => page.evaluate(async ([src, w, h]) => {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  new Function('ctx', 'w', 'h', src)(c.getContext('2d'), w, h);
+  const img = await window.__ed.addImage(c.toDataURL());
+  window.__ed.fc.setActiveObject(img);
+  return img.id;
+}, [draw, w, h]);
+const filteredAlpha = (id, x, y) => page.evaluate(([id, x, y]) => {
+  const o = window.__ed.fc.getObjects().find(q => q.id === id), el = o._filteredEl || o._element;
+  const c = document.createElement('canvas'); c.width = el.width; c.height = el.height;
+  c.getContext('2d').drawImage(el, 0, 0);
+  return c.getContext('2d').getImageData(x, y, 1, 1).data[3];
+}, [id, x, y]);
+
+test('browser: toggleAutoShadow adds a size-scaled shadow, then removes it — one undo step each', async () => {
+  await addTestImage("ctx.fillStyle='#c33';ctx.fillRect(0,0,w,h)");
+  const r = await page.evaluate(() => {
+    const ed = window.__ed, d0 = ed.history.depth().past;
+    const on = ed.toggleAutoShadow();
+    const o = ed.fc.getActiveObject(), sh = o.shadow && { blur: o.shadow.blur, y: o.shadow.offsetY };
+    const d1 = ed.history.depth().past;
+    const off = ed.toggleAutoShadow();
+    return { on, sh, off, d0, d1, d2: ed.history.depth().past, hasShadow: ed.layers().find(l => l.active).hasShadow };
+  });
+  assert.deepEqual(r.on, { on: true }); assert.deepEqual(r.off, { on: false });
+  assert.ok(r.sh.blur > 0 && r.sh.y > 0, JSON.stringify(r.sh));
+  assert.equal(r.d1, r.d0 + 1); assert.equal(r.d2, r.d1 + 1);
+  assert.equal(r.hasShadow, false);
+  assert.equal(await page.evaluate(() => { window.__ed.fc.discardActiveObject(); return window.__ed.toggleAutoShadow(); }), null);
+});
+
+test('browser: removeBackground via an AI provider keys the green screen into a layer mask', async () => {
+  const id = await addTestImage("ctx.fillStyle='#c33';ctx.fillRect(0,0,w,h)");
+  await page.evaluate(() => window.__ed.ai.register({
+    hasKey: () => true,
+    // subject on the right half, pure green where the background was
+    removeBackground: async (url) => { const c = document.createElement('canvas'); c.width = 80; c.height = 60; const x = c.getContext('2d'); x.fillStyle = '#00ff00'; x.fillRect(0, 0, 40, 60); x.fillStyle = '#c33'; x.fillRect(40, 0, 40, 60); return c.toDataURL(); },
+  }));
+  const r = await page.evaluate(async () => { const d0 = window.__ed.history.depth().past; const r = await window.__ed.removeBackground(); return { ...r, d: window.__ed.history.depth().past - d0, layer: window.__ed.layers().find(l => l.active) }; });
+  assert.equal(r.status, 'ok'); assert.equal(r.method, 'ai'); assert.equal(r.d, 1);
+  assert.equal(r.layer.hasMask, true); assert.match(r.layer.subtitle, /Masked image/);
+  assert.equal(await filteredAlpha(id, 8, 30), 0, 'green half hidden');
+  assert.equal(await filteredAlpha(id, 72, 30), 255, 'subject half kept');
+});
+
+test('browser: removeBackground falls back to the local GrabCut cutout when AI fails', async () => {
+  const id = await addTestImage("ctx.fillStyle='#f4f4f4';ctx.fillRect(0,0,w,h);ctx.fillStyle='#1d3fa8';ctx.beginPath();ctx.arc(w/2,h/2,Math.min(w,h)*0.3,0,7);ctx.fill()", 160, 120);
+  await page.evaluate(() => window.__ed.ai.register({ hasKey: () => true, removeBackground: async () => { throw new Error('offline'); } }));
+  const r = await page.evaluate(() => window.__ed.removeBackground());
+  assert.equal(r.status, 'ok', JSON.stringify(r)); assert.equal(r.method, 'local'); assert.equal(r.aiFallback, 'provider_failed');
+  assert.equal(await filteredAlpha(id, 4, 4), 0, 'corner background removed');
+  assert.ok(await filteredAlpha(id, 80, 60) > 200, 'subject centre kept');
+});
+
+test('browser: removeBackground reports no_target without an image or paint layer selected', async () => {
+  const r = await page.evaluate(() => window.__ed.removeBackground());
+  assert.equal(r.status, 'error'); assert.equal(r.reason, 'no_target');
+});
+
+/* ── rounded corners stay round under non-uniform resize (Editor#_bindRoundCorners) ─────────── */
+const cornerExtent = () => page.evaluate(() => {
+  const o = window.__ed.fc.getObjects().find(q => q.type === 'rect' || q.type === 'group');
+  const el = o.toCanvasElement({ enableRetinaScaling: false });
+  const W = el.width, H = el.height, d = el.getContext('2d').getImageData(0, 0, W, H).data, a = (x, y) => d[(y * W + x) * 4 + 3];
+  let cx = 0; while (cx < W && a(cx, 0) < 128) cx++;
+  let cy = 0; while (cy < H && a(0, cy) < 128) cy++;
+  return { cx, cy, W, H };
+});
+
+test('browser: dragging a side handle keeps a rect\'s rounded corners circular', async () => {
+  await page.evaluate(() => { const ed = window.__ed; const r = new ed.fabric.Rect({ left: 40, top: 40, width: 100, height: 60, rx: 20, ry: 20, fill: '#7a2e10', strokeWidth: 0 }); ed.fc.add(r); ed.fc.setActiveObject(r); ed.fc.renderAll(); ed.commit('r'); });
+  const before = await cornerExtent();
+  const box = await page.locator('#cv').boundingBox();
+  const { mr, z } = await page.evaluate(() => { const o = window.__ed.fc.getActiveObject(); o.setCoords(); return { mr: { x: o.oCoords.mr.x, y: o.oCoords.mr.y }, z: window.__ed.fc.viewportTransform[0] }; });
+  await page.mouse.move(box.x + mr.x, box.y + mr.y); await page.mouse.down();
+  await page.mouse.move(box.x + mr.x + 100 * z, box.y + mr.y, { steps: 8 }); await page.mouse.up();
+  await page.waitForTimeout(100);
+  const after = await cornerExtent();
+  assert.ok(after.W > before.W * 1.8, 'widened');
+  assert.ok(Math.abs(after.cx - after.cy) <= 2, `round, not oval: ${after.cx} × ${after.cy}`);
+  assert.ok(Math.abs(after.cx - before.cx) <= 2, `same radius as before the resize: ${after.cx} vs ${before.cx}`);
+  assert.equal(await page.evaluate(() => Math.round(window.__ed.cornerRadiusOf(window.__ed.fc.getActiveObject()))), 20);
+});
+
+test('browser: panel W/H and radius edits keep corners round, radius is true pixels, survives undo', async () => {
+  await page.evaluate(() => { const ed = window.__ed; const r = new ed.fabric.Rect({ left: 40, top: 40, width: 100, height: 60, fill: '#7a2e10', strokeWidth: 0 }); ed.fc.add(r); ed.fc.setActiveObject(r); ed.commit('r'); });
+  await page.evaluate(() => window.__ed.setNumeric({ rx: 18 }));
+  await page.evaluate(() => window.__ed.setNumeric({ w: 300 }));
+  const a = await cornerExtent();
+  assert.ok(Math.abs(a.cx - a.cy) <= 2, `round after W edit: ${a.cx} × ${a.cy}`);
+  await page.evaluate(() => window.__ed.setNumeric({ h: 20 }));   // shorter than 2 × radius: clamps, no over-round
+  const clamped = await page.evaluate(() => { const o = window.__ed.fc.getActiveObject(); return { r: window.__ed.cornerRadiusOf(o), ry: o.ry * o.scaleY }; });
+  assert.equal(clamped.r, 18); assert.ok(clamped.ry <= 10.01, 'rendered radius clamped to half the height');
+  await page.evaluate(() => window.__ed.setNumeric({ h: 60 }));
+  await page.evaluate(() => window.__ed.undo()); await page.waitForTimeout(150);
+  const r = await page.evaluate(() => { const o = window.__ed.fc.getObjects().find(q => q.type === 'rect'); return { r: window.__ed.cornerRadiusOf(o), sx: o.scaleX, sy: o.scaleY, rx: o.rx, ry: o.ry }; });
+  assert.equal(r.r, 18, 'cornerRadius restored from history');
+  assert.ok(Math.abs(r.rx * r.sx - r.ry * r.sy) < 0.01 || r.ry * r.sy <= 10.01, JSON.stringify(r));
+});
+
+test('browser: a CTA pill stays a pill when its group is stretched', async () => {
+  await page.evaluate(() => { const ed = window.__ed; ed.addCTA({ x: 150, y: 100 }, { text: 'Shop' }); ed.fc.setActiveObject(ed.fc.getObjects().find(o => o.role === 'cta')); });
+  await page.evaluate(() => window.__ed.setNumeric({ w: 360 }));
+  const pill = await page.evaluate(() => {
+    const g = window.__ed.fc.getObjects().find(o => o.role === 'cta'), r = g._objects.find(o => o.type === 'rect');
+    const m = window.__ed.fabric.util.qrDecompose(r.calcTransformMatrix());
+    return { rxScene: r.rx * Math.abs(m.scaleX), ryScene: r.ry * Math.abs(m.scaleY), hScene: r.height * Math.abs(m.scaleY) };
+  });
+  assert.ok(Math.abs(pill.rxScene - pill.ryScene) < 0.5, JSON.stringify(pill));
+  assert.ok(Math.abs(pill.ryScene - pill.hScene / 2) < 0.5, 'still fully rounded ends');
 });

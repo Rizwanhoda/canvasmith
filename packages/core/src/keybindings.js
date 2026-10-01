@@ -2,7 +2,7 @@
    shell wire up, so they can't drift the way the Properties panel once did. Attaches to `target`
    (default: document) and returns a teardown function.
 
-   Covers: undo/redo, copy/paste, duplicate (⌘D), delete-active-layer, select all (⌘A) / invert
+   Covers: undo/redo, copy/paste, duplicate (⌘D), group/ungroup (⌘G / ⌘⇧G), delete-active-layer, select all (⌘A) / invert
    selection (⌘⇧I), tolerance scrub ([ / ]) for the wand/object/hover-select tools, Enter/Escape
    for the in-progress polygon/magnetic lasso or pen build, single-letter tool-switch shortcuts
    (Photoshop-standard where one exists), and arrow-key nudge (Shift = 10px) of the active
@@ -55,6 +55,12 @@ export function installKeybindings(editor, target = (typeof document !== 'undefi
       if (e.key === 'Escape') { e.preventDefault(); editor.cancelPen(); return; }
     }
 
+    // 4-corner perspective edit: Enter applies, Escape cancels — same first-checked treatment.
+    if (editor._persp && !isTypingTarget(editor)) {
+      if (e.key === 'Enter') { e.preventDefault(); editor.applyPerspectiveEdit(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); editor.cancelPerspectiveEdit(); return; }
+    }
+
     // Escape cascade: back out of whatever's "live" one step at a time, most-specific first —
     // cancel an in-progress crop, else clear a pixel selection (marquee/lasso/wand), else deselect
     // the active object. Each branch returns after acting so a single Escape press only ever
@@ -95,6 +101,14 @@ export function installKeybindings(editor, target = (typeof document !== 'undefi
     // duplicateSelectionToLayer() itself no-ops (returns null) without either, so this is a
     // straight passthrough rather than needing its own guard beyond the key match.
     if (mod && key === 'j') { e.preventDefault(); editor.duplicateSelectionToLayer(); return; }
+
+    // Group (⌘G) / ungroup (⌘⇧G) the active multi-selection / group. Always swallowed so the
+    // browser's Find Next never fires; groupSelection()/ungroupSelection() no-op with a status.
+    if (mod && key === 'g') {
+      e.preventDefault();
+      if (e.shiftKey) editor.ungroupSelection(); else editor.groupSelection();
+      return;
+    }
 
     // Pixel-selection commands: select all (⌘A), invert (⌘⇧I) — mirror the reference editor's
     // shortcuts for the marquee/lasso/wand selection system (distinct from object selection).
