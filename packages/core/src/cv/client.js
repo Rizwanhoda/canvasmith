@@ -111,6 +111,13 @@ export class CvEngine {
     return r ? r.polys : null;
   }
 
+  /* The foreground objects inside rough selection rings (image px) — a polygon per object.
+     `invert`: the selected area is everything EXCEPT the rings. */
+  async objects(img, polys, invert = false) {
+    const r = await this._call('objects', { img, polys, invert }, [img.data.buffer]);
+    return r ? r.polys : null;
+  }
+
   destroy() {
     if (this._worker) { try { this._worker.terminate(); } catch (e) { } }
     this._worker = null; this._bootState = 'idle'; this._bootWait = null;

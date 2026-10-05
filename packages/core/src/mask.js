@@ -1,5 +1,5 @@
-/* Paintable, non-destructive layer masks — image/paint-role layers only (see editor.js's
-   addMask doc comment for why vector shapes/text are out of scope for v1).
+/* Paintable, non-destructive layer masks. Image/paint layers use the MaskFilter below; vector
+   layers (shapes, text, groups) are masked at draw time instead — see the section at the end.
 
    A mask is a full-artboard-resolution grayscale canvas stored on the fabric object as
    `o.maskCanvas` (white = fully visible, black = fully hidden, gray = partial) plus
@@ -192,4 +192,134 @@ export function deserializeMask(spec, W, H) {
     img.onerror = () => resolve(null);
     img.src = spec.dataURL;
   });
+}
+
+/* ── Vector-layer masks (shapes, paths, text, groups) ─────────────────────────────────────────
+   Image filters only run on fabric.Image, so a vector layer's mask is applied at draw time
+   instead: the same `o.maskCanvas` / `o.maskEnabled` fields, but the canvas covers the layer's
+   OWN local box (it moves/scales/rotates with the layer, like a linked Photoshop mask) and is
+   composited `destination-in` onto the layer's private render cache right after Fabric draws its
+   clipPath. The layer itself stays a fully editable vector. Attached per object (see
+   attachVectorMask) rather than by patching fabric.Object.prototype, same rule as the themed
+   handles in editor.js. */
+
+export const isVectorMaskable = (o) => !!o && o.type !== 'image' && o.type !== 'activeSelection'
+  && o.role !== 'bg' && o.role !== 'adjustment';
+
+// Local (unscaled, stroke-inclusive) size of the layer — the box its mask canvas maps onto.
+function localBox(o) {
+  const d = o._getNonTransformedDimensions();
+  return { w: Math.max(1, d.x), h: Math.max(1, d.y) };
+}
+
+/* New mask for a vector layer, at roughly 1:1 with the layer's on-artboard size. Transparent =
+   untouched = fully visible, same convention as createMaskCanvas. */
+export function createVectorMaskCanvas(o) {
+  const { w, h } = localBox(o);
+  const s = Math.max(Math.abs(o.scaleX || 1), Math.abs(o.scaleY || 1));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.min(4096, Math.round(w * s)));
+  c.height = Math.max(1, Math.min(4096, Math.round(h * s)));
+  return c;
+}
+
+/* Scene point + brush size -> the same in the vector mask's pixel space. */
+export function vectorMaskPoint(fabric, o, pt, size) {
+  const mc = o.maskCanvas, { w, h } = localBox(o);
+  const inv = fabric.util.invertTransform(o.calcTransformMatrix());
+  const l = fabric.util.transformPoint(new fabric.Point(pt.x, pt.y), inv);
+  const kx = mc.width / w, ky = mc.height / h;
+  const sx = Math.abs(o.scaleX || 1), sy = Math.abs(o.scaleY || 1);
+  return { x: (l.x + w / 2) * kx, y: (l.y + h / 2) * ky, size: size * ((kx / sx + ky / sy) / 2) };
+}
+
+/* Mask pixels changed (or were enabled/disabled): drop the cached alpha + encoding, re-render. */
+export function touchVectorMask(o) {
+  o._vmaskVer = (o._vmaskVer || 0) + 1;
+  o.dirty = true;
+}
+
+// White-backed coverage: an untouched (transparent) pixel is fully visible, and a soft/partial
+// black stroke hides proportionally to its alpha — visible = 1 - a * (1 - gray).
+function alphaCanvas(o) {
+  if (o._vmaskAlpha && o._vmaskAlphaVer === o._vmaskVer) return o._vmaskAlpha;
+  const mc = o.maskCanvas;
+  const c = document.createElement('canvas'); c.width = mc.width; c.height = mc.height;
+  const ctx = c.getContext('2d');
+  let src;
+  try { src = mc.getContext('2d').getImageData(0, 0, mc.width, mc.height); } catch (e) { return null; }
+  const d = src.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const a = d[i + 3] / 255, gray = d[i] / 255;
+    d[i] = d[i + 1] = d[i + 2] = 0;
+    d[i + 3] = Math.round(255 * (1 - a * (1 - gray)));
+  }
+  ctx.putImageData(src, 0, 0);
+  o._vmaskAlpha = c; o._vmaskAlphaVer = o._vmaskVer;
+  return c;
+}
+
+/* Decoded masks by dataURL, so restoring a snapshot (undo/redo, duplicate) re-links its mask
+   synchronously instead of flashing the layer unmasked for a frame while a PNG decodes. */
+const _decoded = new Map();
+function remember(url, canvas) {
+  const copy = document.createElement('canvas'); copy.width = canvas.width; copy.height = canvas.height;
+  copy.getContext('2d').drawImage(canvas, 0, 0);
+  _decoded.delete(url); _decoded.set(url, copy);
+  while (_decoded.size > 32) _decoded.delete(_decoded.keys().next().value);
+}
+function fromCache(url) {
+  const c = _decoded.get(url); if (!c) return null;
+  const out = document.createElement('canvas'); out.width = c.width; out.height = c.height;
+  out.getContext('2d').drawImage(c, 0, 0);
+  return out;
+}
+
+/* Gives one object vector-mask rendering + serialization, and re-links a mask it was restored
+   with (`o.vmask`, the dataURL its toObject wrote). Idempotent. */
+export function attachVectorMask(o) {
+  if (!isVectorMaskable(o) || o._vmaskAttached) return;
+  o._vmaskAttached = true;
+  const proto = Object.getPrototypeOf(o);
+  o.needsItsOwnCache = function () {
+    // destination-in must land on the layer's private cache, never the shared canvas
+    return (this.maskCanvas && this.maskEnabled !== false) || proto.needsItsOwnCache.call(this);
+  };
+  o._drawClipPath = function (ctx, clipPath) {
+    proto._drawClipPath.call(this, ctx, clipPath);
+    if (!this.maskCanvas || this.maskEnabled === false || ctx !== this._cacheContext) return;
+    const a = alphaCanvas(this); if (!a) return;
+    const { w, h } = localBox(this);
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.drawImage(a, -w / 2, -h / 2, w, h);
+    ctx.restore();
+  };
+  o.toObject = function (props) {
+    const obj = proto.toObject.call(this, props);
+    if (this.maskCanvas) {
+      if (this._vmaskURLVer !== this._vmaskVer || !this._vmaskURL) {
+        try { this._vmaskURL = this.maskCanvas.toDataURL('image/png'); remember(this._vmaskURL, this.maskCanvas); } catch (e) { this._vmaskURL = null; }
+        this._vmaskURLVer = this._vmaskVer;
+      }
+      if (this._vmaskURL) obj.vmask = this._vmaskURL;
+    } else if (this.vmask) obj.vmask = this.vmask;   // restored but still decoding
+    return obj;
+  };
+  if (o.vmask && !o.maskCanvas) {
+    const url = o.vmask, sync = fromCache(url);
+    const link = (c) => { o.maskCanvas = c; o.vmask = null; touchVectorMask(o); };
+    if (sync) link(sync);
+    else {
+      const img = new Image();
+      img.onload = () => {
+        if (o.maskCanvas || o.vmask !== url) return;
+        const c = document.createElement('canvas'); c.width = img.naturalWidth || 1; c.height = img.naturalHeight || 1;
+        c.getContext('2d').drawImage(img, 0, 0);
+        remember(url, c); link(c);
+        if (o.canvas) o.canvas.requestRenderAll();
+      };
+      img.src = url;
+    }
+  }
 }

@@ -26,10 +26,15 @@ export function renderObjectsFlat(fc, W, H, objects) {
   canvasEl.width = W; canvasEl.height = H;
   const ctx = canvasEl.getContext('2d');
   const savedVpt = fc.viewportTransform;
+  // renderCanvas() cancels any on-screen render already requested (it assumes it IS that render).
+  // This one is offscreen, so put the request back afterwards — otherwise a pending repaint (e.g.
+  // the hover preview's) could be dropped and the screen left showing a stale frame.
+  const pending = !!fc.isRendering;
   fc.viewportTransform = [1, 0, 0, 1, 0, 0];
   fc.calcViewportBoundaries();
   try { fc.renderCanvas(ctx, objects); }
   finally { fc.viewportTransform = savedVpt; fc.calcViewportBoundaries(); }
+  if (pending) fc.requestRenderAll();
   return canvasEl;
 }
 
@@ -419,6 +424,7 @@ export class PaintEngine {
     // pointer to that same canvas (so addMask/removeMask/_refreshMaskFilter don't have to search
     // o.filters every time), and needs re-linking here after every restore.
     this.fc.getObjects().forEach(o => {
+      if (o.type !== 'image') return;   // vector layers keep their own mask (see mask.js attachVectorMask)
       const f = (o.filters || []).find(x => x.type === 'MaskFilter');
       o.maskCanvas = f ? f.maskCanvas : null;
     });

@@ -16,6 +16,7 @@ export { makeCTA, makeBadge, makePrice, makeBrandLockup, autoFitText, applyLegib
 export { buildLayerFromSpec, buildPromoLayout, scrimFill } from './templates.js';
 export { getCropHandle, dragCropRect, applyCrop } from './crop.js';
 export { alignDelta, snapDelta } from './layout.js';
+export { strokeInfo, canPositionStroke } from './stroke.js';
 export { EXTRA, serialize, restore, exportImage, addImageLayer, artboardForImage, loadImageEl } from './io.js';
 export { installAutosave, restoreSession, readSession, writeSession, clearSession, SESSION_KEY,
   discardToTrash, readDiscarded, clearDiscarded, restoreDiscarded, TRASH_KEY,
@@ -28,6 +29,9 @@ export { hexRgb, rgba, toHex, relLum, rgbToHsl, hslToRgb, hexToHsl, recolorPixel
 export { CvEngine, prepImageData } from './cv/client.js';
 export { cvWorkerBody, cvWorkerSource, DEFAULT_OPENCV_URL } from './cv/worker.js';
 export { installKeybindings, TOOL_KEYS } from './keybindings.js';
+export { drawPickSpinner } from './busy.js';
+export { buildContextMenu, mountContextMenu } from './contextmenu.js';
+export { drawPenOverlay, penCursor, nodesToPathD, commandsToNodes, splitSegment, toggleSmooth } from './pen.js';
 export { makeToneFilterClass, applyTone, isToneNeutral, buildCurveLut, whiteBalanceGains, TONE_DEFAULTS, HSL_BANDS, CURVE_CHANNELS, CURVE_IDENTITY,
   MAX_CURVE_POINTS, normalizeCurves, compactCurves, curveHitTest, curveInsertPoint, curveMovePoint, curveRemovePoint, curveSvgPath, lumaHistogram,
   HSL_PROPS, hslBandLabel, getHslValue, setHslValue, hslBandTrack } from './tone.js';

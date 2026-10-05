@@ -49,7 +49,7 @@
      with no scrollbar to reach it (1024x768 laptops and any half-screen window hit this).
      Rather than let it overflow, shed the optional chrome in order of how easily it is reached
      another way, so the irreplaceable controls always fit:
-       <1180px  the app subtitle and the Compare label (Compare is also in the ⌘K palette)
+       <1180px  the app subtitle and the Compare button (Compare is also in the ⌘K palette)
        <1080px  the Search button (⌘K opens it anyway) and the autosave note
        <980px   the Canvas size button (also in ⌘K), the New label, and the zoom pill's +/-/fit
                 buttons — the percentage stays, and clicking it still fits to screen, so zoom
@@ -58,7 +58,7 @@
   @media (max-width: 1180px) {
     header { gap:10px; padding:0 12px }
     header > .note { display:none }
-    #compare-btn span { display:none }
+    #compare-btn { display:none }
   }
   @media (max-width: 1080px) {
     #cmdk-open { display:none }
@@ -119,8 +119,12 @@
   .lp-menu button:hover, .lp-menu button:focus-visible { background:var(--panel-2) }
   .lp-menu button svg { color:var(--dim) }
   #layers { flex:1; min-height:90px; overflow-y:auto; padding:8px 10px; display:flex; flex-direction:column; gap:4px }
-  #tool-panel { flex:0 1 auto; max-height:48%; min-height:0; overflow-y:auto; border-top:1px solid var(--line); padding:12px 14px 14px }
+  /* active tool's options: top of the Properties tab, split from the Canvas section like it is from the layer props */
+  #tool-panel { padding-bottom:18px; margin-bottom:16px; position:relative }
+  #tool-panel::after { content:""; position:absolute; left:0; right:0; bottom:0; height:4px; border-radius:2px; background:var(--line-soft) }
   #tool-panel[hidden] { display:none }
+  /* while a tool is active the "Nothing selected" placeholder is noise — the tool's options are the content */
+  #right-panel[data-tool=true][data-empty=true] #props-empty, #right-panel[data-tool=true][data-empty=true] #props-title-row { display:none !important }
   #tool-panel #brush-section-label { display:none }   /* the dock header already names the tool */
   .dock-head { display:flex; align-items:center; gap:7px; font-size:10.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--dim) }
   .dock-head .status-pill { margin-left:auto }
@@ -268,6 +272,12 @@
   #persp-bar[hidden] { display:none }
   #persp-bar .act { width:auto; flex:0 0 auto; padding:6px 12px }
   #persp-bar .act-accent { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) }
+  /* vector edit mode bar — same chrome as the perspective bar */
+  #path-bar { position:absolute; top:14px; left:50%; transform:translateX(-50%); z-index:17; display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px 10px 8px 14px; font-size:12px; color:var(--dim); box-shadow:0 8px 24px rgba(0,0,0,.35); max-width:calc(100% - 32px) }
+  #path-bar[hidden] { display:none }
+  #path-bar .act { width:auto; flex:0 0 auto; padding:6px 12px; margin-top:0 }
+  #path-bar .act-accent { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) }
+  @media (max-width: 900px) { #path-bar .path-bar-hint { display:none } }
 
   /* ── AI insert-at-point popover: anchored at the click, dot marks the exact spot ─────────── */
   #aiinsert-dot { position:absolute; z-index:20; width:10px; height:10px; margin:-5px 0 0 -5px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); pointer-events:none }
@@ -343,6 +353,7 @@
   .act-accent { background:var(--accent); color:var(--accent-ink); border-color:var(--accent) }
   .act-accent:hover { background:var(--accent); border-color:var(--accent); filter:brightness(1.06) }
   .act-accent svg { color:var(--accent-ink) }
+  .key-hint { margin-left:6px; padding:1px 6px; border-radius:5px; font-size:10.5px; font-weight:600; background:color-mix(in srgb, var(--accent-ink) 18%, transparent); opacity:.85 }
   .ai-card { margin-top:8px; padding:14px; border-radius:16px; border:1px solid var(--line); background:var(--panel-2) }
   .ai-card-title { display:flex; align-items:center; gap:8px; font-size:13.5px; font-weight:700; color:var(--ink) }
   .ai-card-title span:first-of-type { flex:1; white-space:nowrap }
@@ -434,6 +445,10 @@
 
   /* ── form fields (Properties panel) ─────────────────────────────────────────────────────── */
   input[type=number], input[type=text], select { background:var(--bg); border:1px solid var(--line); border-radius:8px; color:var(--ink); padding:7px 9px; font-size:12px; font-family:inherit; transition:border-color .1s,box-shadow .1s }
+  /* Own chevron instead of the native arrow (which Chrome pins ~4px from the edge whatever the
+     padding): inset 12px from the right, with room reserved so long option text never runs under it.
+     Mid-grey reads on both themes. */
+  select { appearance:none; -webkit-appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b8b93' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 12px center; background-size:12px 12px; padding-right:34px; cursor:pointer }
   input[type=number]:hover, input[type=text]:hover, select:hover { border-color:var(--dim-2) }
   input[type=number]:focus, input[type=text]:focus, select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent) }
   .field-grid { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap }
@@ -473,7 +488,7 @@
   .grp:first-child { margin-top:0; padding-top:0; border-top:none }
   /* Sections that live in their own show/hide wrapper start with their heading, which the rule
      above would strip of its divider + spacing (BORDER sat jammed under the fill swatch). */
-  #props-body > div > .grp:first-child { margin-top:18px; padding-top:14px; border-top:1px solid var(--line-soft) }
+  #props-body > div > .grp:first-child, #tool-panel > div > .grp:first-child { margin-top:18px; padding-top:14px; border-top:1px solid var(--line-soft) }
   /* live value readout at the end of a property slider (filled by paintRangeFill) */
   .slider-row .val { min-width:34px; text-align:right; font-variant-numeric:tabular-nums; font-size:10.5px; color:var(--ink) }
   /* colour swatch + editable hex code, one row */
@@ -495,6 +510,23 @@
   .cv-dim:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent) }
   .cv-dim input[type=number] { all:unset; flex:1; min-width:0; text-align:center; font-family:"JetBrains Mono",ui-monospace,monospace; font-size:13px; font-weight:700; color:var(--ink); -moz-appearance:textfield }
   .cv-dim input::-webkit-inner-spin-button, .cv-dim input::-webkit-outer-spin-button { -webkit-appearance:none; margin:0 }
+  /* label left, number box right (Border width) — the label takes the swatch's 36px column so the
+     box lines up exactly under the colour field above it */
+  .field-row { display:flex; align-items:center; gap:10px; margin-top:8px; font-size:11.5px; color:var(--dim) }
+  .field-row .field-label { flex:0 0 36px; white-space:nowrap }
+  .field-row .field-box { flex:1; height:34px }
+  .field-row .field-box input[type=number] { text-align:left; font-size:12px; font-weight:400 }
+  .field-row + .grp { margin-top:14px }
+  /* fill / border eye toggle at the end of the colour row; a hidden paint dims its row */
+  .paint-eye, .field-icon-btn { all:unset; box-sizing:border-box; flex:none; width:30px; height:30px; display:flex; align-items:center; justify-content:center; border-radius:7px; color:var(--dim); cursor:pointer; transition:color .1s,background .1s }
+  .paint-eye:hover, .field-icon-btn:hover { color:var(--ink); background:var(--panel-2) }
+  .paint-eye:focus-visible, .field-icon-btn:focus-visible { box-shadow:var(--ring) }
+  .field-icon-btn[aria-expanded=true] { color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, transparent) }
+  .paint-eye[aria-disabled=true] { opacity:.35; pointer-events:none }
+  [data-paint-off=true] > :not(.paint-eye) { opacity:.45 }
+  .stroke-seg { flex:1; padding:3px }
+  .stroke-seg .act { padding:5px 4px; font-size:11.5px }
+  .field-row .stroke-gap-label { flex:0 0 auto }
   .cv-ratios { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:8px }
   .cv-ratios button { all:unset; box-sizing:border-box; text-align:center; padding:8px 0; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--dim); font-size:11.5px; font-weight:600; cursor:pointer; transition:border-color .1s,color .1s,background .1s }
   .cv-ratios button:hover { color:var(--ink); border-color:var(--dim-2) }
@@ -516,6 +548,7 @@
   /* ── Properties panel controls, matched to the design mockup: 6px corners throughout, filled
      icon buttons, a segmented Solid/Gradient switch, square colour tiles, and a Type/Status footer. */
   #layer-panel .field input, #layer-panel select { border-radius:6px; height:34px; box-sizing:border-box; padding:0 10px }
+  #layer-panel select { padding-right:34px }
   #layer-panel .icon-btn, #layer-panel .align-grid button { height:32px; border-radius:6px; background:var(--panel-2); border-color:var(--line-soft); color:var(--ink) }
   #layer-panel .icon-btn:hover, #layer-panel .align-grid button:hover { border-color:var(--dim-2); background:var(--panel-2) }
   #layer-panel .act { border-radius:6px }
@@ -571,6 +604,7 @@
   .aix-status b { font-size:13px; font-weight:700; color:var(--ink) }
   .aix-badge { padding:2px 7px; border-radius:6px; font-size:10px; font-weight:600; letter-spacing:.03em; text-transform:uppercase; color:var(--ai-green); background:color-mix(in srgb, #3ecf8e 12%, transparent); border:1px solid color-mix(in srgb, #3ecf8e 35%, transparent); white-space:nowrap }
   .aix-status .aix-link { all:unset; margin-left:auto; display:flex; align-items:center; gap:4px; font-size:12px; color:var(--dim); cursor:pointer; white-space:nowrap }
+  .aix-status .aix-link[hidden] { display:none }   /* the display:flex above would otherwise override [hidden] */
   .aix-status .aix-link:hover { color:var(--ink); background:none }
   .aix-status .aix-link svg { transform:rotate(180deg) }
   .aix-keyform { margin-top:10px; font-size:11.5px; line-height:1.55; color:var(--dim) }
@@ -664,6 +698,12 @@
   .save-note[data-warn=true] { color:#e0a02a }
   .save-note[data-warn=true]::before { background:#e0a02a }
   header .act { margin-top:0; padding:7px 13px; font-size:12.5px; white-space:nowrap; flex:none }
+  /* header controls share one tighter corner radius (was 8–9px buttons and a fully round zoom pill) */
+  header .act, header .icon-btn, header #zoom-pill { border-radius:6px }
+  header #zoom-pill button { border-radius:4px }
+  /* icon wrappers inside text buttons: flex, so the SVG centres on the label instead of sitting on
+     the text baseline (an inline <svg> rides a few px high) */
+  #newdoc-icon, #openfile-icon, #export-caret { display:flex; align-items:center }
 </style>
 </head>
 <body>
@@ -735,13 +775,12 @@
 <main>
   <nav id="tools"></nav>
 
-  <!-- LEFT: the layer list (scene state, always visible) above tool-specific hints & actions for
-       whatever's active on the rail; the right panel holds that layer's own properties. -->
+  <!-- LEFT: the layer list (scene state, always visible); the right panel holds the active tool's
+       options and the selected layer's own properties. -->
   <div id="left-panel">
     <!-- Layers / AI Vision tabs over one body, the AI card pinned at the bottom of both. The Layers
-         view is the toolbar + list, plus a contextual "tool dock" (#tool-panel) that only appears
-         when the active tool has options or a pixel selection exists — so with Select active the
-         panel is just the layer list. Mirrors @canvasmith/react's left panel. -->
+         view is the toolbar + list; the active tool's options (#tool-panel) live at the top of the
+         right Properties tab. Mirrors @canvasmith/react's left panel. -->
     <div class="lp-tabs" role="tablist">
       <button class="lp-tab" role="tab" data-tab="layers" aria-selected="true"><span class="ico" id="lp-tab-layers-ico"></span>Layers<span class="lp-count" id="lp-layer-count">0</span></button>
       <button class="lp-tab" role="tab" data-tab="ai" aria-selected="false"><span class="ico" id="lp-tab-ai-ico"></span>AI Vision</button>
@@ -760,6 +799,63 @@
         <button class="lp-tbtn" id="lp-delete" title="Delete layer"></button>
       </div>
       <div id="layers" role="list"></div>
+    </div>
+    <div class="lp-view" id="lp-ai-view" hidden>
+      <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Detected subjects</div>
+      <div class="note" id="detect-empty" style="margin-top:0">Run <b>Auto-Detect Subjects</b> below to find the objects in the scene — click one to select it.</div>
+      <div id="detect-results"></div>
+      <div class="grp">Engine</div>
+      <div class="lp-engine-row"><span>Selection &amp; cutout</span><span class="tag mono">Local CV</span></div>
+      <div class="lp-engine-row"><span>Generative AI</span><span class="tag mono" id="ai-engine-gen">No key</span></div>
+      <div class="note">Remove BG runs locally unless an AI key is set in the AI tab — either way it writes a layer mask you can refine with the brush.</div>
+    </div>
+    <div class="lp-ai-card">
+      <div class="lp-ai-head"><span id="ai-vision-icon" style="display:flex;color:var(--accent)"></span>AI Vision Engine v3.4<span class="lp-ai-status" id="ai-status">Local</span></div>
+      <button class="ai-detect-btn" id="sel-detect"></button>
+      <div class="lp-ai-row">
+        <button class="act" id="ai-removebg" title="Cut the subject out of the selected image (as a layer mask)"></button>
+        <button class="act" id="ai-autoshadow" title="Toggle a soft drop shadow on the selected layer"></button>
+      </div>
+      <div class="note" id="ai-card-msg" style="margin-top:6px" hidden></div>
+    </div>
+    <div id="left-scroll-cue"></div>
+  </div>
+
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <button id="extend-banner" hidden></button>
+    <div id="persp-bar" role="toolbar" aria-label="Perspective correction" hidden>
+      <span id="persp-bar-ico" style="display:flex"></span><span style="white-space:nowrap">Drag the corners onto edges that should be square</span>
+      <button class="act act-accent" id="persp-apply">Apply</button><button class="act" id="persp-reset">Reset</button><button class="act" id="persp-cancel">Cancel</button>
+    </div>
+    <div id="path-bar" role="toolbar" aria-label="Edit path" hidden>
+      <span id="path-bar-ico" style="display:flex"></span><span class="path-bar-hint" style="white-space:nowrap">Drag points &amp; handles · double-click to add / convert · ⌘-drag bends</span>
+      <button class="act" id="path-smooth" title="Make the selected points smooth">Smooth</button><button class="act" id="path-corner" title="Make the selected points sharp corners">Corner</button><button class="act" id="path-del" title="Delete the selected points (⌫)">Delete point</button><button class="act act-accent" id="path-done" title="Leave edit mode (Enter)">Done</button>
+    </div>
+    <span id="aiinsert-dot" hidden></span>
+    <div id="aiinsert-popover" hidden>
+      <div class="aiinsert-title"><span id="aiinsert-title-text"></span><button class="aiinsert-close" id="aiinsert-close" title="Close" aria-label="Close"></button></div>
+      <div class="note" id="aiinsert-note" style="display:none"></div>
+      <input type="text" id="aiinsert-prompt" placeholder="Describe what to draw here…">
+      <button class="act act-accent" id="aiinsert-run"></button>
+    </div>
+    <svg id="review-hover-preview" hidden width="1" height="1"><polygon fill="rgba(212,255,69,.28)" stroke="#d4ff45" stroke-width="2"></polygon></svg>
+  </div>
+  <button class="collapse-btn" id="collapse-left" title="Hide side panel"></button>
+  <button class="collapse-btn" id="collapse-right" title="Hide Properties panel"></button>
+
+  <!-- RIGHT: Properties / Design / Stickers / AI — tabbed, matching the reference editor's
+       right-hand panel (ditto's own rail keeps Tool/Layers on the left and everything else here). -->
+  <div id="right-panel">
+    <div class="tabs" id="right-tabs">
+      <button data-tab="layer" data-on="true"></button>
+      <button data-tab="design"></button>
+      <button data-tab="stickers"></button>
+      <button data-tab="ai"></button>
+    </div>
+    <div id="layer-panel">
+    <!-- Options for the active rail tool (Spot heal sizes, gradient stops, selection ops…). Lives
+         at the top of the Properties tab and only shows when there is something in it — see refreshDock(). -->
       <div id="tool-panel" hidden>
         <div id="maskedit-banner" style="display:none;background:var(--accent);color:var(--accent-ink);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12px;font-weight:600">
           Editing layer mask — paint white to reveal, black to hide.
@@ -776,7 +872,7 @@
         <div class="slider-row" id="brush-soft-row" style="margin-top:6px">Soft <input type="range" id="brush-soft" min="0" max="100" value="30"><span class="tag mono" id="brush-soft-val"></span></div>
         <div class="slider-row" id="brush-opacity-row" style="margin-top:6px">Opacity <input type="range" id="brush-opacity" min="5" max="100" value="100"><span class="tag mono" id="brush-opacity-val"></span></div>
         <div id="brush-color-row" style="display:flex;align-items:center;gap:8px;margin-top:10px">
-          <input type="color" id="brush-color" value="#4f8ff0" title="colour">
+          <input type="color" id="brush-color" value="#000000" title="colour">
           <div id="brush-swatches" style="display:flex;gap:6px;flex:1"></div>
         </div>
       </div>
@@ -835,57 +931,6 @@
       <div class="note" id="sel-msg"></div>
         </div>
       </div>
-    </div>
-    <div class="lp-view" id="lp-ai-view" hidden>
-      <div class="grp" style="margin-top:0;padding-top:0;border-top:none">Detected subjects</div>
-      <div class="note" id="detect-empty" style="margin-top:0">Run <b>Auto-Detect Subjects</b> below to find the objects in the scene — click one to select it.</div>
-      <div id="detect-results"></div>
-      <div class="grp">Engine</div>
-      <div class="lp-engine-row"><span>Selection &amp; cutout</span><span class="tag mono">Local CV</span></div>
-      <div class="lp-engine-row"><span>Generative AI</span><span class="tag mono" id="ai-engine-gen">No key</span></div>
-      <div class="note">Remove BG runs locally unless an AI key is set in the AI tab — either way it writes a layer mask you can refine with the brush.</div>
-    </div>
-    <div class="lp-ai-card">
-      <div class="lp-ai-head"><span id="ai-vision-icon" style="display:flex;color:var(--accent)"></span>AI Vision Engine v3.4<span class="lp-ai-status" id="ai-status">Local</span></div>
-      <button class="ai-detect-btn" id="sel-detect"></button>
-      <div class="lp-ai-row">
-        <button class="act" id="ai-removebg" title="Cut the subject out of the selected image (as a layer mask)"></button>
-        <button class="act" id="ai-autoshadow" title="Toggle a soft drop shadow on the selected layer"></button>
-      </div>
-      <div class="note" id="ai-card-msg" style="margin-top:6px" hidden></div>
-    </div>
-    <div id="left-scroll-cue"></div>
-  </div>
-
-  <div id="stage">
-    <canvas id="cv"></canvas>
-    <button id="extend-banner" hidden></button>
-    <div id="persp-bar" role="toolbar" aria-label="Perspective correction" hidden>
-      <span id="persp-bar-ico" style="display:flex"></span><span style="white-space:nowrap">Drag the corners onto edges that should be square</span>
-      <button class="act act-accent" id="persp-apply">Apply</button><button class="act" id="persp-reset">Reset</button><button class="act" id="persp-cancel">Cancel</button>
-    </div>
-    <span id="aiinsert-dot" hidden></span>
-    <div id="aiinsert-popover" hidden>
-      <div class="aiinsert-title"><span id="aiinsert-title-text"></span><button class="aiinsert-close" id="aiinsert-close" title="Close" aria-label="Close"></button></div>
-      <div class="note" id="aiinsert-note" style="display:none"></div>
-      <input type="text" id="aiinsert-prompt" placeholder="Describe what to draw here…">
-      <button class="act act-accent" id="aiinsert-run"></button>
-    </div>
-    <svg id="review-hover-preview" hidden width="1" height="1"><polygon fill="rgba(212,255,69,.28)" stroke="#d4ff45" stroke-width="2"></polygon></svg>
-  </div>
-  <button class="collapse-btn" id="collapse-left" title="Hide side panel"></button>
-  <button class="collapse-btn" id="collapse-right" title="Hide Properties panel"></button>
-
-  <!-- RIGHT: Properties / Design / Stickers / AI — tabbed, matching the reference editor's
-       right-hand panel (ditto's own rail keeps Tool/Layers on the left and everything else here). -->
-  <div id="right-panel">
-    <div class="tabs" id="right-tabs">
-      <button data-tab="layer" data-on="true"></button>
-      <button data-tab="design"></button>
-      <button data-tab="stickers"></button>
-      <button data-tab="ai"></button>
-    </div>
-    <div id="layer-panel">
     <div id="canvas-section">
       <div class="grp" style="margin-top:0;padding-top:0;border-top:none"><span>Canvas dimensions</span><span class="aside" id="cv-ratio-label"></span></div>
       <div class="cv-dims">
@@ -902,7 +947,7 @@
         </div>
       </div>
     </div>
-    <div style="display:flex;align-items:center;gap:8px;margin-top:0;margin-bottom:10px">
+    <div id="props-title-row" style="display:flex;align-items:center;gap:8px;margin-top:0;margin-bottom:10px">
       <strong id="props-title" style="font-size:13px">Properties</strong>
     </div>
 
@@ -996,11 +1041,13 @@
       <div id="fill-solid" class="swatch-row">
         <input type="color" id="xf-fill" value="#4f8ff0" title="Fill colour" style="flex-shrink:0">
         <div class="cv-fill"><input class="hex" id="xf-fill-hex" aria-label="Fill colour hex" spellcheck="false" maxlength="7"><span class="pct"><input type="number" id="xf-fill-alpha" min="0" max="100" aria-label="Fill opacity">%</span></div>
+        <button type="button" class="paint-eye" data-paint="fill"></button>
       </div>
       <div id="fill-gradient" style="display:none">
         <div style="display:flex;gap:6px">
           <button class="act" id="fg-type-linear" style="flex:1">Linear</button>
           <button class="act" id="fg-type-radial" style="flex:1">Radial</button>
+          <button type="button" class="paint-eye" data-paint="fill"></button>
         </div>
         <div class="slider-row" id="fg-angle-row" style="margin-top:8px">Angle <input type="range" id="fg-angle" min="0" max="360" value="0"></div>
         <div id="fg-stops" style="display:flex;flex-direction:column;gap:6px;margin-top:8px"></div>
@@ -1013,8 +1060,22 @@
       <div id="border-color-row" class="swatch-row" style="margin-bottom:8px">
         <input type="color" id="xf-stroke" value="#000000" title="Border colour" style="flex-shrink:0">
         <div class="cv-fill"><input class="hex" id="xf-stroke-hex" aria-label="Border colour hex" spellcheck="false" maxlength="7"><span class="pct"><input type="number" id="xf-stroke-alpha" min="0" max="100" aria-label="Border opacity">%</span></div>
+        <button type="button" class="paint-eye" data-paint="stroke"></button>
       </div>
-      <div class="slider-row">Width <input type="range" id="xf-strokewidth" min="0" max="40" value="0" data-unit="px"><span class="val"></span></div>
+      <div class="field-row"><span class="field-label">Width</span><label class="cv-dim field-box"><input type="number" id="xf-strokewidth" min="0" max="200" step="1" value="0" aria-label="Border width"><span>px</span></label>
+        <button type="button" class="field-icon-btn" id="xf-stroke-adv-btn" title="Border settings" aria-label="Border settings" aria-expanded="false" aria-controls="xf-stroke-adv"></button></div>
+      <!-- Style / dash / position / caps / join (stroke.js), behind the settings button. Everything
+           past Style only shows once the border has a width; Style itself gives a borderless shape 2px. -->
+      <div id="xf-stroke-adv" hidden>
+      <div class="field-row"><span class="field-label">Style</span><div class="seg stroke-seg" id="xf-stroke-style" role="group" aria-label="Border style"></div></div>
+      <div class="field-row" id="xf-dash-row">
+        <span class="field-label" id="xf-dash-label">Dash</span><label class="cv-dim field-box" id="xf-dash-box"><input type="number" id="xf-dash" min="0" max="400" step="1" aria-label="Dash length"><span>px</span></label>
+        <span class="field-label stroke-gap-label">Gap</span><label class="cv-dim field-box"><input type="number" id="xf-gap" min="0" max="400" step="1" aria-label="Gap length"><span>px</span></label>
+      </div>
+      <div class="field-row" id="xf-stroke-pos-row"><span class="field-label">Align</span><div class="seg stroke-seg" id="xf-stroke-pos" role="group" aria-label="Border position"></div></div>
+      <div class="field-row" id="xf-stroke-cap-row"><span class="field-label">Caps</span><div class="seg stroke-seg" id="xf-stroke-cap" role="group" aria-label="Border caps"></div></div>
+      <div class="field-row" id="xf-stroke-join-row"><span class="field-label">Join</span><div class="seg stroke-seg" id="xf-stroke-join" role="group" aria-label="Border corners"></div></div>
+      </div>
     </div>
 
     <div id="radius-section" style="display:none">
@@ -1210,7 +1271,7 @@ import { Editor, layerTypeLabel, REGION_FILL_ALPHA, outlineRegion, rgba, splitGr
   snapToEdge, selectionBounds, uid, PAINT_TOOLS, SHAPE_TOOLS, SEL_TOOLS, installAutosave, restoreSession,
   discardToTrash, restoreDiscarded, exportProject, loadProject, FX_DEFAULTS, ADJUST_CONTROLS, formatAdjustValue, GEOMETRY_DEFAULTS, GEOMETRY_CONTROLS, formatGeometryValue,
   HSL_BANDS, HSL_PROPS, hslBandLabel, getHslValue, setHslValue, hslBandTrack,
-  CURVE_CHANNELS, normalizeCurves, compactCurves, curveHitTest, curveInsertPoint, curveMovePoint, curveRemovePoint, curveSvgPath }
+  CURVE_CHANNELS, normalizeCurves, compactCurves, curveHitTest, curveInsertPoint, curveMovePoint, curveRemovePoint, curveSvgPath, drawPenOverlay, drawPickSpinner, mountContextMenu, strokeInfo }
   from '../../packages/core/src/index.js';
 
 /* The fabric <canvas> element is sized to fill the STAGE (like the reference editor's fitView),
@@ -1234,6 +1295,7 @@ document.head.appendChild(fontLink);
    across both editors — only the a few canvasmith-only affordances (expand/contract/similar/
    svg/tool-tab/layers-tab) have no reference counterpart and keep their own glyphs. ───────── */
 const ICON_PATHS = {
+  strokeSettings: 'M6 3v6M6 13v8M4 9h4v4H4zM12 3v11M12 18v3M10 14h4v4h-4zM18 3v3M18 10v11M16 6h4v4h-4z',   // vertical sliders — Border's advanced-settings toggle
   select: 'M5 3l15 9-7 1.5L9.5 20z',                                          // cursor
   hand: 'M8 12V6.5a1.5 1.5 0 0 1 3 0V11M11 11V5.5a1.5 1.5 0 0 1 3 0V11M14 11.5V7a1.5 1.5 0 0 1 3 0v7a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-3l-2-3.5a1.5 1.5 0 0 1 2.5-1.6L8 14',
   crop: 'M6 2v16h16M2 6h16v16',
@@ -1487,19 +1549,11 @@ const drawOverlays = () => {
   }
   if (gradAxis) drawGradientAxis(ctx, gradAxis, v[0]);
   if (brushCursor) drawBrushCursor(ctx, brushCursor, v[0]);
-  if (penBuild && penBuild.pts.length) {
-    // Pen tool in-progress path: solid polyline through placed points + a hollow dot on each
-    // vertex, filled dot on the first (the "click here to close" target).
-    ctx.strokeStyle = '#4f8ff0'; ctx.lineWidth = 1.4 / v[0]; ctx.setLineDash([]);
-    ctx.beginPath();
-    penBuild.pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
-    ctx.stroke();
-    const r = 3.5 / v[0];
-    penBuild.pts.forEach((p, i) => {
-      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 7);
-      if (i === 0) { ctx.fillStyle = '#4f8ff0'; ctx.fill(); } else { ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.strokeStyle = '#4f8ff0'; ctx.lineWidth = 1.2 / v[0]; ctx.stroke(); }
-    });
-  }
+  // Pen path being drawn / vector edit mode: path, rubber band, anchors and handles (core's
+  // drawPenOverlay, shared with the React shell so both draw it identically).
+  if (penBuild) drawPenOverlay(ctx, penBuild, v[0], { accent: '#4f8ff0' });
+  // magic wand / object select still computing: spinning ring at the pointer (core's drawPickSpinner)
+  if (pickBusy) drawPickSpinner(ctx, pickBusy, v[0], { accent: '#4f8ff0' });
   ctx.restore();
 };
 /* Brush-footprint ring at the pointer (the OS cursor is hidden for paint tools — see Editor's
@@ -1605,14 +1659,34 @@ let brushCursor = null;
 let hoverPreview = null;
 let dragGuides = null;
 let penBuild = null;
+let pickBusy = null;
+ed.on('pickbusy', b => { pickBusy = b; });   // the editor re-renders every frame while busy
 ed.on('guides', g => { dragGuides = g; ed.fc.requestRenderAll(); });
-ed.fc.on('after:render', drawOverlays);
+// Only for real on-screen redraws. Fabric also fires after:render for OFFSCREEN renders (each
+// magic wand / object select pick captures the scene with the zoom reset to 100%, and so do
+// exports and the Compare snapshot) — drawing the overlays then used the temporary 100% transform,
+// flashing the selection and hover outlines oversized and shifted off the artboard.
+ed.fc.on('after:render', (opt) => { if (opt && opt.ctx && opt.ctx !== ed.fc.getContext()) return; drawOverlays(); });
 ed.on('selection', () => { ed.fc.requestRenderAll(); startAntsLoopIfNeeded(); });
 ed.on('crop', () => ed.fc.requestRenderAll());
 ed.on('hover', h => { hoverPreview = h; ed.fc.requestRenderAll(); });
 ed.on('pen', build => { penBuild = build; ed.fc.requestRenderAll(); });
+ed.on('pathedit', p => { document.getElementById('path-bar').hidden = !p; });
 ed.on('brushcursor', c => { brushCursor = c; ed.fc.requestRenderAll(); });
 ed.on('gradientaxis', g => { gradAxis = g; ed.fc.requestRenderAll(); });
+// Gradient stop swatch clicked on the canvas: open the native colour picker right at the swatch
+// (a hidden <input type=color> parked there) and recolour that stop live as the user picks.
+const gradPick = document.createElement('input');
+gradPick.type = 'color'; gradPick.tabIndex = -1; gradPick.setAttribute('aria-label', 'Gradient stop colour');
+gradPick.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;border:0;padding:0;margin:0';
+document.body.appendChild(gradPick);
+let gradPickIdx = -1;
+gradPick.addEventListener('input', () => { if (gradPickIdx >= 0) ed.setGradientStopColor(gradPickIdx, gradPick.value); });
+ed.on('gradientstoppick', p => {
+  gradPickIdx = p.index; gradPick.value = p.color;
+  gradPick.style.left = p.clientX + 'px'; gradPick.style.top = (p.clientY + 12) + 'px';
+  try { gradPick.showPicker(); } catch (_) { gradPick.click(); }
+});
 
 /* ── marching ants: the selection outline's dashes visibly crawl, matching the reference editor's
    animated marquee — only ticks while a selection actually exists (requestRenderAll is cheap but
@@ -1633,7 +1707,9 @@ function startAntsLoopIfNeeded() {
 /* Shared shortcut set — undo/redo, copy/paste, delete-active-layer, poly-lasso Enter/Escape,
    single-letter tool switch, arrow-key nudge. Lives in core (keybindings.js) so the demo and the
    React shell can't drift the way the Properties panel once did. */
-installKeybindings(ed);
+installKeybindings(ed, document, { toolGroups: () => TOOLGROUPS.map(g => g.map(t => t.id)) });   // lazy: TOOLGROUPS is defined further down
+// Right-click menu (core builds the items, mountContextMenu draws them — shared with the React shell)
+mountContextMenu(ed, { vars: { panel: 'var(--panel-2)', line: 'var(--line)', ink: 'var(--ink)', dim: 'var(--dim-2)', hover: 'var(--accent)', hoverInk: 'var(--accent-ink)', danger: 'var(--danger)' } });
 
 /* ── toolbar: a collapsed icon rail, one button per group, matching the reference editor's own
    rail (56px wide, 40x36 buttons, a corner caret + flyout for groups with 2+ tools) ──────────── */
@@ -1653,7 +1729,7 @@ const TOOL_LABELS = {
 };
 const TOOL_HINTS = {
   select: 'Click any layer directly on the artboard or drag a bounding marquee to transform.',
-  crop: 'Drag the handles, then Apply crop in the top bar.',
+  crop: 'Drag the handles, then press Enter or Apply crop. Esc cancels.',
   'lasso-poly': 'Click to place points; click near the start (or press Enter) to close, Escape to cancel.',
   'lasso-mag': 'Click to place points that snap to nearby edges; Enter closes, Escape cancels.',
   wand: 'Click a colour region to select it. Shift-click adds, Alt-click subtracts.',
@@ -1661,7 +1737,9 @@ const TOOL_HINTS = {
   hoverselect: 'Hover to preview what a click would select, then click to commit it.',
   'objectselect-bbox': 'Click selects the active layer’s own bounding box; with nothing active, selects a center region.',
   magicwand: 'Click an object to grab it (OpenCV-assisted). Shift-click adds, Alt-click subtracts, re-click cycles overlapping objects.',
-  pen: 'Click to place points; click near the start (or press Enter) to close into a filled shape, Escape to cancel.',
+  gradient: 'Drag across a selected shape to fill it — the handles stay so you can re-aim it: drag an end or slide the line, click a colour square to change that colour (drag a middle one to move it); click outside the shape when done. With nothing selected, drag to paint a gradient.',
+  bucket: 'Click an area to fill it with the colour (similar neighbouring colours are filled too). With a selection, fills the selection.',
+  pen: 'Click for a corner, click-drag for a curve (⌥ breaks the handles, ⇧ snaps to 45°, Space moves the point). Click the first point to close into a filled shape; Enter/Esc keeps an open stroke. ⌫ removes the last point. With a path selected: click its outline to add a point, a point to delete it, an open end to continue.',
   aiinsert: 'AI insert · click a spot to draw there — or make a selection first and click inside it: the AI fills exactly that shape',
   clone: 'Alt-click (⌥) or Shift-click (⇧) to set the source point, then paint elsewhere to stamp those pixels. Click again with either to re-source.',
   heal: 'Alt-click (⌥) or Shift-click (⇧) to set the source point, then paint over the blemish — the patch is blended into its surroundings.',
@@ -1688,32 +1766,8 @@ const TOOLGROUPS = [
 // the SAME shortcut the keydown handler actually honors — one source of truth, no drift.
 const TOOL_SHORTCUT = {};
 Object.entries(TOOL_KEYS).forEach(([key, id]) => { TOOL_SHORTCUT[id] = key.toUpperCase(); });
-/* Photoshop-style tool-cycling: pressing a group's letter again (while already on a tool in that
-   group) advances to the NEXT sibling instead of doing nothing — the only way multi-tool groups
-   like marquee/marquee-ellipse/lasso/lasso-poly/lasso-mag (all sharing 'M'/'L'/'W' via TOOL_KEYS'
-   primary entry) become keyboard-reachable at all beyond their first member. installKeybindings()
-   in core only knows the flat letter->primary-tool map (TOOL_KEYS), not sibling grouping — that
-   grouping is UI-owned data (TOOLGROUPS, just above), so cycling lives here rather than in core.
-   Registered on the CAPTURE phase so it runs before installKeybindings' own (bubble-phase, added
-   earlier) listener — otherwise that handler would already have reset ed.tool to the group's
-   primary tool by the time this ran, making the "which sibling comes next" lookup always see index
-   0 and cycling would never advance past the second tool. stopImmediatePropagation() on a
-   successful cycle stops that later handler from then re-jumping back to primary. */
-document.addEventListener('keydown', e => {
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
-  const tag = document.activeElement && document.activeElement.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  if (ed.fc.getActiveObject()?.isEditing) return;
-  const key = e.key.toLowerCase();
-  const primary = TOOL_KEYS[key]; if (!primary) return;
-  const group = TOOLGROUPS.find(g => g.some(t => t.id === primary));
-  if (!group || group.length < 2) return;
-  const idx = group.findIndex(t => t.id === ed.tool);
-  if (idx < 0) return;   // current tool isn't in this group — let installKeybindings's plain jump-to-primary handle it
-  e.preventDefault();
-  e.stopImmediatePropagation();
-  ed.setTool(group[(idx + 1) % group.length].id);
-}, true);
+// Pressing a group's letter again cycles to the next sibling tool — handled in core's
+// installKeybindings (see the toolGroups option where it's installed), shared with the React shell.
 const nav = document.getElementById('tools');
 let flyoutGroup = -1;
 function renderRail() {
@@ -1792,10 +1846,16 @@ function penBtns(on) {
   const wrap = document.createElement('div');
   wrap.id = 'pen-actions';
   wrap.style.cssText = 'display:flex;gap:6px;margin-bottom:8px';
-  wrap.innerHTML = `<button class="act" style="flex:1" id="pen-finish">✓ Finish path</button><button class="act" style="flex:1" id="pen-cancel">Cancel</button>`;
+  wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px';
+  const sw = ed.toolOpts.penStrokeWidth != null ? ed.toolOpts.penStrokeWidth : 3;
+  wrap.innerHTML = `<button class="act" style="flex:1" id="pen-finish">✓ Finish path</button><button class="act" style="flex:1" id="pen-cancel">Cancel</button>`
+    + `<div class="slider-row" style="flex-basis:100%;margin-top:4px" title="Stroke width for open paths">Stroke <input type="range" id="pen-stroke" min="1" max="40" value="${sw}"><span class="tag mono" id="pen-stroke-val">${sw}</span></div>`;
   document.getElementById('tool-panel').prepend(wrap);
   wrap.querySelector('#pen-finish').onclick = () => ed.finishPen();
   wrap.querySelector('#pen-cancel').onclick = () => ed.cancelPen();
+  const stroke = wrap.querySelector('#pen-stroke');
+  paintRangeFill(stroke);
+  stroke.oninput = () => { ed.setToolOptions({ penStrokeWidth: +stroke.value }); wrap.querySelector('#pen-stroke-val').textContent = stroke.value; paintRangeFill(stroke); };
 }
 /* Clone/heal's hint is stateful: "pick a source" until one is set, then "now paint" — the single
    biggest thing missing when the tool was just a bare crosshair. */
@@ -1877,7 +1937,11 @@ ed.fc.on('mouse:down', () => {
   objselectBusy = true; refreshObjselectStatus();
   setTimeout(() => { if (objselectBusy) { objselectBusy = false; refreshObjselectStatus(); } }, 4000);   // safety timeout, not a real cap on cv latency
 });
-ed.on('error', () => { objselectBusy = false; refreshObjselectStatus(); });
+ed.on('error', (ev) => {
+  objselectBusy = false; refreshObjselectStatus();
+  // Right-click menu actions have no panel of their own to report into.
+  if (ev && ev.source === 'menu') toast(ev.message || SEL_REASON_MSG[ev.reason] || 'That didn’t work.');
+});
 refreshObjselectStatus();
 
 /* ── gradient tool options: type (linear/radial) + a stop list (add/remove/recolor/reposition) ──
@@ -1955,7 +2019,8 @@ function cropBtn(on) {
     syncRatioChips();
     document.getElementById('tool-panel').prepend(ratios);
     const b = document.createElement('button');
-    b.id = 'applycrop'; b.className = 'act'; b.style.marginBottom = '8px'; b.innerHTML = '✓ Apply crop';
+    b.id = 'applycrop'; b.className = 'act act-accent'; b.title = 'Apply crop (Enter)'; b.style.cssText = 'margin-bottom:8px;width:100%;justify-content:center';
+    b.innerHTML = '✓ Apply crop <span class="key-hint">↵ Enter</span>';
     b.onclick = () => ed.applyCrop();
     document.getElementById('tool-panel').prepend(b);
   } else {
@@ -1970,7 +2035,7 @@ const brushSection = document.getElementById('brush-section');
 const brushSizeRow = document.getElementById('brush-size-row'), brushSoftRow = document.getElementById('brush-soft-row'), brushOpacityRow = document.getElementById('brush-opacity-row');
 const brushSize = document.getElementById('brush-size'), brushSoft = document.getElementById('brush-soft'), brushOpacity = document.getElementById('brush-opacity'), brushColor = document.getElementById('brush-color');
 const brushSizeVal = document.getElementById('brush-size-val'), brushSoftVal = document.getElementById('brush-soft-val'), brushOpacityVal = document.getElementById('brush-opacity-val');
-const COLOR_TOOLS = [...PAINT_TOOLS, 'bucket', ...SHAPE_TOOLS, 'type'];
+const COLOR_TOOLS = [...PAINT_TOOLS, 'bucket', ...SHAPE_TOOLS, 'type', 'pen'];
 brushSize.oninput = () => { ed.setToolOptions({ size: +brushSize.value }); brushSizeVal.textContent = brushSize.value; };
 // "Soft" is the inverse of the engine's hardness (0 hardness = fully soft edge) — same knob, UI convention flipped to read as "how soft is this brush" instead of "how hard".
 brushSoft.oninput = () => { ed.setToolOptions({ hardness: 1 - (+brushSoft.value / 100) }); brushSoftVal.textContent = brushSoft.value + '%'; };
@@ -2010,6 +2075,7 @@ ed._emit('tooloptions', ed.toolOpts);   // initial paint of the brush section's 
 undo.innerHTML = iconSVG('undo'); redo.innerHTML = iconSVG('redo');
 undo.onclick = () => ed.undo(); redo.onclick = () => ed.redo();
 ed.on('history', h => { undo.disabled = h.past < 2; redo.disabled = !h.future; });
+{ const h = ed.history.depth(); undo.disabled = h.past < 2; redo.disabled = !h.future; }   // initial state (no history event fires until the first edit)
 document.getElementById('cmdk-open').innerHTML = iconSVG('search', 13) + '<span style="color:var(--dim);font-size:11.5px">Search</span><span class="tag mono" style="font-size:9.5px">⌘K</span>';
 document.getElementById('cmdk-open').onclick = () => cmdkOpen();
 
@@ -2018,7 +2084,7 @@ document.getElementById('cmdk-open').onclick = () => cmdkOpen();
    at any point — canvasmith has no fixed "original ad template" the way the reference does, so
    "first meaningful state" is the closest general equivalent. ─────────────────────────────── */
 const compareBtn = document.getElementById('compare-btn');
-compareBtn.innerHTML = iconSVG('search', 13) + '<span>Compare</span>';
+compareBtn.innerHTML = '<span>Compare</span>';
 let _compareSnapshot = null;
 ed.on('change', () => { if (!_compareSnapshot) { _compareSnapshot = ed.exportPNG(); compareBtn.disabled = false; } });
 const compareBackdrop = document.getElementById('compare-backdrop');
@@ -2566,6 +2632,11 @@ perspEnter.onclick = () => ed.enterPerspectiveEdit();
 document.getElementById('geom-reset').innerHTML = iconSVG('reset', 13);
 document.getElementById('geom-reset').onclick = () => { ed.setImageGeometry({ ...GEOMETRY_DEFAULTS }); syncGeomPanel(GEOMETRY_DEFAULTS); };
 document.getElementById('persp-bar-ico').innerHTML = iconSVG('perspective', 14);
+document.getElementById('path-bar-ico').innerHTML = iconSVG('pen', 14);
+document.getElementById('path-smooth').onclick = () => ed.setPathNodeType('smooth');
+document.getElementById('path-corner').onclick = () => ed.setPathNodeType('corner');
+document.getElementById('path-del').onclick = () => ed.deleteSelectedPathNodes();
+document.getElementById('path-done').onclick = () => ed.exitPathEdit();
 document.getElementById('persp-apply').onclick = () => ed.applyPerspectiveEdit();
 document.getElementById('persp-reset').onclick = () => ed.resetPerspectiveCorners();
 document.getElementById('persp-cancel').onclick = () => ed.cancelPerspectiveEdit();
@@ -2721,7 +2792,8 @@ curvesBox.addEventListener('dblclick', (e) => {
 
 blendSel.onchange = () => { const a = ed.layers().find(l => l.active); if (a) ed.setLayer(a.id, { blend: blendSel.value }); };
 const layerOpacity = document.getElementById('layer-opacity');
-layerOpacity.oninput = () => { const a = ed.layers().find(l => l.active); if (a) ed.setLayer(a.id, { opacity: +layerOpacity.value }); };
+// live: a slider drag is one undo step, not one per input event
+layerOpacity.oninput = () => { const a = ed.layers().find(l => l.active); if (a) ed.setLayer(a.id, { opacity: +layerOpacity.value }, { live: true }); };
 
 /* ── typography ───────────────────────────────────────────────────────────────────────────── */
 /* Custom font picker — a popover list where every row renders in ITS OWN font (name + a live "Ag"
@@ -2817,19 +2889,106 @@ bindHexField(xfFillHex, xfFill, applyFillColor);
 /* ── Border (stroke) + corner radius ──────────────────────────────────────────────────────── */
 const xfStrokeWidth = document.getElementById('xf-strokewidth'), xfStroke = document.getElementById('xf-stroke');
 const xfStrokeHex = document.getElementById('xf-stroke-hex');
-xfStrokeWidth.oninput = () => { ed.setStroke({ width: +xfStrokeWidth.value }); paintRangeFill(xfStrokeWidth); };
+// Typed value commits on Enter/blur (↑/↓ step it live); out-of-range or junk input snaps back.
+const commitStrokeWidth = () => {
+  const n = Math.round(+xfStrokeWidth.value);
+  if (!Number.isFinite(n) || xfStrokeWidth.value === '') { refreshPropsPanel(); return; }
+  xfStrokeWidth.value = Math.max(0, Math.min(200, n));
+  ed.setStroke({ width: +xfStrokeWidth.value });
+};
+xfStrokeWidth.onchange = commitStrokeWidth;
+xfStrokeWidth.onkeydown = (e) => { if (e.key === 'Enter') xfStrokeWidth.blur(); };
 // The border colour is always offered; picking one on a borderless shape also gives it a visible
 // 2px border, so the choice isn't silently a no-op.
 const applyStrokeColor = (v) => {
   const patch = { color: withAlpha(v, strokeAlpha) };
-  if (!(+xfStrokeWidth.value > 0)) { patch.width = 2; xfStrokeWidth.value = 2; paintRangeFill(xfStrokeWidth); }
+  if (!(+xfStrokeWidth.value > 0)) { patch.width = 2; xfStrokeWidth.value = 2; }
   ed.setStroke(patch);
 };
 xfStroke.oninput = () => { applyStrokeColor(xfStroke.value); xfStrokeHex.value = xfStroke.value.toUpperCase(); };
 bindHexField(xfStrokeHex, xfStroke, applyStrokeColor);
 bindAlphaField(xfStrokeAlpha, a => { strokeAlpha = a; applyStrokeColor(xfStroke.value); });
+/* Border style / dash / position / caps / join — segmented controls built once; refreshBorderStyle()
+   (called from refreshPropsPanel) re-reads the object via strokeInfo(). */
+const STROKE_STYLES = [['solid', 'Solid'], ['dashed', 'Dashed'], ['dotted', 'Dotted']];
+const STROKE_POSITIONS = [['inside', 'Inside'], ['center', 'Center'], ['outside', 'Outside']];
+const STROKE_CAPS = [['butt', 'None'], ['round', 'Round'], ['square', 'Square']];
+const STROKE_JOINS = [['miter', 'Miter'], ['round', 'Round'], ['bevel', 'Bevel']];
+const buildStrokeSeg = (id, opts, key) => {
+  const el = document.getElementById(id);
+  for (const [v, label] of opts) {
+    const b = document.createElement('button');
+    b.className = 'act'; b.type = 'button'; b.dataset.v = v; b.textContent = label; b.setAttribute('aria-pressed', 'false');
+    // a borderless shape gets a visible 2px border with the style, like picking a colour does
+    b.onclick = () => ed.setStroke(+xfStrokeWidth.value > 0 ? { [key]: v } : { [key]: v, width: 2 });
+    el.appendChild(b);
+  }
+  return el;
+};
+const strokeSegs = {
+  style: buildStrokeSeg('xf-stroke-style', STROKE_STYLES, 'style'),
+  position: buildStrokeSeg('xf-stroke-pos', STROKE_POSITIONS, 'position'),
+  cap: buildStrokeSeg('xf-stroke-cap', STROKE_CAPS, 'cap'),
+  join: buildStrokeSeg('xf-stroke-join', STROKE_JOINS, 'join'),
+};
+// The settings button beside Width opens/closes the rows above; stays as left across selections.
+const strokeAdvBtn = document.getElementById('xf-stroke-adv-btn'), strokeAdv = document.getElementById('xf-stroke-adv');
+strokeAdvBtn.innerHTML = iconSVG('strokeSettings', 16);
+strokeAdvBtn.onclick = () => {
+  const open = strokeAdv.hidden;
+  strokeAdv.hidden = !open; strokeAdvBtn.setAttribute('aria-expanded', String(open));
+};
+const xfDash = document.getElementById('xf-dash'), xfGap = document.getElementById('xf-gap');
+const bindStrokeNum = (el, key) => {
+  el.onchange = () => {
+    const n = +el.value;
+    if (el.value === '' || !Number.isFinite(n)) { refreshPropsPanel(); return; }
+    el.value = Math.max(0, Math.min(400, Math.round(n)));
+    ed.setStroke({ [key]: +el.value });
+  };
+  el.onkeydown = (e) => { if (e.key === 'Enter') el.blur(); };
+};
+bindStrokeNum(xfDash, 'dash'); bindStrokeNum(xfGap, 'gap');
+function refreshBorderStyle(target) {
+  const st = strokeInfo(target), on = st.width > 0;
+  for (const [key, el] of Object.entries(strokeSegs)) {
+    for (const b of el.children) { const sel = b.dataset.v === st[key]; b.dataset.on = String(sel); b.setAttribute('aria-pressed', String(sel)); }
+  }
+  const show = (id, v) => { document.getElementById(id).style.display = v ? '' : 'none'; };
+  show('xf-dash-row', on && st.style !== 'solid');
+  // dotted: just the gap between dots (the dot size is the width)
+  show('xf-dash-label', st.style === 'dashed'); show('xf-dash-box', st.style === 'dashed');
+  show('xf-stroke-pos-row', on && st.canPosition);
+  show('xf-stroke-cap-row', on && st.style !== 'dotted');   // dots are round caps by definition
+  show('xf-stroke-join-row', on && !['ellipse', 'circle'].includes(target.type));   // no corners to join
+  if (document.activeElement !== xfDash) xfDash.value = Math.round(st.dash);
+  if (document.activeElement !== xfGap) xfGap.value = Math.round(st.gap);
+}
+/* Fill / border eye toggles — hide the paint without losing it (Editor#setFillVisible /
+   setStrokeVisible). refreshPaintEyes() runs from refreshPropsPanel. */
+const paintEyes = [...document.querySelectorAll('.paint-eye')];
+paintEyes.forEach(b => {
+  b.onclick = () => {
+    if (b.getAttribute('aria-disabled') === 'true') return;
+    const show = b.getAttribute('aria-pressed') === 'true';   // pressed = currently hidden
+    if (b.dataset.paint === 'fill') ed.setFillVisible(show); else ed.setStrokeVisible(show);
+  };
+});
+function refreshPaintEyes(target) {
+  const off = { fill: !!(target && target.fillOff), stroke: !!(target && target.strokeOff) };
+  const noBorder = !(target && target.stroke && target.strokeWidth > 0);
+  paintEyes.forEach(b => {
+    const k = b.dataset.paint, hidden = off[k], what = k === 'fill' ? 'fill' : 'border';
+    b.innerHTML = iconSVG(hidden ? 'eyeOff' : 'eyeOpen', 16);
+    b.title = (hidden ? 'Show ' : 'Hide ') + what;
+    b.setAttribute('aria-label', b.title);
+    b.setAttribute('aria-pressed', String(hidden));
+    b.setAttribute('aria-disabled', String(k === 'stroke' && noBorder && !hidden));   // nothing to hide yet
+    b.parentElement.dataset.paintOff = String(hidden);
+  });
+}
 const xfRx = document.getElementById('xf-rx');
-xfRx.oninput = () => { ed.setNumeric({ rx: +xfRx.value }); paintRangeFill(xfRx); };
+xfRx.oninput = () => { ed.setNumeric({ rx: +xfRx.value }, { live: true }); paintRangeFill(xfRx); };
 
 /* ── Fill: Solid/Gradient toggle + gradient-fill stop editor ─────────────────────────────────
    Reuses the same {offset,color} stop shape as the paint-tool gradient, applied via
@@ -3008,6 +3167,7 @@ function refreshPropsPanel() {
     if (isGradientNow) { fgState = { type: shapeGrad.type, angle: fgState.angle, stops: shapeGrad.stops }; renderFgStops(); }
     else if (solidFill) { xfFill.value = solidFill.color; fillAlpha = solidFill.alpha; }
   }
+  refreshPaintEyes(fillTarget);
   // Border applies to any fillable/strokeable vector shape or line — not images or paint strokes.
   const hasBorder = !!fillTarget && !isImage && fillTarget.role !== 'paint';
   document.getElementById('border-section').style.display = hasBorder ? '' : 'none';
@@ -3016,6 +3176,7 @@ function refreshPropsPanel() {
     xfStrokeWidth.value = fillTarget.stroke ? Math.round(fillTarget.strokeWidth || 0) : 0;
     const solidStroke = solidColor(fillTarget.stroke);
     xfStroke.value = solidStroke ? solidStroke.color : '#000000'; strokeAlpha = solidStroke ? solidStroke.alpha : 1;
+    refreshBorderStyle(fillTarget);
   }
   // Corner radius only makes sense on a rectangle.
   const isRect = !!fillTarget && fillTarget.type === 'rect';
@@ -3052,7 +3213,7 @@ function refreshPropsPanel() {
   if (document.activeElement !== xfFillAlpha) xfFillAlpha.value = Math.round(fillAlpha * 100);
   if (document.activeElement !== xfStrokeAlpha) xfStrokeAlpha.value = Math.round(strokeAlpha * 100);
   [document.getElementById('stack-top'), document.getElementById('stack-up'), document.getElementById('stack-down'), document.getElementById('stack-bottom')].forEach(el => el.disabled = !o);
-  [layerOpacity, xfAngle, shadowBlur, txLineHeight, txSpacing, xfStrokeWidth, xfRx].forEach(paintRangeFill);
+  [layerOpacity, xfAngle, shadowBlur, txLineHeight, txSpacing, xfRx].forEach(paintRangeFill);
 }
 ed.on('change', refreshPropsPanel);
 ed.fc.on('selection:created', refreshPropsPanel);
@@ -3236,8 +3397,8 @@ ed.on('maskedit', () => renderLayers());
 ['selection:created', 'selection:updated', 'selection:cleared'].forEach(ev => ed.fc.on(ev, () => renderLayers(false)));
 renderLayers();
 
-/* ── left panel chrome: tabs, toolbar, contextual tool dock, AI card ─────────────────────────── */
-let _leftCueReady = false;   // the scroll cue is wired further down this file
+/* ── left panel chrome: tabs, toolbar, AI card; plus the tool options dock (right) ─────────────────────────── */
+let _rightCueReady = false;   // the scroll cue is wired further down this file
 function setLeftTab(tab) {
   document.querySelectorAll('.lp-tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   document.getElementById('lp-layers-view').hidden = tab !== 'layers';
@@ -3264,18 +3425,38 @@ lpGroup.innerHTML = iconSVG('folderplus', 16);
 lpGroup.onclick = () => showSelResult(ed.groupSelection());
 lpDelete.innerHTML = iconSVG('trash', 16);
 lpDelete.onclick = () => { const a = ed.layers().find(l => l.active); if (a) ed.removeLayer(a.id); };
+// Same enabled rules as the React shell: Group needs a multi-selection, Duplicate/Delete an active layer.
+const refreshLayerToolbar = () => {
+  const o = ed.fc.getActiveObject();
+  lpGroup.disabled = !(o && o.type === 'activeSelection');
+  const hasActive = !!ed.layers().find(l => l.active);
+  document.getElementById('duplicate').disabled = !hasActive;
+  lpDelete.disabled = !hasActive;
+};
+['selection:created', 'selection:updated', 'selection:cleared'].forEach(ev => ed.fc.on(ev, refreshLayerToolbar));
+ed.on('change', refreshLayerToolbar);
+refreshLayerToolbar();
 
-/* The dock (#tool-panel) only appears when there's something in it for the user: a tool other than
-   Select (its options + hint), a live pixel selection or a clipped layer (the Selection section),
-   or mask editing. With plain Select and nothing selected, the Layers view is just the list. */
+/* The tool options block (#tool-panel, top of the Properties tab) only appears when there's something
+   in it for the user: a tool other than Select (its options + hint), a live pixel selection or a
+   clipped layer (the Selection section), or mask editing. With plain Select it's just Canvas + props. */
 function refreshDock() {
   const o = ed.fc.getActiveObject();
   const hasClip = !!(o && o.clipPath);
   const selRelevant = !!ed.selection || SEL_TOOLS.includes(ed.tool) || hasClip;
   document.getElementById('selmod-section').style.display = selRelevant ? '' : 'none';
-  document.getElementById('tool-panel').hidden = !(ed.tool !== 'select' || selRelevant || ed._maskEdit);
-  if (_leftCueReady) refreshLeftScrollCue();
+  const show = ed.tool !== 'select' || selRelevant || !!ed._maskEdit;
+  document.getElementById('tool-panel').hidden = !show;
+  document.getElementById('right-panel').dataset.tool = String(show);
+  if (_rightCueReady) refreshRightScrollCue();
 }
+/* Picking a tool brings its options into view. Selection tools and the on-canvas AI insert are left
+   alone: they're routinely used to make a mask for the AI Assist tab, which must stay put. */
+let _lastTool = ed.tool;
+ed.on('tool', t => {
+  const changed = t !== _lastTool; _lastTool = t;
+  if (changed && t !== 'select' && !SEL_TOOLS.includes(t) && t !== 'aiinsert') setRightTab('layer');
+});
 ed.on('tool', refreshDock); ed.on('selection', refreshDock); ed.on('change', refreshDock); ed.on('maskedit', refreshDock);
 ed.fc.on('selection:created', refreshDock); ed.fc.on('selection:updated', refreshDock); ed.fc.on('selection:cleared', refreshDock);
 
@@ -3311,7 +3492,7 @@ function refreshAiCard() {
   const busy = cardBtns().some(b => b.dataset.busy === 'true');
   detectBtn.disabled = busy;
   detectResults.querySelectorAll('[data-detect-layer]').forEach(b => { b.disabled = busy; });
-  removeBgBtn.disabled = busy || !(a && a.maskable && !a.isAdjustment);
+  removeBgBtn.disabled = busy || !(a && (a.kind === 'image' || a.kind === 'paint') && !a.isAdjustment);
   autoShadowBtn.disabled = busy || !(a && a.role !== 'bg' && !a.isAdjustment);
   autoShadowBtn.dataset.on = String(!!(a && a.hasShadow));
   const p = ed.ai._provider, keyed = !!(p && (typeof p.hasKey !== 'function' || p.hasKey()));
@@ -3458,15 +3639,12 @@ renderStickerCats(); renderStickerGrid();
    tracks whichever of its panel's tabs is the currently-visible scroll container (only one is
    ever display:flex/block at a time — see the tab-switch handler above) and shows the cue only
    when that container is both actually scrollable AND not already scrolled to its bottom. Left
-   tracks whichever left container is scrolling — the tool dock when it's open (it sits lowest),
-   else the layer list, or the AI Vision tab — and is pinned to THAT container's bottom edge so it
+   tracks the layer list or the AI Vision tab, and is pinned to THAT container's bottom edge so it
    never covers the AI card below it. Right covers Layers/Design/Stickers/AI. ── */
 const leftScrollCue = document.getElementById('left-scroll-cue');
 leftScrollCue.innerHTML = iconSVG('chevronD', 15);
 function activeLeftPanel() {
-  if (!document.getElementById('lp-ai-view').hidden) return document.getElementById('lp-ai-view');
-  const dock = document.getElementById('tool-panel');
-  return dock.hidden ? document.getElementById('layers') : dock;
+  return document.getElementById(document.getElementById('lp-ai-view').hidden ? 'layers' : 'lp-ai-view');
 }
 function refreshLeftScrollCue() {
   const active = activeLeftPanel();
@@ -3475,8 +3653,7 @@ function refreshLeftScrollCue() {
   leftScrollCue.style.bottom = Math.max(0, pr.bottom - ar.bottom) + 'px';
   leftScrollCue.dataset.show = String(hasMore);
 }
-['tool-panel', 'layers', 'lp-ai-view'].forEach(id => document.getElementById(id).addEventListener('scroll', refreshLeftScrollCue));
-_leftCueReady = true;
+['layers', 'lp-ai-view'].forEach(id => document.getElementById(id).addEventListener('scroll', refreshLeftScrollCue));
 leftScrollCue.addEventListener('click', () => {
   activeLeftPanel().scrollBy({ top: activeLeftPanel().clientHeight * 0.8, behavior: 'smooth' });
 });
@@ -3503,6 +3680,7 @@ rightScrollCue.addEventListener('click', () => {
 new ResizeObserver(refreshRightScrollCue).observe(document.getElementById('right-panel'));
 ed.on('change', refreshRightScrollCue);
 ed.on('selection', refreshRightScrollCue);
+refreshRightScrollCue(); _rightCueReady = true;
 refreshRightScrollCue();
 
 /* ── guided "convert to layers": review AI-detected regions as adjustable boxes before committing.

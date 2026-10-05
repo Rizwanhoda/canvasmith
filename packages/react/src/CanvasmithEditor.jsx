@@ -12,13 +12,14 @@ import {
   FX_DEFAULTS, ADJUST_CONTROLS, formatAdjustValue, GEOMETRY_DEFAULTS, GEOMETRY_CONTROLS, formatGeometryValue,
   HSL_BANDS, HSL_PROPS, hslBandLabel, getHslValue, setHslValue, hslBandTrack,
   CURVE_CHANNELS, normalizeCurves, compactCurves, curveHitTest, curveInsertPoint, curveMovePoint, curveRemovePoint, curveSvgPath,
+  drawPenOverlay, drawPickSpinner, mountContextMenu, strokeInfo,
 } from '@canvasmith/core';
 
 const CROP_RATIOS = [['Free', 0], ['Original', 'orig'], ['1:1', 1], ['4:5', 4 / 5], ['3:2', 3 / 2], ['16:9', 16 / 9], ['9:16', 9 / 16]];
 // Tools whose toolOpts.color/fill actually paints something on screen: PAINT_TOOLS read all four
 // brush knobs (size/hardness/opacity/color), while bucket/shapes/type only ever read color/fill
 // (their initial fill) — same split as the vanilla demo's COLOR_TOOLS/isPaint.
-const COLOR_TOOLS = [...PAINT_TOOLS, 'bucket', ...SHAPE_TOOLS, 'type'];
+const COLOR_TOOLS = [...PAINT_TOOLS, 'bucket', ...SHAPE_TOOLS, 'type', 'pen'];
 const BRUSH_SWATCHES = ['#ffffff', '#000000', '#4f8ff0', '#d76b8f', '#d4ff45', '#ef6a2d'];
 /* Standard canvas-size presets, grouped by use-case — width/height in px at a nominal
    72-96dpi-ish "design pixel" scale (matches how every web design tool treats these, not
@@ -47,6 +48,7 @@ const CANVAS_PRESETS = [
 
 // Compact SVG glyphs for the tool rail — avoids pulling in an icon-font/library dependency.
 const ICON_PATHS = {
+  strokeSettings: 'M6 3v6M6 13v8M4 9h4v4H4zM12 3v11M12 18v3M10 14h4v4h-4zM18 3v3M18 10v11M16 6h4v4h-4z',   // vertical sliders — Border's advanced-settings toggle
   select: 'M5 3l15 9-7 1.5L9.5 20z',                                          // cursor
   hand: 'M8 12V6.5a1.5 1.5 0 0 1 3 0V11M11 11V5.5a1.5 1.5 0 0 1 3 0V11M14 11.5V7a1.5 1.5 0 0 1 3 0v7a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-3l-2-3.5a1.5 1.5 0 0 1 2.5-1.6L8 14',
   crop: 'M6 2v16h16M2 6h16v16',
@@ -322,7 +324,7 @@ const TOOL_LABELS = {
 // Per-tool dock hint — verbatim from the vanilla demo's TOOL_HINTS.
 const TOOL_HINTS = {
   select: 'Click any layer directly on the artboard or drag a bounding marquee to transform.',
-  crop: 'Drag the handles, then Apply crop in the top bar.',
+  crop: 'Drag the handles, then press Enter or Apply crop. Esc cancels.',
   'lasso-poly': 'Click to place points; click near the start (or press Enter) to close, Escape to cancel.',
   'lasso-mag': 'Click to place points that snap to nearby edges; Enter closes, Escape cancels.',
   wand: 'Click a colour region to select it. Shift-click adds, Alt-click subtracts.',
@@ -330,7 +332,9 @@ const TOOL_HINTS = {
   hoverselect: 'Hover to preview what a click would select, then click to commit it.',
   'objectselect-bbox': 'Click selects the active layer’s own bounding box; with nothing active, selects a center region.',
   magicwand: 'Click an object to grab it (OpenCV-assisted). Shift-click adds, Alt-click subtracts, re-click cycles overlapping objects.',
-  pen: 'Click to place points; click near the start (or press Enter) to close into a filled shape, Escape to cancel.',
+  gradient: 'Drag across a selected shape to fill it — the handles stay so you can re-aim it: drag an end or slide the line, click a colour square to change that colour (drag a middle one to move it); click outside the shape when done. With nothing selected, drag to paint a gradient.',
+  bucket: 'Click an area to fill it with the colour (similar neighbouring colours are filled too). With a selection, fills the selection.',
+  pen: 'Click for a corner, click-drag for a curve (⌥ breaks the handles, ⇧ snaps to 45°, Space moves the point). Click the first point to close into a filled shape; Enter/Esc keeps an open stroke. ⌫ removes the last point. With a path selected: click its outline to add a point, a point to delete it, an open end to continue.',
   aiinsert: 'AI insert · click a spot to draw there — or make a selection first and click inside it: the AI fills exactly that shape',
   clone: 'Alt-click (⌥) or Shift-click (⇧) to set the source point, then paint elsewhere to stamp those pixels. Click again with either to re-source.',
   heal: 'Alt-click (⌥) or Shift-click (⇧) to set the source point, then paint over the blemish — the patch is blended into its surroundings.',
@@ -388,7 +392,7 @@ const EMPTY_PROPS = {
   active: false, title: 'Properties', isImage: false, isAdjustment: false, fx: FX_DEFAULTS, geom: GEOMETRY_DEFAULTS,
   text: null,
   hasFill: false, fill: '#ef6a2d', fillAlpha: 1, shapeGradient: null, blend: 'source-over', opacity: 1,
-  hasBorder: false, strokeWidth: 0, stroke: '#000000', strokeAlpha: 1,
+  hasBorder: false, strokeWidth: 0, stroke: '#000000', strokeAlpha: 1, strokeOpts: null, shapeType: '', fillOff: false, strokeOff: false,
   angle: 0, x: '', y: '', w: '', h: '', skewX: 0, skewY: 0, isRect: false, rx: 0,
   shadow: { color: '#000000', blur: 0, offsetX: 0, offsetY: 0 },
   canGroup: false, canUngroup: false, hasSelectionPixels: false,
@@ -431,13 +435,27 @@ function HexField({ value, label, onCommit, className = 'cm-hex' }) {
 
 /* A number input that only applies on Enter/blur (artboard resizes are full history commits, so
    not one per keystroke); Escape or an out-of-range value snaps back to `value`. */
+/* Fill / border eye toggle at the end of a colour row — hides the paint without losing it. */
+function PaintEye({ hidden, what, disabled, onToggle }) {
+  const title = (hidden ? 'Show ' : 'Hide ') + what;
+  return (
+    <button type="button" className="cm-paint-eye" title={title} aria-label={title} aria-pressed={hidden}
+      aria-disabled={disabled} onClick={() => { if (!disabled) onToggle(hidden); }}>
+      <Icon name={hidden ? 'eyeOff' : 'eye'} size={16} />
+    </button>
+  );
+}
+
 function CommitNumber({ value, min, max, onCommit, ...rest }) {
   const [draft, setDraft] = useState(null);
   const commit = () => {
     if (draft == null) return;
-    const n = Math.round(+draft);
     setDraft(null);
-    if (Number.isFinite(n) && n >= min && n <= max && n !== value) onCommit(n);
+    if (String(draft).trim() === '') return;   // cleared box = revert, not 0
+    const n = Math.round(+draft);
+    if (!Number.isFinite(n)) return;
+    const v = Math.max(min, Math.min(max, n));   // out of range snaps to the limit (same as the demo)
+    if (v !== value) onCommit(v);
   };
   return (
     <input type="number" min={min} max={max} {...rest} value={draft != null ? draft : value}
@@ -467,6 +485,12 @@ function downscaleDataURL(src, max = 1024) {
 }
 
 // [label, w, h, description] — same presets as the demo's Canvas section.
+/* Border style / position / caps / join options (stroke.js) — same lists as the vanilla demo. */
+const STROKE_STYLES = [['solid', 'Solid'], ['dashed', 'Dashed'], ['dotted', 'Dotted']];
+const STROKE_POSITIONS = [['inside', 'Inside'], ['center', 'Center'], ['outside', 'Outside']];
+const STROKE_CAPS = [['butt', 'None'], ['round', 'Round'], ['square', 'Square']];
+const STROKE_JOINS = [['miter', 'Miter'], ['round', 'Round'], ['bevel', 'Bevel']];
+
 const CANVAS_RATIOS = [['16:9', 1920, 1080, 'Standard'], ['1:1', 1080, 1080, 'Square'], ['9:16', 1080, 1920, 'Story'], ['4:5', 1080, 1350, 'Portrait']];
 
 /* Canvas section (top of Properties, always visible): artboard W×H + aspect presets, and the
@@ -544,6 +568,8 @@ function readProps(ed) {
     hasFill, fill, fillAlpha, shapeGradient,
     // No stroke colour = no visible border, whatever Fabric's default strokeWidth of 1 says.
     hasBorder, strokeWidth: fillTarget && fillTarget.stroke ? Math.round(fillTarget.strokeWidth || 0) : 0, stroke: strokeColor, strokeAlpha,
+    strokeOpts: hasBorder ? strokeInfo(fillTarget) : null, shapeType: fillTarget ? fillTarget.type : '',
+    fillOff: !!(fillTarget && fillTarget.fillOff), strokeOff: !!(fillTarget && fillTarget.strokeOff),
     blend: o.globalCompositeOperation || 'source-over',
     opacity: o.opacity != null ? o.opacity : 1,
     angle: Math.round(o.angle || 0),
@@ -655,7 +681,11 @@ const CSS = `
 .cm-lp-menu button:hover,.cm-lp-menu button:focus-visible{background:var(--cm-bg)}
 .cm-lp-menu button svg{color:var(--cm-dim)}
 .cm-lp-list{flex:1;min-height:90px;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
-.cm-dock{flex:0 1 auto;max-height:48%;min-height:0;overflow-y:auto;border-top:1px solid var(--cm-line);padding:12px 14px 14px}
+.cm-dock{padding-bottom:18px;margin-bottom:16px;position:relative}
+.cm-dock::after{content:"";position:absolute;left:0;right:0;bottom:0;height:4px;border-radius:2px;background:var(--cm-line-soft)}
+.cm-lp-view>.cm-dock{flex:1;min-height:0;overflow-y:auto;margin:0;padding:12px 14px 14px}
+.cm-lp-view>.cm-dock::after{display:none}
+.cm-dock>div>.cm-grp:first-child{margin-top:18px;padding-top:14px;border-top:1px solid var(--cm-line-soft)}
 .cm-dock-head{display:flex;align-items:center;gap:7px;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--cm-dim)}
 .cm-dock-head .cm-status-pill{margin-left:auto}
 .cm-lp-card{flex:none;position:relative;border-top:1px solid color-mix(in srgb,var(--cm-accent) 30%,var(--cm-line));padding:12px 14px 14px;
@@ -791,6 +821,10 @@ const CSS = `
 .cm-zoom-pill .cm-icon-btn{width:24px;height:24px;border:none;background:none}
 .cm-zoom-pct{min-width:46px;height:24px;justify-content:center;padding:0 6px;border:none;background:none;font-variant-numeric:tabular-nums}
 .cm-zoom-div{width:1px;height:16px;background:var(--cm-line)}
+/* header controls share one tighter corner radius (was 7-9px buttons and a fully round zoom pill) */
+.cm-top .cm-btn,.cm-top .cm-icon-btn,.cm-top .cm-zoom-pill{border-radius:6px}
+.cm-top .cm-zoom-pill .cm-btn,.cm-top .cm-zoom-pill .cm-icon-btn{border-radius:4px}
+.cm-export-caret{display:flex;align-items:center}
 /* Narrow headers keep only the percentage — clicking it still fits to screen, and the +/-/0
    shortcuts still work, so zoom stays reachable without crowding out Export. */
 @media (max-width:980px){
@@ -824,12 +858,14 @@ const CSS = `
 .cm-persp-bar{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:17;display:flex;align-items:center;gap:8px;background:var(--cm-panel);border:1px solid var(--cm-line);border-radius:12px;padding:8px 10px 8px 14px;font-size:12px;color:var(--cm-dim);box-shadow:0 8px 24px rgba(0,0,0,.35);max-width:calc(100% - 32px)}
 .cm-persp-bar .cm-btn{flex:0 0 auto}
 .cm-persp-bar .cm-persp-apply{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent)}
+@media (max-width:900px){.cm-path-bar .cm-path-bar-hint{display:none}}
 .cm-ai{display:flex;gap:6px;margin-top:6px}.cm-ai input{flex:1;background:var(--cm-bg);border:1px solid var(--cm-line);border-radius:7px;color:var(--cm-ink);padding:5px 8px;font-size:12px}
 .cm-note{font-size:11px;color:var(--cm-dim);margin-top:6px;line-height:1.5}
 /* Autosave readout — quiet when things are fine, amber when the document is too big to save (or
    storage is blocked), since that's the only case the user has to act on. */
 .cm-props-title{font-family:"Bricolage Grotesque",inherit,sans-serif;font-size:15px;font-weight:600}
 .cm-side-body .cm-field input,.cm-side-body .cm-select{border-radius:6px;height:34px;padding:0 10px}
+.cm-side-body .cm-select{padding-right:34px}
 .cm-side-body .cm-row .cm-icon-btn,.cm-side-body .cm-align button{height:32px;border-radius:6px;background:var(--cm-panel-2);border-color:var(--cm-line-soft);color:var(--cm-ink)}
 .cm-side-body .cm-row .cm-icon-btn:hover,.cm-side-body .cm-align button:hover{border-color:var(--cm-dim-2)}
 .cm-side-body .cm-btn{border-radius:6px}
@@ -930,6 +966,7 @@ const CSS = `
 .cm-ai-textarea{width:100%;box-sizing:border-box;background:var(--cm-bg);border:1px solid var(--cm-line);border-radius:12px;color:var(--cm-ink);padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical}
 .cm-btn-accent{background:var(--cm-accent);color:var(--cm-accent-ink);border-color:var(--cm-accent)}
 .cm-btn-accent:hover{opacity:.92;border-color:var(--cm-accent)}
+.cm-key-hint{margin-left:6px;padding:1px 6px;border-radius:5px;font-size:10.5px;font-weight:600;background:color-mix(in srgb,var(--cm-accent-ink) 18%,transparent);opacity:.85}
 .cm-btn-spin{display:inline-block;width:11px;height:11px;border-radius:50%;border:1.6px solid color-mix(in srgb,var(--cm-accent-ink) 35%,transparent);border-top-color:var(--cm-accent-ink);animation:cm-btn-spin .6s linear infinite;flex:none}
 @keyframes cm-btn-spin{to{transform:rotate(360deg)}}
 .cm-ai-suggestions{display:flex;flex-direction:column;gap:6px}
@@ -969,6 +1006,20 @@ const CSS = `
 .cm-cv-dim:focus-within{border-color:var(--cm-accent);box-shadow:0 0 0 3px color-mix(in srgb, var(--cm-accent) 22%, transparent)}
 .cm-cv-dim input{all:unset;flex:1;min-width:0;text-align:center;font-family:"JetBrains Mono",ui-monospace,monospace;font-size:13px;font-weight:700;color:var(--cm-ink);-moz-appearance:textfield}
 .cm-cv-dim input::-webkit-inner-spin-button,.cm-cv-dim input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.cm-field-row{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:11.5px;color:var(--cm-dim)}
+.cm-field-row .cm-field-label{flex:0 0 36px;white-space:nowrap}
+.cm-field-row .cm-field-box{flex:1;height:34px}
+.cm-field-row .cm-field-box input{text-align:left;font-size:12px;font-weight:400}
+.cm-paint-eye,.cm-field-icon-btn{all:unset;box-sizing:border-box;flex:none;width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:7px;color:var(--cm-dim);cursor:pointer;transition:color .1s,background .1s}
+.cm-paint-eye:hover,.cm-field-icon-btn:hover{color:var(--cm-ink);background:var(--cm-bg)}
+.cm-paint-eye:focus-visible,.cm-field-icon-btn:focus-visible{box-shadow:0 0 0 2px var(--cm-accent)}
+.cm-field-icon-btn[aria-expanded=true]{color:var(--cm-accent);background:color-mix(in srgb,var(--cm-accent) 12%,transparent)}
+.cm-paint-eye[aria-disabled=true]{opacity:.35;pointer-events:none}
+[data-paint-off=true]>:not(.cm-paint-eye){opacity:.45}
+.cm-stroke-seg{flex:1;padding:3px}
+.cm-stroke-seg .cm-btn{padding:5px 4px;font-size:11.5px}
+.cm-field-row .cm-stroke-gap-label{flex:0 0 auto}
+.cm-field-row+.cm-grp,.cm-field-row+div>.cm-grp:first-child{margin-top:14px}
 .cm-cv-ratios{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}
 .cm-cv-ratios button{all:unset;box-sizing:border-box;text-align:center;padding:8px 0;border-radius:6px;border:1px solid var(--cm-line);background:var(--cm-bg);color:var(--cm-dim);font-size:11.5px;font-weight:600;cursor:pointer;transition:border-color .1s,color .1s,background .1s}
 .cm-cv-ratios button:hover{color:var(--cm-ink);border-color:var(--cm-dim-2)}
@@ -1004,6 +1055,10 @@ const CSS = `
 .cm-disclose .dot{width:6px;height:6px;border-radius:50%;background:var(--cm-accent)}
 .cm-subgrp{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--cm-dim);margin-top:12px;opacity:.8}
 .cm-select{width:100%;background:var(--cm-bg);color:var(--cm-ink);border:1px solid var(--cm-line);border-radius:7px;padding:6px 8px;font-size:12px;font-family:inherit}
+/* Own chevron instead of the native arrow (which Chrome pins ~4px from the edge whatever the
+   padding): inset 12px from the right, with room reserved so long option text never runs under it.
+   Mid-grey reads on both themes. */
+.cm-select{appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b8b93' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;background-size:12px 12px;padding-right:34px;cursor:pointer}
 .cm-row{display:flex;gap:6px}
 .cm-row .cm-btn{flex:1;justify-content:center}
 .cm-btn:disabled, .cm-icon-btn:disabled{opacity:.4;cursor:default;pointer-events:none}
@@ -1162,7 +1217,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const sideRef = useRef(null);
   const edRef = useRef(null);
   const [tool, setTool] = useState('select');
-  const [opts, setOpts] = useState({ size: 30, opacity: 1, hardness: 0.7, color: '#ef6a2d', tolerance: 32, addMode: false, gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }], cropRatio: 0, paintNewLayer: false });
+  const [opts, setOpts] = useState({ size: 30, opacity: 1, hardness: 0.7, color: '#000000', tolerance: 32, addMode: false, gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }], cropRatio: 0, paintNewLayer: false });
   const [layers, setLayers] = useState([]);
   const [canvasInfo, setCanvasInfo] = useState({ W: 1080, H: 1080, bg: { color: '#ffffff', alpha: 1, transparent: false } });
   // Group rows folded shut in the layers panel — panel state only, not document state (default: open).
@@ -1215,6 +1270,8 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
      after the fact — a confirm() can only ask beforehand, which people click through. */
   const [toasts, setToasts] = useState([]);
   const toastIdRef = useRef(0);
+  // Border's advanced rows (style / align / caps / join) — shut until the settings button opens them.
+  const [strokeAdvOpen, setStrokeAdvOpen] = useState(false);
   const toast = useCallback((message, action) => {
     const id = ++toastIdRef.current;
     setToasts(t => [...t, { id, message, action }]);
@@ -1330,7 +1387,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     // Ports the vanilla demo's drawOverlays exactly (its own header comment calls it "the
     // reference implementation other UIs can copy") — kept pixel-for-pixel identical rather than
     // reinvented, so the two shells read as the same editor.
-    let dragGuides = null, hoverPreview = null, penBuild = null, brushCursor = null, gradAxis = null;
+    let dragGuides = null, hoverPreview = null, penBuild = null, brushCursor = null, gradAxis = null, pickBusy = null;
     /* Gradient axis while dragging — the Figma-style handle: a thin white line, a round nub on the
        line at every stop, and a colour swatch floating just off it, first stop accented. Radial
        adds the circle its falloff sweeps. Same drawing as the vanilla demo's. */
@@ -1501,7 +1558,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           ctx.beginPath(); ctx.moveTo(c.x + c.w * i / 3, c.y); ctx.lineTo(c.x + c.w * i / 3, c.y + c.h); ctx.stroke();
           ctx.beginPath(); ctx.moveTo(c.x, c.y + c.h * i / 3); ctx.lineTo(c.x + c.w, c.y + c.h * i / 3); ctx.stroke();
         }
-        const hs = 5.5 / v[0]; ctx.fillStyle = '#ef6a2d';
+        const hs = 5.5 / v[0]; ctx.fillStyle = '#4f8ff0';   // same accent as the demo's overlays
         for (const [hx, hy] of [[c.x, c.y], [c.x + c.w, c.y], [c.x, c.y + c.h], [c.x + c.w, c.y + c.h],
                                 [c.x + c.w / 2, c.y], [c.x + c.w / 2, c.y + c.h], [c.x, c.y + c.h / 2], [c.x + c.w, c.y + c.h / 2]])
           ctx.fillRect(hx - hs, hy - hs, hs * 2, hs * 2);
@@ -1524,20 +1581,17 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
       }
       if (gradAxis) drawGradientAxis(ctx, gradAxis, v[0]);
       if (brushCursor) drawBrushCursor(ctx, brushCursor, v[0]);
-      if (penBuild && penBuild.pts.length) {
-        ctx.strokeStyle = '#ef6a2d'; ctx.lineWidth = 1.4 / v[0]; ctx.setLineDash([]);
-        ctx.beginPath();
-        penBuild.pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
-        ctx.stroke();
-        const r = 3.5 / v[0];
-        penBuild.pts.forEach((p, i) => {
-          ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 7);
-          if (i === 0) { ctx.fillStyle = '#ef6a2d'; ctx.fill(); } else { ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.strokeStyle = '#ef6a2d'; ctx.lineWidth = 1.2 / v[0]; ctx.stroke(); }
-        });
-      }
+      // Pen path being drawn / vector edit mode — core's drawPenOverlay, shared with the demo.
+      if (penBuild) drawPenOverlay(ctx, penBuild, v[0], { accent: '#4f8ff0' });
+      // magic wand / object select still computing: spinning ring at the pointer
+      if (pickBusy) drawPickSpinner(ctx, pickBusy, v[0], { accent: '#4f8ff0' });
       ctx.restore();
     };
-    ed.fc.on('after:render', drawOverlays);
+    // Only for real on-screen redraws. Fabric also fires after:render for OFFSCREEN renders (each
+    // magic wand / object select pick captures the scene with the zoom reset to 100%, and so do
+    // exports and the Compare snapshot) — drawing the overlays then used the temporary 100% transform,
+    // flashing the selection and hover outlines oversized and shifted off the artboard.
+    ed.fc.on('after:render', (opt) => { if (opt && opt.ctx && opt.ctx !== ed.fc.getContext()) return; drawOverlays(); });
     // Fabric's own click-to-select (no edit made) doesn't go through commit()/activate(), so
     // 'change' alone misses it — without these, layers() (and activeLayer/Fill below) stay stale
     // after a plain click on the canvas.
@@ -1568,8 +1622,26 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
         setShowExtendBanner(frac >= 0.12);
       }, 400);
     };
+    let lastTool = ed.tool;
+    // Gradient stop swatch clicked on the canvas: open the native colour picker right at the swatch
+    // (a hidden <input type=color> parked there) and recolour that stop live as the user picks.
+    const gradPick = document.createElement('input');
+    gradPick.type = 'color'; gradPick.tabIndex = -1; gradPick.setAttribute('aria-label', 'Gradient stop colour');
+    gradPick.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;border:0;padding:0;margin:0';
+    document.body.appendChild(gradPick);
+    let gradPickIdx = -1;
+    gradPick.addEventListener('input', () => { if (gradPickIdx >= 0) ed.setGradientStopColor(gradPickIdx, gradPick.value); });
+    const openGradPick = (p) => {
+      gradPickIdx = p.index; gradPick.value = p.color;
+      gradPick.style.left = p.clientX + 'px'; gradPick.style.top = (p.clientY + 12) + 'px';
+      try { gradPick.showPicker(); } catch (_) { gradPick.click(); }
+    };
     const offs = [
       ed.on('tool', t => {
+        // picking a tool brings its options (Properties tab) into view — except selection tools and
+        // the AI insert, which are routinely used to build a mask for the AI Assist tab
+        if (t !== lastTool && t !== 'select' && !SEL_TOOLS.includes(t) && t !== 'aiinsert') setSideTab('layer');
+        lastTool = t;
         setTool(t); if (t !== 'aiinsert') setAiInsert(null); if (t !== 'crop') ed.setToolOptions({ cropRatio: 0 }); refreshExtendBanner();
         // Leaving objectselect/hoverselect must drop the last hover-preview outline — otherwise it
         // stays drawn (see the hoverPreview render gate above) until another 'hover' event happens
@@ -1592,13 +1664,21 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
       ed.on('perspective', p => { setPerspActive(!!p); ed.fc.requestRenderAll(); }),
       ed.on('geometryguide', () => ed.fc.requestRenderAll()),
       ed.on('pen', build => { penBuild = build; ed.fc.requestRenderAll(); }),
+      ed.on('pathedit', p => setPathEditing(!!p)),
+      ed.on('gradientstoppick', openGradPick),
+      ed.on('pickbusy', b => { pickBusy = b; }),   // the editor re-renders every frame while busy
+      () => gradPick.remove(),
       ed.on('brushcursor', c => { brushCursor = c; ed.fc.requestRenderAll(); }),
       ed.on('gradientaxis', g => { gradAxis = g; ed.fc.requestRenderAll(); }),
       ed.on('clonesource', s => setCloneSrc(s)),
       ed.on('maskedit', m => { setMaskEdit(m); setLayers(ed.layers()); }),
       ed.on('aiinsert', ({ pt, region }) => setAiInsert({ pt, region, prompt: '', busy: false, msg: '' })),
       ed.on('hover', h => { hoverPreview = h; ed.fc.requestRenderAll(); setObjselectBusy(false); }),
-      ed.on('error', () => setObjselectBusy(false)),
+      ed.on('error', (ev) => {
+        setObjselectBusy(false);
+        // Right-click menu actions have no panel of their own to report into.
+        if (ev && ev.source === 'menu') toast(ev.message || SEL_REASON_MSG[ev.reason] || 'That didn’t work.');
+      }),
       ed.on('objcount', n => setObjCount(n)),
       ed.on('zoom', z => setZoomPct(Math.round((z || ed.fc.getZoom() || 1) * 100))),
       ed.on('resize', () => { fitToScreen(); refreshCanvasInfo(); }),
@@ -1616,7 +1696,10 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     } else if (ai && typeof ai === 'object') {
       ed.ai.register(ai);
     }
-    const stops = [installKeybindings(ed)];
+    const stops = [installKeybindings(ed, document, { toolGroups: TOOLGROUPS }),
+      // Right-click menu — core builds the items, mountContextMenu draws them (shared with the demo).
+      // Mounted inside .cm-root so the --cm-* theme tokens reach it.
+      mountContextMenu(ed, { root: rootRef.current || document.body, vars: { panel: 'var(--cm-panel-2)', line: 'var(--cm-line)', ink: 'var(--cm-ink)', dim: 'var(--cm-dim-2)', hover: 'var(--cm-accent)', hoverInk: 'var(--cm-accent-ink)', danger: 'var(--cm-danger)' } })];
     if (bridge) {
       stops.push(installBridge(src => { ed.openImage(src); trackAsset(src, 'Opened image'); }));
       stops.push(installDropImport(stageRef.current, src => { ed.addImage(src); trackAsset(src, 'Dropped image'); }));
@@ -1786,6 +1869,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const commitAdjust = () => ed().commitLive(props.isAdjustment ? 'adjustment' : 'filters');
   const [showCurves, setShowCurves] = useState(false);
   const [perspActive, setPerspActive] = useState(false);
+  const [pathEditing, setPathEditing] = useState(false);   // vector edit mode on a path layer
   const [showHsl, setShowHsl] = useState(false);
   const setGeom = (patch, live = false) => ed().setImageGeometry(patch, { live });
   const commitGeom = () => ed().setImageGeometry({});   // non-live no-op patch: drops the guide grid + pushes the undo step
@@ -1884,12 +1968,13 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   }, []);
 
   const setBlend = (blend) => activeLayer && ed().setLayer(activeLayer.id, { blend });
-  const setOpacity = (opacity) => activeLayer && ed().setLayer(activeLayer.id, { opacity });
+  // live: a slider drag is one undo step, not one per input event
+  const setOpacity = (opacity) => activeLayer && ed().setLayer(activeLayer.id, { opacity }, { live: true });
   // Colour pickers/hex fields hand over a bare hex — re-apply the current opacity so recolouring
   // a 40% fill doesn't silently snap it back to 100%.
   const setFillColor = (color, alpha = props.fillAlpha) => ed().setFill(withAlpha(color, alpha));
   const setStroke = ({ alpha = props.strokeAlpha, ...patch }) => ed().setStroke('color' in patch ? { ...patch, color: withAlpha(patch.color, alpha) } : patch);
-  const setNumeric = (patch) => ed().setNumeric(patch);
+  const setNumeric = (patch, opts) => ed().setNumeric(patch, opts);
   const flip = (axis) => ed().flipLayer(axis);
   const centerH = () => ed().fc.getActiveObject() && ed().alignActiveSelection('center');
   const centerV = () => ed().fc.getActiveObject() && ed().alignActiveSelection('middle');
@@ -2593,7 +2678,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
      options or a pixel selection / clipped layer / mask edit is live — so with plain Select the
      panel is just the list; the AI card is pinned under both tabs. */
   // Per-shape tile glyphs (l.shape, from describeLayer) — same table as the vanilla demo's.
-  const SHAPE_ICON = { rect: 'rect', ellipse: 'ellipse', triangle: 'triangle', line: 'line', polygon: 'polygon', star: 'star', pen: 'pen', freehand: 'brush' };
+  const SHAPE_ICON = { rect: 'square', ellipse: 'ellipse', triangle: 'triangle', line: 'line', polygon: 'polygon', star: 'star', pen: 'pen', freehand: 'brush' };
   const KIND_ICON = { group: 'folder', shape: 'rect', badge: 'tag', adjustment: 'contrast', bg: 'image', paint: 'brush', image: 'image' };
   const layerTile = (l) => {
     const raster = l.kind === 'image' || l.kind === 'paint' || (l.kind === 'bg' && !l.fill);
@@ -2690,6 +2775,254 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     document.addEventListener('click', close);
     return () => document.removeEventListener('click', close);
   }, [addMenuOpen]);
+  // The active tool's options + hint. Rendered at the top of the right Properties tab; during a
+  // convert-to-layers review (which takes over the right panel) it stays on the left instead.
+  const toolDock = dockOpen ? (
+      <div className="cm-dock cm-scroll">
+        {tool === 'crop' && (
+          <React.Fragment>
+            <button className="cm-btn cm-btn-accent" title="Apply crop (Enter)" style={{ marginBottom: 8, width: '100%', justifyContent: 'center' }} onClick={() => ed().applyCrop()}>✓ Apply crop <span className="cm-key-hint">↵ Enter</span></button>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14, paddingBottom: 14, borderBottom: '1px solid var(--cm-line-soft)' }}>
+            {CROP_RATIOS.map(([label, r]) => {
+              const ratio = r === 'orig' ? ed().W / ed().H : r;
+              const on = r === 'orig' ? opts.cropRatio === (ed().W / ed().H) : opts.cropRatio === r;
+              return (
+                <button key={label} className="cm-chip" data-on={on} onClick={() => ed().setToolOptions({ cropRatio: ratio })}>{label}</button>
+              );
+            })}
+          </div>
+          </React.Fragment>
+        )}
+        {tool === 'pen' && (
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => ed().finishPen()}>✓ Finish path</button>
+              <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => ed().cancelPen()}>Cancel</button>
+            </div>
+            <div className="cm-slider-row" title="Stroke width for open paths">Stroke <input type="range" min="1" max="40" value={opts.penStrokeWidth != null ? opts.penStrokeWidth : 3} onChange={e => ed().setToolOptions({ penStrokeWidth: +e.target.value })} /><span className="cm-tag mono">{opts.penStrokeWidth != null ? opts.penStrokeWidth : 3}</span></div>
+          </div>
+        )}
+        {maskEdit && (
+          <div style={{ background: 'var(--cm-accent)', color: 'var(--cm-accent-ink)', borderRadius: 8, padding: '8px 10px', marginBottom: 10, fontSize: 12, fontWeight: 600 }}>
+            Editing layer mask — paint white to reveal, black to hide.
+            <div className="cm-row" style={{ marginTop: 8 }}>
+              <button className="cm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--cm-panel)', color: 'var(--cm-ink)' }} onClick={() => ed().invertMask(maskEdit.layerId)} title="Swap hidden/visible across the whole mask">
+                Invert mask
+              </button>
+              <button className="cm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--cm-panel)', color: 'var(--cm-ink)' }} onClick={() => ed().exitMaskEdit()}>
+                Done editing mask
+              </button>
+            </div>
+          </div>
+        )}
+        {/* SELECT & TRANSFORM header + "Active" status pill — names the section rather than
+            just echoing the raw tool id, matching the demo's tool-name/tool-status-pill. */}
+        <div className="cm-dock-head">
+          <Icon name={tool} size={14} />
+          <span>{tool === 'select' ? 'Select & Transform' : (TOOL_LABELS[tool] || tool)}</span>
+          <span className="cm-status-pill">Active</span>
+        </div>
+        <div className="cm-note" style={{ marginTop: 4 }}>
+          {(tool === 'clone' || tool === 'heal') && cloneSrc
+            ? `Source set at ${Math.round(cloneSrc.x)}, ${Math.round(cloneSrc.y)} — now paint to ${tool === 'heal' ? 'heal with' : 'stamp'} those pixels. ⌥/⇧-click to re-source.`
+            : (TOOL_HINTS[tool] || 'Drag on the canvas to use this tool.')}
+        </div>
+
+
+        {/* Brush/Color section — only the sliders+swatches a given tool can actually read
+            (see COLOR_TOOLS/isPaintTool below), moved out of the always-visible header. */}
+        {isColorTool && (
+          <React.Fragment>
+            {isPaintTool && (
+              <React.Fragment>
+                <div className="cm-slider-row">Size <input type="range" min="2" max="220" value={opts.size} onChange={e => ed().setToolOptions({ size: +e.target.value })} /><span className="cm-tag mono">{opts.size}</span></div>
+                {/* "Soft" is the inverse of the engine's hardness (0 hardness = fully soft
+                    edge) — same knob, flipped so the UI reads as "how soft" not "how hard". */}
+                <div className="cm-slider-row" style={{ marginTop: 6 }}>Soft <input type="range" min="0" max="100" value={Math.round((1 - opts.hardness) * 100)} onChange={e => ed().setToolOptions({ hardness: 1 - (+e.target.value / 100) })} /><span className="cm-tag mono">{Math.round((1 - opts.hardness) * 100)}%</span></div>
+                <div className="cm-slider-row" style={{ marginTop: 6 }}>Opacity <input type="range" min="5" max="100" value={Math.round(opts.opacity * 100)} onChange={e => ed().setToolOptions({ opacity: +e.target.value / 100 })} /><span className="cm-tag mono">{Math.round(opts.opacity * 100)}%</span></div>
+              </React.Fragment>
+            )}
+            {/* Colour only for tools that paint WITH it — the eraser/clone/heal/tone tools ignore it. */}
+            {!NO_COLOR_TOOLS.includes(tool) && <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+              <input type="color" value={opts.color} onChange={e => ed().setToolOptions({ color: e.target.value, fill: e.target.value })} title="Colour" />
+              <div style={{ display: 'flex', gap: 6, flex: 1 }}>
+                {BRUSH_SWATCHES.map(c => (
+                  <button key={c} className="cm-swatch-btn" data-on={c.toLowerCase() === (opts.color || '').toLowerCase()}
+                    style={{ background: c }} title={c}
+                    onClick={() => ed().setToolOptions({ color: c, fill: c })} />
+                ))}
+              </div>
+            </div>}
+          </React.Fragment>
+        )}
+        {/* Clone/Heal need a source point before they do anything at all, and nothing on
+            the canvas says so — this states the step you're on and offers a reset. */}
+        {(tool === 'clone' || tool === 'heal') && (
+          <div>
+            <div className="cm-grp">{tool === 'heal' ? 'Healing brush' : 'Clone stamp'}</div>
+            <div className="cm-note" style={{ marginTop: 6 }}>
+              {cloneSrc
+                ? `Source set at ${Math.round(cloneSrc.x)}, ${Math.round(cloneSrc.y)} — now paint to ${tool === 'heal' ? 'heal with' : 'stamp'} those pixels.`
+                : 'Step 1 — hold ⌥ (Alt) or ⇧ (Shift) and click the area you want to copy FROM.'}
+            </div>
+            <button className="cm-btn" style={{ marginTop: 8, width: '100%', justifyContent: 'center' }}
+              disabled={!cloneSrc} onClick={() => ed().clearCloneSource()}>
+              Reset source
+            </button>
+            <div className="cm-note" style={{ marginTop: 8 }}>⌥-click or ⇧-click re-sources at any time</div>
+          </div>
+        )}
+        {/* Destructive-vs-new-layer, for every pixel tool: by default strokes edit the
+            image itself (at its own resolution), which is what a photo editor does. */}
+        {isPaintTool && tool !== 'eraser' && (
+          <div>
+            <div className="cm-grp">Destination</div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 6, fontSize: 12, cursor: 'pointer' }}>
+              <input type="checkbox" checked={!!opts.paintNewLayer} onChange={e => ed().setToolOptions({ paintNewLayer: e.target.checked })} />
+              <span>Paint on a new layer</span>
+            </label>
+            <div className="cm-note" style={{ marginTop: 6 }}>
+              {opts.paintNewLayer
+                ? 'Strokes go to a separate paint layer — the original image is left untouched.'
+                : 'Editing the image itself (the selected layer, or the top image), at its own resolution.'}
+            </div>
+          </div>
+        )}
+
+        {tool === 'magicwand' && (
+          <React.Fragment>
+            <div className="cm-note" style={{ marginTop: 8 }}>
+              {objselectBusy ? 'Finding object…'
+                : selCount > 1 ? selCount + ' selected · ⇧-click (or Add) to keep combining'
+                : selCount === 1 ? 'Selected · ⇧-click to add more, ⌥-click to subtract'
+                : 'Click an object to select it'}
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button className="cm-chip" data-on={opts.addMode}
+              onClick={() => ed().setToolOptions({ addMode: !opts.addMode })}>
+              <Icon name="spark" size={12} /><span>Add{opts.addMode ? ' ✓' : ''}</span>
+            </button>
+            </div>
+            <label style={{ display: 'block', marginTop: 8, fontSize: 11, color: 'var(--cm-dim)' }}>Tolerance
+              <input type="range" min="4" max="128" value={opts.tolerance} style={{ width: '100%' }}
+                onChange={e => ed().setToolOptions({ tolerance: +e.target.value })} />
+            </label>
+            <div className="cm-note" style={{ marginTop: 8 }}>⇧ add · ⌥ subtract · [ ] tolerance</div>
+          </React.Fragment>
+        )}
+        {(tool === 'objectselect' || tool === 'hoverselect') && (
+          <React.Fragment>
+            <div className="cm-row" style={{ alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+              <span style={{ fontWeight: 600 }}>{tool === 'hoverselect' ? 'Hover select' : 'Object select'}</span>
+              <button className="cm-toggle" data-on={opts.addMode}
+                title="Keep adding each clicked object to the selection (same as holding Shift)"
+                onClick={() => ed().setToolOptions({ addMode: !opts.addMode })}>
+                Add{opts.addMode ? ' ✓' : ''}
+              </button>
+            </div>
+            <div className="cm-note" style={{ marginTop: 6 }}>
+              {objselectBusy ? 'Finding object…'
+                : selCount > 1 ? selCount + ' selected · Merge to combine'
+                : objCount ? objCount + (tool === 'hoverselect' ? ' objects · hover to preview, click to select' : ' objects · click to select')
+                : 'No objects found — re-detect'}
+            </div>
+            <label style={{ display: 'block', marginTop: 8, fontSize: 11, color: 'var(--cm-dim)' }}
+              title="How close in colour a pixel must be to the clicked spot to seed the object. Higher = grabs more of the colour before the object is completed.">
+              Colour match
+              <input type="range" min="4" max="96" value={opts.tolerance} style={{ width: '100%' }}
+                onChange={e => ed().setToolOptions({ tolerance: +e.target.value })} />
+            </label>
+            <div className="cm-row" style={{ marginTop: 8 }}>
+              <button className="cm-btn" style={{ width: '100%', justifyContent: 'center' }} disabled={objselectBusy || selCount < 2}
+                title="Select 2+ objects (⇧-click or the Add toggle), then merge them into one shape via polygon clipping"
+                onClick={mergeSel}>Merge{selCount > 1 ? ' (' + selCount + ')' : ''}</button>
+            </div>
+            <div className="cm-row" style={{ marginTop: 6 }}>
+              <button className="cm-btn" disabled={objselectBusy || !selCount} onClick={expandSel}>Expand</button>
+              <button className="cm-btn" disabled={objselectBusy || !selCount} onClick={contractSel}>Contract</button>
+            </div>
+            <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }}
+              disabled={objselectBusy} title="Select every region on the canvas matching the colour you last clicked, within Colour match"
+              onClick={selectSimilar}>Similar</button>
+            {!!selCount && (
+              <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }}
+                onClick={() => ed().clearSelection()}>Deselect</button>
+            )}
+            <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }}
+              disabled={objselectBusy} onClick={redetectObjects}>Re-detect</button>
+            <div className="cm-note" style={{ marginTop: 8 }}>⇧ add · ⌥ subtract · [ ] tolerance · re-click cycles nested</div>
+          </React.Fragment>
+        )}
+
+        {tool === 'gradient' && (
+          <div>
+            <div className="cm-grp">Gradient</div>
+            <div className="cm-row">
+              <button className="cm-btn" data-on={opts.gradientType === 'linear'} onClick={() => ed().setToolOptions({ gradientType: 'linear' })}>Linear</button>
+              <button className="cm-btn" data-on={opts.gradientType === 'radial'} onClick={() => ed().setToolOptions({ gradientType: 'radial' })}>Radial</button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+              {opts.gradientStops.map((stop, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <input type="color" value={stop.color} onChange={e => {
+                    const stops = opts.gradientStops.map((s, si) => si === i ? { ...s, color: e.target.value } : s);
+                    ed().setToolOptions({ gradientStops: stops });
+                  }} />
+                  <input type="range" min="0" max="1" step="0.01" value={stop.offset} style={{ flex: 1 }} title="Position" onChange={e => {
+                    const stops = opts.gradientStops.map((s, si) => si === i ? { ...s, offset: +e.target.value } : s);
+                    ed().setToolOptions({ gradientStops: stops });
+                  }} />
+                  <input type="range" min="0" max="1" step="0.01" value={stop.alpha ?? 1} style={{ flex: 1 }} title="Opacity" onChange={e => {
+                    const stops = opts.gradientStops.map((s, si) => si === i ? { ...s, alpha: +e.target.value } : s);
+                    ed().setToolOptions({ gradientStops: stops });
+                  }} />
+                  <button className="cm-icon-btn" disabled={opts.gradientStops.length <= 2} title="Remove stop"
+                    onClick={() => ed().setToolOptions({ gradientStops: opts.gradientStops.filter((_, si) => si !== i) })}>
+                    <Icon name="close" size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="cm-row" style={{ marginTop: 6 }}>
+              <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => {
+                const last = opts.gradientStops[opts.gradientStops.length - 1];
+                ed().setToolOptions({ gradientStops: [...opts.gradientStops, { offset: Math.min(1, last?.offset ?? 1), color: last?.color || '#ffffff', alpha: last?.alpha ?? 1 }] });
+              }}>+ Add stop</button>
+              <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} title="Reverse stop order"
+                onClick={() => ed().setToolOptions({ gradientStops: opts.gradientStops.map(s => ({ ...s, offset: 1 - s.offset })).sort((a, b) => a.offset - b.offset) })}>
+                <Icon name="flip" size={13} /> Reverse
+              </button>
+            </div>
+            <div className="cm-note">Drag on the canvas to paint the gradient.</div>
+          </div>
+        )}
+
+
+        {selRelevant && (
+          <div>
+            <div className="cm-grp">Selection</div>
+            <div className="cm-row">
+              <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={expandSel}><Icon name="expand" size={13} /> Expand</button>
+              <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={contractSel}><Icon name="contract" size={13} /> Contract</button>
+            </div>
+            <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }} disabled={!props.hasSelectionPixels} onClick={selectSimilar}>
+              <Icon name="similar" size={13} /> Select Similar Colors
+            </button>
+            <label className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center', opacity: props.hasSelectionPixels ? 1 : 0.4, pointerEvents: props.hasSelectionPixels ? 'auto' : 'none' }}>
+              <Icon name="eyedropper" size={13} /> Recolor selection…
+              <input type="color" style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }}
+                onChange={e => recolorSel(e.target.value)} />
+            </label>
+            <div className="cm-row" style={{ marginTop: 6 }}>
+              <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={clipToSel}><Icon name="crop" size={13} /> Clip layer to selection</button>
+              <button className="cm-btn" disabled={!hasResolvableLayer()} onClick={clearClip}><Icon name="close" size={13} /> Clear clip</button>
+            </div>
+            <div className="cm-note">{selMsg || (!props.hasSelectionPixels ? 'Draw a marquee/lasso selection first — for a text or shape layer’s colour, use Fill in Properties instead.' : '')}</div>
+          </div>
+        )}
+        {!selRelevant && selMsg && <div className="cm-note">{selMsg}</div>}
+      </div>
+  ) : null;
   return (
     <div className="cm-root" ref={rootRef} style={style} data-cm-mode={mode_} data-left-collapsed={leftCollapsed} data-side-collapsed={sideCollapsed}>
       <style>{CSS}</style>
@@ -2781,7 +3114,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
           </span>
         )}
         <button className="cm-btn cm-compare-btn" disabled={!compareReady} title="Compare with the first-loaded version" onClick={openCompare}>
-          <Icon name="search" size={13} /><span>Compare</span>
+          <span>Compare</span>
         </button>
         <span className="cm-hdiv" />
         <span className="cm-export-anchor">
@@ -2891,249 +3224,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
               <div className="cm-lp-view">
                 {!reviewOn && layersToolbar}
                 {!reviewOn && <div className="cm-lp-list cm-scroll" role="list">{layerRows}</div>}
-                {dockOpen && (
-              <div className="cm-dock cm-scroll">
-                {tool === 'crop' && (
-                  <React.Fragment>
-                    <button className="cm-btn" style={{ marginBottom: 8, width: '100%' }} onClick={() => ed().applyCrop()}>✓ Apply crop</button>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14, paddingBottom: 14, borderBottom: '1px solid var(--cm-line-soft)' }}>
-                    {CROP_RATIOS.map(([label, r]) => {
-                      const ratio = r === 'orig' ? ed().W / ed().H : r;
-                      const on = r === 'orig' ? opts.cropRatio === (ed().W / ed().H) : opts.cropRatio === r;
-                      return (
-                        <button key={label} className="cm-chip" data-on={on} onClick={() => ed().setToolOptions({ cropRatio: ratio })}>{label}</button>
-                      );
-                    })}
-                  </div>
-                  </React.Fragment>
-                )}
-                {tool === 'pen' && (
-                  <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                    <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => ed().finishPen()}>✓ Finish path</button>
-                    <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => ed().cancelPen()}>Cancel</button>
-                  </div>
-                )}
-                {maskEdit && (
-                  <div style={{ background: 'var(--cm-accent)', color: 'var(--cm-accent-ink)', borderRadius: 8, padding: '8px 10px', marginBottom: 10, fontSize: 12, fontWeight: 600 }}>
-                    Editing layer mask — paint white to reveal, black to hide.
-                    <div className="cm-row" style={{ marginTop: 8 }}>
-                      <button className="cm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--cm-panel)', color: 'var(--cm-ink)' }} onClick={() => ed().invertMask(maskEdit.layerId)} title="Swap hidden/visible across the whole mask">
-                        Invert mask
-                      </button>
-                      <button className="cm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--cm-panel)', color: 'var(--cm-ink)' }} onClick={() => ed().exitMaskEdit()}>
-                        Done editing mask
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {/* SELECT & TRANSFORM header + "Active" status pill — names the section rather than
-                    just echoing the raw tool id, matching the demo's tool-name/tool-status-pill. */}
-                <div className="cm-dock-head">
-                  <Icon name={tool} size={14} />
-                  <span>{tool === 'select' ? 'Select & Transform' : (TOOL_LABELS[tool] || tool)}</span>
-                  <span className="cm-status-pill">Active</span>
-                </div>
-                <div className="cm-note" style={{ marginTop: 4 }}>
-                  {(tool === 'clone' || tool === 'heal') && cloneSrc
-                    ? `Source set at ${Math.round(cloneSrc.x)}, ${Math.round(cloneSrc.y)} — now paint to ${tool === 'heal' ? 'heal with' : 'stamp'} those pixels. ⌥/⇧-click to re-source.`
-                    : (TOOL_HINTS[tool] || 'Drag on the canvas to use this tool.')}
-                </div>
-
-
-                {/* Brush/Color section — only the sliders+swatches a given tool can actually read
-                    (see COLOR_TOOLS/isPaintTool below), moved out of the always-visible header. */}
-                {isColorTool && (
-                  <React.Fragment>
-                    {isPaintTool && (
-                      <React.Fragment>
-                        <div className="cm-slider-row">Size <input type="range" min="2" max="220" value={opts.size} onChange={e => ed().setToolOptions({ size: +e.target.value })} /><span className="cm-tag mono">{opts.size}</span></div>
-                        {/* "Soft" is the inverse of the engine's hardness (0 hardness = fully soft
-                            edge) — same knob, flipped so the UI reads as "how soft" not "how hard". */}
-                        <div className="cm-slider-row" style={{ marginTop: 6 }}>Soft <input type="range" min="0" max="100" value={Math.round((1 - opts.hardness) * 100)} onChange={e => ed().setToolOptions({ hardness: 1 - (+e.target.value / 100) })} /><span className="cm-tag mono">{Math.round((1 - opts.hardness) * 100)}%</span></div>
-                        <div className="cm-slider-row" style={{ marginTop: 6 }}>Opacity <input type="range" min="5" max="100" value={Math.round(opts.opacity * 100)} onChange={e => ed().setToolOptions({ opacity: +e.target.value / 100 })} /><span className="cm-tag mono">{Math.round(opts.opacity * 100)}%</span></div>
-                      </React.Fragment>
-                    )}
-                    {/* Colour only for tools that paint WITH it — the eraser/clone/heal/tone tools ignore it. */}
-                    {!NO_COLOR_TOOLS.includes(tool) && <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
-                      <input type="color" value={opts.color} onChange={e => ed().setToolOptions({ color: e.target.value, fill: e.target.value })} title="Colour" />
-                      <div style={{ display: 'flex', gap: 6, flex: 1 }}>
-                        {BRUSH_SWATCHES.map(c => (
-                          <button key={c} className="cm-swatch-btn" data-on={c.toLowerCase() === (opts.color || '').toLowerCase()}
-                            style={{ background: c }} title={c}
-                            onClick={() => ed().setToolOptions({ color: c, fill: c })} />
-                        ))}
-                      </div>
-                    </div>}
-                  </React.Fragment>
-                )}
-                {/* Clone/Heal need a source point before they do anything at all, and nothing on
-                    the canvas says so — this states the step you're on and offers a reset. */}
-                {(tool === 'clone' || tool === 'heal') && (
-                  <div>
-                    <div className="cm-grp">{tool === 'heal' ? 'Healing brush' : 'Clone stamp'}</div>
-                    <div className="cm-note" style={{ marginTop: 6 }}>
-                      {cloneSrc
-                        ? `Source set at ${Math.round(cloneSrc.x)}, ${Math.round(cloneSrc.y)} — now paint to ${tool === 'heal' ? 'heal with' : 'stamp'} those pixels.`
-                        : 'Step 1 — hold ⌥ (Alt) or ⇧ (Shift) and click the area you want to copy FROM.'}
-                    </div>
-                    <button className="cm-btn" style={{ marginTop: 8, width: '100%', justifyContent: 'center' }}
-                      disabled={!cloneSrc} onClick={() => ed().clearCloneSource()}>
-                      Reset source
-                    </button>
-                    <div className="cm-note" style={{ marginTop: 8 }}>⌥-click or ⇧-click re-sources at any time</div>
-                  </div>
-                )}
-                {/* Destructive-vs-new-layer, for every pixel tool: by default strokes edit the
-                    image itself (at its own resolution), which is what a photo editor does. */}
-                {isPaintTool && tool !== 'eraser' && (
-                  <div>
-                    <div className="cm-grp">Destination</div>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 6, fontSize: 12, cursor: 'pointer' }}>
-                      <input type="checkbox" checked={!!opts.paintNewLayer} onChange={e => ed().setToolOptions({ paintNewLayer: e.target.checked })} />
-                      <span>Paint on a new layer</span>
-                    </label>
-                    <div className="cm-note" style={{ marginTop: 6 }}>
-                      {opts.paintNewLayer
-                        ? 'Strokes go to a separate paint layer — the original image is left untouched.'
-                        : 'Editing the image itself (the selected layer, or the top image), at its own resolution.'}
-                    </div>
-                  </div>
-                )}
-
-                {tool === 'magicwand' && (
-                  <React.Fragment>
-                    <div className="cm-note" style={{ marginTop: 8 }}>
-                      {objselectBusy ? 'Finding object…'
-                        : selCount > 1 ? selCount + ' selected · ⇧-click (or Add) to keep combining'
-                        : selCount === 1 ? 'Selected · ⇧-click to add more, ⌥-click to subtract'
-                        : 'Click an object to select it'}
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                    <button className="cm-chip" data-on={opts.addMode}
-                      onClick={() => ed().setToolOptions({ addMode: !opts.addMode })}>
-                      <Icon name="spark" size={12} /><span>Add{opts.addMode ? ' ✓' : ''}</span>
-                    </button>
-                    </div>
-                    <label style={{ display: 'block', marginTop: 8, fontSize: 11, color: 'var(--cm-dim)' }}>Tolerance
-                      <input type="range" min="4" max="128" value={opts.tolerance} style={{ width: '100%' }}
-                        onChange={e => ed().setToolOptions({ tolerance: +e.target.value })} />
-                    </label>
-                    <div className="cm-note" style={{ marginTop: 8 }}>⇧ add · ⌥ subtract · [ ] tolerance</div>
-                  </React.Fragment>
-                )}
-                {(tool === 'objectselect' || tool === 'hoverselect') && (
-                  <React.Fragment>
-                    <div className="cm-row" style={{ alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
-                      <span style={{ fontWeight: 600 }}>{tool === 'hoverselect' ? 'Hover select' : 'Object select'}</span>
-                      <button className="cm-toggle" data-on={opts.addMode}
-                        title="Keep adding each clicked object to the selection (same as holding Shift)"
-                        onClick={() => ed().setToolOptions({ addMode: !opts.addMode })}>
-                        Add{opts.addMode ? ' ✓' : ''}
-                      </button>
-                    </div>
-                    <div className="cm-note" style={{ marginTop: 6 }}>
-                      {objselectBusy ? 'Finding object…'
-                        : selCount > 1 ? selCount + ' selected · Merge to combine'
-                        : objCount ? objCount + (tool === 'hoverselect' ? ' objects · hover to preview, click to select' : ' objects · click to select')
-                        : 'No objects found — re-detect'}
-                    </div>
-                    <label style={{ display: 'block', marginTop: 8, fontSize: 11, color: 'var(--cm-dim)' }}
-                      title="How close in colour a pixel must be to the clicked spot to seed the object. Higher = grabs more of the colour before the object is completed.">
-                      Colour match
-                      <input type="range" min="4" max="96" value={opts.tolerance} style={{ width: '100%' }}
-                        onChange={e => ed().setToolOptions({ tolerance: +e.target.value })} />
-                    </label>
-                    <div className="cm-row" style={{ marginTop: 8 }}>
-                      <button className="cm-btn" style={{ width: '100%', justifyContent: 'center' }} disabled={objselectBusy || selCount < 2}
-                        title="Select 2+ objects (⇧-click or the Add toggle), then merge them into one shape via polygon clipping"
-                        onClick={mergeSel}>Merge{selCount > 1 ? ' (' + selCount + ')' : ''}</button>
-                    </div>
-                    <div className="cm-row" style={{ marginTop: 6 }}>
-                      <button className="cm-btn" disabled={objselectBusy || !selCount} onClick={expandSel}>Expand</button>
-                      <button className="cm-btn" disabled={objselectBusy || !selCount} onClick={contractSel}>Contract</button>
-                    </div>
-                    <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }}
-                      disabled={objselectBusy} title="Select every region on the canvas matching the colour you last clicked, within Colour match"
-                      onClick={selectSimilar}>Similar</button>
-                    {!!selCount && (
-                      <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }}
-                        onClick={() => ed().clearSelection()}>Deselect</button>
-                    )}
-                    <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }}
-                      disabled={objselectBusy} onClick={redetectObjects}>Re-detect</button>
-                    <div className="cm-note" style={{ marginTop: 8 }}>⇧ add · ⌥ subtract · [ ] tolerance · re-click cycles nested</div>
-                  </React.Fragment>
-                )}
-
-                {tool === 'gradient' && (
-                  <div>
-                    <div className="cm-grp">Gradient</div>
-                    <div className="cm-row">
-                      <button className="cm-btn" data-on={opts.gradientType === 'linear'} onClick={() => ed().setToolOptions({ gradientType: 'linear' })}>Linear</button>
-                      <button className="cm-btn" data-on={opts.gradientType === 'radial'} onClick={() => ed().setToolOptions({ gradientType: 'radial' })}>Radial</button>
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-                      {opts.gradientStops.map((stop, i) => (
-                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <input type="color" value={stop.color} onChange={e => {
-                            const stops = opts.gradientStops.map((s, si) => si === i ? { ...s, color: e.target.value } : s);
-                            ed().setToolOptions({ gradientStops: stops });
-                          }} />
-                          <input type="range" min="0" max="1" step="0.01" value={stop.offset} style={{ flex: 1 }} title="Position" onChange={e => {
-                            const stops = opts.gradientStops.map((s, si) => si === i ? { ...s, offset: +e.target.value } : s);
-                            ed().setToolOptions({ gradientStops: stops });
-                          }} />
-                          <input type="range" min="0" max="1" step="0.01" value={stop.alpha ?? 1} style={{ flex: 1 }} title="Opacity" onChange={e => {
-                            const stops = opts.gradientStops.map((s, si) => si === i ? { ...s, alpha: +e.target.value } : s);
-                            ed().setToolOptions({ gradientStops: stops });
-                          }} />
-                          <button className="cm-icon-btn" disabled={opts.gradientStops.length <= 2} title="Remove stop"
-                            onClick={() => ed().setToolOptions({ gradientStops: opts.gradientStops.filter((_, si) => si !== i) })}>
-                            <Icon name="close" size={12} />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="cm-row" style={{ marginTop: 6 }}>
-                      <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} onClick={() => {
-                        const last = opts.gradientStops[opts.gradientStops.length - 1];
-                        ed().setToolOptions({ gradientStops: [...opts.gradientStops, { offset: Math.min(1, last?.offset ?? 1), color: last?.color || '#ffffff', alpha: last?.alpha ?? 1 }] });
-                      }}>+ Add stop</button>
-                      <button className="cm-btn" style={{ flex: 1, justifyContent: 'center' }} title="Reverse stop order"
-                        onClick={() => ed().setToolOptions({ gradientStops: opts.gradientStops.map(s => ({ ...s, offset: 1 - s.offset })).sort((a, b) => a.offset - b.offset) })}>
-                        <Icon name="flip" size={13} /> Reverse
-                      </button>
-                    </div>
-                    <div className="cm-note">Drag on the canvas to paint the gradient.</div>
-                  </div>
-                )}
-
-
-                {selRelevant && (
-                  <div>
-                    <div className="cm-grp">Selection</div>
-                    <div className="cm-row">
-                      <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={expandSel}><Icon name="expand" size={13} /> Expand</button>
-                      <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={contractSel}><Icon name="contract" size={13} /> Contract</button>
-                    </div>
-                    <button className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center' }} disabled={!props.hasSelectionPixels} onClick={selectSimilar}>
-                      <Icon name="similar" size={13} /> Select Similar Colors
-                    </button>
-                    <label className="cm-btn" style={{ marginTop: 6, width: '100%', justifyContent: 'center', opacity: props.hasSelectionPixels ? 1 : 0.4, pointerEvents: props.hasSelectionPixels ? 'auto' : 'none' }}>
-                      <Icon name="eyedropper" size={13} /> Recolor selection…
-                      <input type="color" style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }}
-                        onChange={e => recolorSel(e.target.value)} />
-                    </label>
-                    <div className="cm-row" style={{ marginTop: 6 }}>
-                      <button className="cm-btn" disabled={!props.hasSelectionPixels} onClick={clipToSel}><Icon name="crop" size={13} /> Clip layer to selection</button>
-                      <button className="cm-btn" disabled={!hasResolvableLayer()} onClick={clearClip}><Icon name="close" size={13} /> Clear clip</button>
-                    </div>
-                    <div className="cm-note">{selMsg || (!props.hasSelectionPixels ? 'Draw a marquee/lasso selection first — for a text or shape layer’s colour, use Fill in Properties instead.' : '')}</div>
-                  </div>
-                )}
-                {!selRelevant && selMsg && <div className="cm-note">{selMsg}</div>}
-              </div>
-                )}
+                {reviewOn && toolDock}
               </div>
             ) : (
               <div className="cm-lp-view cm-lp-ai cm-scroll">
@@ -3171,7 +3262,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
               </button>
               <div className="cm-lp-card-row">
                 <button className="cm-btn" data-busy={cardBusy === 'removebg'} title="Cut the subject out of the selected image (as a layer mask)"
-                  disabled={!!cardBusy || !(activeLayer && activeLayer.maskable && !activeLayer.isAdjustment)} onClick={removeBg}>
+                  disabled={!!cardBusy || !(activeLayer && (activeLayer.kind === 'image' || activeLayer.kind === 'paint') && !activeLayer.isAdjustment)} onClick={removeBg}>
                   {cardBusy === 'removebg' ? <><span className="cm-btn-spin" />Cutting out…</> : <><Icon name="scissors" size={13} /> Remove BG</>}
                 </button>
                 <button className="cm-btn" data-on={!!(activeLayer && activeLayer.hasShadow)} title="Toggle a soft drop shadow on the selected layer"
@@ -3209,7 +3300,17 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
             <button className="cm-btn" onClick={() => ed().cancelPerspectiveEdit()}>Cancel</button>
           </div>
         )}
-        {showExtendBanner && !perspActive && (
+        {pathEditing && !perspActive && (
+          <div className="cm-persp-bar cm-path-bar" role="toolbar" aria-label="Edit path">
+            <span style={{ display: 'flex', flexShrink: 0 }}><Icon name="pen" size={14} /></span>
+            <span className="cm-path-bar-hint" style={{ whiteSpace: 'nowrap' }}>Drag points &amp; handles · double-click to add / convert · ⌘-drag bends</span>
+            <button className="cm-btn" title="Make the selected points smooth" onClick={() => ed().setPathNodeType('smooth')}>Smooth</button>
+            <button className="cm-btn" title="Make the selected points sharp corners" onClick={() => ed().setPathNodeType('corner')}>Corner</button>
+            <button className="cm-btn" title="Delete the selected points (⌫)" onClick={() => ed().deleteSelectedPathNodes()}>Delete point</button>
+            <button className="cm-btn cm-persp-apply" title="Leave edit mode (Enter)" onClick={() => ed().exitPathEdit()}>Done</button>
+          </div>
+        )}
+        {showExtendBanner && !perspActive && !pathEditing && (
           <button className="cm-extend-banner" onClick={onExtendBannerClick}>
             <Icon name="search" size={13} />Background doesn't fill the canvas — AI-extend it
           </button>
@@ -3389,9 +3490,10 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
 
             {sideTab === 'layer' && (
               <div>
+                {toolDock}
                 <CanvasSection editor={ed} info={canvasInfo} />
 
-                {!props.active ? (
+                {!props.active ? (dockOpen ? null : (
                   <React.Fragment>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
                       <strong className="cm-props-title">Properties</strong>
@@ -3402,7 +3504,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                       <span className="d">Select a layer above, or on the canvas, to see and edit its properties.</span>
                     </div>
                   </React.Fragment>
-                ) : (
+                )) : (
                   <React.Fragment>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
                       <strong className="cm-props-title">{props.title}</strong>
@@ -3525,18 +3627,20 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                           <button className="cm-btn" data-on={!!props.shapeGradient} onClick={setGradientFillMode}>Gradient</button>
                         </div>
                         {!props.shapeGradient ? (
-                          <div className="cm-swatch-row" style={{ marginTop: 8 }}>
+                          <div className="cm-swatch-row" style={{ marginTop: 8 }} data-paint-off={props.fillOff}>
                             <input type="color" value={props.fill} title="Fill colour" onChange={e => setFillColor(e.target.value)} />
                             <div className="cm-cv-fill">
                               <HexField value={props.fill} label="Fill colour hex" onCommit={v => setFillColor(v)} />
                               <span className="pct"><CommitNumber value={Math.round(props.fillAlpha * 100)} min={0} max={100} aria-label="Fill opacity" onCommit={a => setFillColor(props.fill, a / 100)} />%</span>
                             </div>
+                            <PaintEye hidden={props.fillOff} what="fill" onToggle={show => ed().setFillVisible(show)} />
                           </div>
                         ) : (
                           <React.Fragment>
-                            <div className="cm-row" style={{ marginTop: 8 }}>
+                            <div className="cm-row" style={{ marginTop: 8 }} data-paint-off={props.fillOff}>
                               <button className="cm-btn" data-on={props.shapeGradient.type === 'linear'} onClick={() => setShapeGradientPatch({ type: 'linear' })}>Linear</button>
                               <button className="cm-btn" data-on={props.shapeGradient.type === 'radial'} onClick={() => setShapeGradientPatch({ type: 'radial' })}>Radial</button>
+                              <PaintEye hidden={props.fillOff} what="fill" onToggle={show => ed().setFillVisible(show)} />
                             </div>
                             {props.shapeGradient.type === 'linear' && (
                               <div className="cm-slider-row">Angle <input type="range" min="0" max="360" value={fgAngle} onChange={e => setShapeGradientPatch({ angle: +e.target.value })} /></div>
@@ -3583,21 +3687,61 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                         <div className="cm-grp">Border</div>
                         {/* Colour always offered; picking one on a borderless shape also gives it a
                             visible 2px border so the choice isn't a silent no-op (same as the demo). */}
-                        <div className="cm-swatch-row" style={{ marginBottom: 2 }}>
+                        <div className="cm-swatch-row" style={{ marginBottom: 2 }} data-paint-off={props.strokeOff}>
                           <input type="color" value={props.stroke} title="Border colour" onChange={e => setStroke(props.strokeWidth > 0 ? { color: e.target.value } : { color: e.target.value, width: 2 })} />
                           <div className="cm-cv-fill">
                             <HexField value={props.stroke} label="Border colour hex" onCommit={v => setStroke(props.strokeWidth > 0 ? { color: v } : { color: v, width: 2 })} />
                             <span className="pct"><CommitNumber value={Math.round(props.strokeAlpha * 100)} min={0} max={100} aria-label="Border opacity" onCommit={a => setStroke(props.strokeWidth > 0 ? { color: props.stroke, alpha: a / 100 } : { color: props.stroke, alpha: a / 100, width: 2 })} />%</span>
                           </div>
+                          {/* nothing to hide on a borderless shape */}
+                          <PaintEye hidden={props.strokeOff} what="border" disabled={!props.strokeOff && !(props.strokeWidth > 0)} onToggle={show => ed().setStrokeVisible(show)} />
                         </div>
-                        <div className="cm-slider-row">Width <input type="range" min="0" max="40" value={props.strokeWidth} onChange={e => setStroke({ width: +e.target.value })} /><span className="cm-val">{Math.round(props.strokeWidth)}px</span></div>
+                        <div className="cm-field-row"><span className="cm-field-label">Width</span>
+                          <label className="cm-cv-dim cm-field-box"><CommitNumber value={Math.round(props.strokeWidth)} min={0} max={200} aria-label="Border width" onCommit={w => setStroke({ width: w })} /><span>px</span></label>
+                          {/* opens the style / align / caps / join rows below */}
+                          <button type="button" className="cm-field-icon-btn" title="Border settings" aria-label="Border settings" aria-expanded={strokeAdvOpen}
+                            onClick={() => setStrokeAdvOpen(v => !v)}><Icon name="strokeSettings" size={16} /></button>
+                        </div>
+                        {strokeAdvOpen && props.strokeOpts && (() => {
+                          const st = props.strokeOpts, on = props.strokeWidth > 0;
+                          // a borderless shape gets a visible 2px border with the option, like picking a colour does
+                          const seg = (key, opts, label) => (
+                            <div className="cm-seg cm-stroke-seg" role="group" aria-label={label}>
+                              {opts.map(([v, l]) => (
+                                <button key={v} type="button" className="cm-btn" data-on={String(st[key] === v)} aria-pressed={st[key] === v}
+                                  onClick={() => setStroke(on ? { [key]: v } : { [key]: v, width: 2 })}>{l}</button>
+                              ))}
+                            </div>
+                          );
+                          return (
+                            <React.Fragment>
+                              <div className="cm-field-row"><span className="cm-field-label">Style</span>{seg('style', STROKE_STYLES, 'Border style')}</div>
+                              {on && st.style !== 'solid' && (
+                                <div className="cm-field-row">
+                                  {/* dotted: just the gap between dots (the dot size is the width) */}
+                                  {st.style === 'dashed' && <React.Fragment>
+                                    <span className="cm-field-label">Dash</span>
+                                    <label className="cm-cv-dim cm-field-box"><CommitNumber value={Math.round(st.dash)} min={0} max={400} aria-label="Dash length" onCommit={v => setStroke({ dash: v })} /><span>px</span></label>
+                                  </React.Fragment>}
+                                  <span className="cm-field-label cm-stroke-gap-label">Gap</span>
+                                  <label className="cm-cv-dim cm-field-box"><CommitNumber value={Math.round(st.gap)} min={0} max={400} aria-label="Gap length" onCommit={v => setStroke({ gap: v })} /><span>px</span></label>
+                                </div>
+                              )}
+                              {on && st.canPosition && <div className="cm-field-row"><span className="cm-field-label">Align</span>{seg('position', STROKE_POSITIONS, 'Border position')}</div>}
+                              {/* dots are round caps by definition */}
+                              {on && st.style !== 'dotted' && <div className="cm-field-row"><span className="cm-field-label">Caps</span>{seg('cap', STROKE_CAPS, 'Border caps')}</div>}
+                              {/* no corners to join on an ellipse */}
+                              {on && !['ellipse', 'circle'].includes(props.shapeType) && <div className="cm-field-row"><span className="cm-field-label">Join</span>{seg('join', STROKE_JOINS, 'Border corners')}</div>}
+                            </React.Fragment>
+                          );
+                        })()}
                       </React.Fragment>
                     )}
 
                     {props.isRect && (
                       <div>
                         <div className="cm-grp">Corner radius</div>
-                        <div className="cm-slider-row">Radius <input type="range" min="0" max={Math.max(1, Math.round(Math.min(props.w, props.h) / 2))} value={props.rx} onChange={e => setNumeric({ rx: +e.target.value })} /><span className="cm-val">{props.rx}px</span></div>
+                        <div className="cm-slider-row">Radius <input type="range" min="0" max={Math.max(1, Math.round(Math.min(props.w, props.h) / 2))} value={props.rx} onChange={e => setNumeric({ rx: +e.target.value }, { live: true })} /><span className="cm-val">{props.rx}px</span></div>
                       </div>
                     )}
 

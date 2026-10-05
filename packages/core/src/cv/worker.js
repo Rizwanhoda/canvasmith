@@ -76,6 +76,48 @@ export function cvWorkerBody() {
     return (pts && pts.length >= 3) ? pts : null;
   }
 
+  // "Select object" inside a rough selection (Photoshop's Object Selection, rectangle/lasso mode):
+  // the selection rings are GrabCut's probable foreground, everything outside them is definite
+  // background, so the area around the box teaches it what "not object" looks like (here: the
+  // backdrop the products sit on). Unlike grab(), every sizeable foreground blob is kept — a box
+  // drawn over several products should come back with all of them.
+  function objectsIn(img, polys, invert) {
+    var W = img.width, H = img.height, src = cv.matFromImageData(img), rgb = new cv.Mat(); cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+    // The selected area as a 0/255 mask, same fill rules as selectionToPath2D: rings are a
+    // nonzero union (Shift-added rings may overlap — each is filled on its own, since one fillPoly
+    // call over all of them is even-odd), and an inverted selection is the whole image minus them.
+    var sm = invert ? new cv.Mat(H, W, cv.CV_8UC1, new cv.Scalar(255)) : cv.Mat.zeros(H, W, cv.CV_8UC1), all = new cv.MatVector();
+    polys.forEach(function (pl) {
+      var flat = []; pl.forEach(function (p) { flat.push(Math.round(p.x), Math.round(p.y)); });
+      var m = cv.matFromArray(pl.length, 1, cv.CV_32SC2, flat);
+      if (invert) all.push_back(m); else { var one = new cv.MatVector(); one.push_back(m); cv.fillPoly(sm, one, new cv.Scalar(255)); one.delete(); }
+      m.delete();
+    });
+    if (invert) cv.fillPoly(sm, all, new cv.Scalar(0));
+    all.delete();
+    var selA = cv.countNonZero(sm);
+    var mask = new cv.Mat(H, W, cv.CV_8UC1, new cv.Scalar(cv.GC_BGD));
+    mask.setTo(new cv.Scalar(cv.GC_PR_FGD), sm);
+    // GrabCut needs some background samples — a selection covering the whole analysed image has
+    // none, so the outermost pixels always count as background.
+    cv.rectangle(mask, new cv.Point(0, 0), new cv.Point(W - 1, H - 1), new cv.Scalar(cv.GC_BGD), 2);
+    var bg = new cv.Mat(), fg = new cv.Mat(); cv.grabCut(rgb, mask, new cv.Rect(0, 0, 1, 1), bg, fg, 5, cv.GC_INIT_WITH_MASK);
+    var fm = cv.Mat.zeros(H, W, cv.CV_8UC1), dat = mask.data, fd = fm.data; for (var i = 0; i < dat.length; i++) { var v = dat[i]; if (v === cv.GC_FGD || v === cv.GC_PR_FGD) fd[i] = 255; }
+    var k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+    cv.morphologyEx(fm, fm, cv.MORPH_OPEN, k); cv.morphologyEx(fm, fm, cv.MORPH_CLOSE, k);
+    cv.bitwise_and(fm, sm, fm);   // the close can bridge past the selection's edge — never select outside it
+    var cs = new cv.MatVector(), h = new cv.Mat(); cv.findContours(fm, cs, h, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    var out = [], minA = Math.max(24, selA * 0.006);
+    for (var c = 0; c < cs.size(); c++) {
+      var cc = cs.get(c), a = cv.contourArea(cc);
+      if (a >= minA) { var ap = new cv.Mat(); cv.approxPolyDP(cc, ap, 0.0018 * cv.arcLength(cc, true), true); var pts = []; for (var q = 0; q < ap.rows; q++) pts.push({ x: ap.intPtr(q, 0)[0], y: ap.intPtr(q, 0)[1] }); if (pts.length >= 3) out.push({ a: a, pts: pts }); ap.delete(); }
+      cc.delete();
+    }
+    [src, rgb, sm, mask, bg, fg, fm, k, h].forEach(function (x) { x.delete(); }); cs.delete();
+    out.sort(function (A, C) { return C.a - A.a; });
+    return out.slice(0, 30).map(function (o) { return o.pts; });
+  }
+
   /* Reduces a binary mask in-place to the single 4/8-connected blob containing `seed`. Used to
      stop a wand pick from spanning several same-coloured elements (see the call site). */
   function keepSeedComponent(mask, seed) {
@@ -258,6 +300,7 @@ export function cvWorkerBody() {
       else if (m.type === 'morph') self.postMessage({ id: m.id, polys: morphPolys(m.W, m.H, m.polys, m.r) });
       else if (m.type === 'subtract') self.postMessage({ id: m.id, polys: subtractPolys(m.W, m.H, m.base, m.cut) });
       else if (m.type === 'similar') self.postMessage({ id: m.id, polys: similarRegions(m.img, m.seed, m.tol) });
+      else if (m.type === 'objects') self.postMessage({ id: m.id, polys: objectsIn(m.img, m.polys, !!m.invert) });
     }
     catch (err) { self.postMessage({ id: m.id, error: String((err && err.message) || err) }); }
   }

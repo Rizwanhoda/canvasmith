@@ -25,12 +25,17 @@ import { EXTRA, serialize, restore, exportImage, addImageLayer, artboardForImage
 import { selectionClipObject, renderSelectedPixels } from './pixels.js';
 import { recolorPixels, fxToFilterSpecs, FX_DEFAULTS, normalizeGradientStops, splitGradientStopColor, relLum, hexRgb, rgba } from './color.js';
 import { AIRegistry } from './ai/registry.js';
+import { buildContextMenu } from './contextmenu.js';
+import { node as penNode, cloneNodes, nodesToPathD, commandsToNodes, isSmooth, mirrorFor, handlesEqual, toggleSmooth,
+  constrain45, translateNode, hitAnchor, hitHandle, hitSegment, splitSegment, bendSegment, penCursor, dist as penDist } from './pen.js';
 import { CvEngine, prepImageData } from './cv/client.js';
-import { makeMaskFilterClass, createMaskCanvas, maskStamp, maskLine, serializeMask, deserializeMask, invertMaskCanvas } from './mask.js';
+import { makeMaskFilterClass, createMaskCanvas, maskStamp, maskLine, serializeMask, deserializeMask, invertMaskCanvas,
+  isVectorMaskable, createVectorMaskCanvas, vectorMaskPoint, touchVectorMask, attachVectorMask } from './mask.js';
 import { stickerSpec, STICKER_PALETTE, STICKER_DEFAULT_LABEL } from './stickers.js';
 import { makeCTA, makeBadge, makePrice, makeBrandLockup } from './adtext.js';
 import { buildPromoLayout, buildLayerFromSpec } from './templates.js';
 import { fillHoles, analyzeBox, knockoutBackground, textLines } from './regions.js';
+import { installStrokePosition, applyStrokeStyle, strokeInfo } from './stroke.js';
 
 export const SEL_TOOLS = ['marquee', 'marquee-ellipse', 'lasso', 'lasso-poly', 'lasso-mag', 'wand', 'objectselect-bbox', 'magicwand', 'objectselect', 'hoverselect'];
 /* Default wand/object-select tolerance. Was 32, which is fine on flat synthetic colour but
@@ -202,6 +207,7 @@ export class Editor {
   constructor({ fabric, canvasEl, width = 1080, height = 1080, background = '#ffffff', voidColor = '#0a0a0c', openCvUrl } = {}) {
     if (!fabric) throw new Error('Pass fabric (v5) into the Editor — it is a peer dependency.');
     this.fabric = fabric;
+    installStrokePosition(fabric);   // Border position (inside/outside) — see stroke.js
     // MaskFilter (see mask.js) only implements Fabric's Canvas2D filter path (applyTo2d), not a
     // WebGL shader — Fabric defaults to WebGL filtering whenever the browser supports it, which
     // would silently no-op a mask (and any other future custom filter) with no error. Forcing
@@ -227,8 +233,8 @@ export class Editor {
       // Figma-style marquee: a thin solid border over a barely-there fill, instead of Fabric's
       // default heavy blue wash — kept independent of the app's lime accent, since a selection
       // indicator needs to read clearly over content of any colour.
-      selectionColor: 'rgba(13,153,255,0.08)',
-      selectionBorderColor: '#0d99ff',
+      selectionColor: 'rgba(11,107,211,0.08)',
+      selectionBorderColor: '#0b6bd3',
       selectionLineWidth: 1,
       // Fabric's own default binds Shift+drag on a side handle (ml/mr/mt/mb) to skew — the
       // classic Illustrator/Photoshop convention puts skew on Alt/Option instead, freeing Shift
@@ -302,19 +308,39 @@ export class Editor {
       ctx.fillRect(0, 0, this.fc.width, this.fc.height);
       ctx.restore();
     };
-    // Themed selection handles: circular accent-colored corners instead of Fabric's stock plain
-    // white squares + light-blue border — applied per-object on 'object:added' rather than
-    // mutating the shared fabric.Object.prototype globally, so multiple Editor instances on one
-    // page (or other Fabric usage outside this library) never fight over one theme. `accent`
-    // defaults to the toolOpts fill color set below (this.toolOpts isn't assigned yet at this
-    // point in the constructor, so the literal is duplicated here rather than referenced).
-    const handleAccent = '#ef6a2d';
-    this.fc.on('object:added', (opt) => {
-      if (opt.target) opt.target.set({
-        transparentCorners: false, cornerColor: handleAccent, cornerStrokeColor: '#0c0c0e',
+    // Themed selection handles + outline instead of Fabric's stock squares and faint light-blue
+    // border — applied per-object on 'object:added' rather than mutating the shared
+    // fabric.Object.prototype globally, so multiple Editor instances on one page (or other Fabric
+    // usage outside this library) never fight over one theme.
+    // Selection outline: a deep blue over a thin white halo, so it reads on any artwork — a single
+    // colour can't (the old orange vanished on photos; plain blue vanishes on a blue shape).
+    // Handles are white with a blue ring for the same reason. Same blue as the drag-select box (selectionBorderColor).
+    const handleAccent = '#0b6bd3';
+    const themeSelection = (o) => {
+      o.set({
+        transparentCorners: false, cornerColor: '#ffffff', cornerStrokeColor: handleAccent,
         borderColor: handleAccent, cornerSize: 11, cornerStyle: 'circle', borderScaleFactor: 1.5, padding: 2,
       });
+      if (o.drawBorders.__halo) return;
+      const base = o.drawBorders;
+      // Fabric sets ctx.lineWidth just before this call; paint a wider white pass underneath.
+      o.drawBorders = function (ctx, styleOverride) {
+        const lw = ctx.lineWidth;
+        ctx.save(); ctx.lineWidth = lw + 2;
+        base.call(this, ctx, { ...styleOverride, borderColor: 'rgba(255,255,255,0.9)' });
+        ctx.restore();
+        return base.call(this, ctx, styleOverride);
+      };
+      o.drawBorders.__halo = true;
+    };
+    this.fc.on('object:added', (opt) => {
+      if (opt.target) attachVectorMask(opt.target);   // vector-layer masks — see mask.js
+      if (opt.target) themeSelection(opt.target);
     });
+    // A multi-selection's ActiveSelection is never fc.add()ed, so it's themed as it appears.
+    const themeActive = (opt) => { const a = this.fc.getActiveObject(); if (a && a.type === 'activeSelection') themeSelection(a); };
+    this.fc.on('selection:created', themeActive);
+    this.fc.on('selection:updated', themeActive);
     this.engine = new PaintEngine(fabric, this.fc, width, height);
     // Registers fabric.Image.filters.MaskFilter (see mask.js) — must happen before any scene
     // JSON containing a mask filter is ever restored (undo/redo, loadJSON), since Fabric's own
@@ -331,7 +357,8 @@ export class Editor {
     this.cv = new CvEngine(openCvUrl ? { openCvUrl } : undefined);
     this.tool = 'select';
     this.toolOpts = {
-      size: 30, opacity: 1, hardness: 0.7, color: '#ef6a2d', fill: '#ef6a2d', tolerance: 64, fontSize: 48, aligned: true,
+      size: 30, opacity: 1, hardness: 0.7, color: '#000000', fill: '#000000',   // black by default, like Photoshop's foreground colour
+      tolerance: 64, fontSize: 48, aligned: true,
       gradientType: 'linear', gradientStops: [{ offset: 0, color: '#ef6a2d' }, { offset: 1, color: '#7c3aed' }],
       addMode: false,   // sticky "keep adding every click to the selection" toggle for wand/objectselect/hoverselect
       paintNewLayer: false,   // paint tools retouch the image itself by default — see _bindPaintTarget
@@ -341,6 +368,10 @@ export class Editor {
     this._drag = null;
     this._snap = true;
     this._polyBuild = null;         // running lasso-poly/lasso-mag vertex list
+    this._penBuild = null;          // pen tool: path being drawn { nodes, closed, contId, undo, redo }
+    this._pathEdit = null;          // vector edit mode: { id, nodes, closed, sel:Set }
+    this._penDrag = null;           // the pen/vector-edit gesture in flight
+    this._penLast = null;           // last pointer position seen by the pen (hover refresh on Alt/Shift)
     this._edgeMap = null;           // magnetic-lasso Sobel edge map, built lazily per artboard capture
     this._lastWandSeed = null;      // last object-select click, scene px — feeds selectSimilar()
     this._hoverSeq = 0;             // monotonic token so a stale async hover preview can't land late
@@ -377,7 +408,27 @@ export class Editor {
      async call — e.g. wandPick's add/subtract on empty space — failed with nothing else to signal it) ── */
   on(ev, fn) { (this._listeners[ev] = this._listeners[ev] || []).push(fn); return () => this.off(ev, fn); }
   off(ev, fn) { this._listeners[ev] = (this._listeners[ev] || []).filter(f => f !== fn); }
-  _emit(ev, data) { (this._listeners[ev] || []).forEach(f => { try { f(data); } catch (e) { console.error(e); } }); }
+  _emit(ev, data) {
+    // Any scene change (an edit, undo/redo, opening an image, a canvas resize) invalidates what the
+    // click-to-select tools computed from the OLD scene: Object/Hover select's captured snapshot
+    // and the hover cache (keyed only by pointer cell, which the magic wand reads too). Without
+    // this, a pick after e.g. opening a different-size image was mapped through the old
+    // canvas — selections landed in the wrong place, even far outside the new artboard.
+    if (ev === 'change' || ev === 'resize') {
+      this._objSrc = null; this._objRegion = null;   // the next object pick re-captures the scene
+      if (this._hoverCache) this._hoverCache.clear();
+      // ...and the hover preview on screen, plus any hover pick still in flight (its seq no longer
+      // matches, so _runHover drops the result) — the next pointer move recomputes it.
+      this._hoverSeq = (this._hoverSeq || 0) + 1;
+      this._hoverPending = null;
+      if (this._hoverShown) { this._hoverShown = false; this._emit('hover', null); }
+    }
+    if (ev === 'hover') this._hoverShown = !!data;
+    if (ev === 'selection' && !this._selRestoring) this._recordSelection(data);
+    // the shape whose gradient handles are up was deleted (or undone away): drop the handles
+    if (ev === 'change' && this._gradEdit && !this._byId(this._gradEdit.id)) { clearTimeout(this._gradCommitT); this._gradCommitT = null; this._gradEdit = null; this._emitGradientAxis(null); }
+    (this._listeners[ev] || []).forEach(f => { try { f(data); } catch (e) { console.error(e); } });
+  }
 
   /* ── tools ────────────────────────────────────────────────────────────────────────────── */
   setTool(t) {
@@ -385,10 +436,15 @@ export class Editor {
     const prev = this.tool;
     if (t !== prev) this._drawLayer = null;   // a new brush session starts a new paint layer
     if (CLICK_LASSOS.includes(prev) && prev !== t) this._polyBuild = null;
-    // Switching away from Pen mid-path must tell listeners the in-progress path is gone too —
-    // _down/_move emit 'pen' on every point placed, so a host overlay (see the demo's `penBuild`)
-    // that only updates from that event would otherwise keep drawing the abandoned path forever.
-    if (prev === 'pen' && t !== 'pen' && this._penBuild) { this._penBuild = null; this._emit('pen', null); }
+    // Switching away from Pen mid-path keeps what was drawn (Figma: changing tools ends the path,
+    // it doesn't throw it away) — and always tells listeners, so a host overlay that only updates
+    // from 'pen' never keeps drawing an abandoned path.
+    if (prev === 'pen' && t !== 'pen' && this._penBuild) { const b = this._penBuild; this._penBuild = null; this._penDrag = null; this._commitPenBuild(b); }
+    // Vector edit mode survives Pen <-> Select (Figma's P / V inside a vector), anything else ends it.
+    if (this._pathEdit && t !== 'pen' && t !== 'select') this.exitPathEdit();
+    // Picking Pen with a path selected edits that path: add points on its segments, continue it
+    // from an open end, or click away to start a new one.
+    const penTarget = t === 'pen' && prev !== 'pen' && !this._pathEdit ? this.fc.getActiveObject() : null;
     // Switching TO the Select/Move tool with a live pixel selection lifts it into a movable layer
     // first — Select is move-only (drawing a marquee is what the marquee/lasso/wand tools are for),
     // so without this a selection made with any other tool would be stranded: nothing to drag it
@@ -410,8 +466,19 @@ export class Editor {
       // above, since setTool() is about to discardActiveObject() a few lines down.
       const active = this.fc.getActiveObject() || (this._lastActiveId && this._byId(this._lastActiveId));
       const target = active && active.type === 'image' && active.role !== 'bg' && !(active.angle % 360) ? active : null;
-      this._cropTarget = target ? target.id : null;
-      if (target) {
+      // Any other layer (shape, path, text, group) has no pixel window to move, so it's cropped
+      // with a rect clipPath instead — see _cropClipTarget/applyCrop.
+      const clipTarget = !target && this._cropClipTarget(active) ? active : null;
+      this._cropTarget = (target || clipTarget) ? (target || clipTarget).id : null;
+      if (clipTarget) {
+        // Re-cropping shows the whole shape again with the box on the previous crop window, same
+        // as an image; _restoreCropTarget() puts the old clip back if the user leaves without applying.
+        const prev = clipTarget.clipPath || null;
+        this._cropRestore = { id: clipTarget.id, clipPath: prev };
+        const b = clipTarget.getBoundingRect(true, true);
+        this.crop = prev ? this._clipSceneRect(clipTarget, prev) : { x: b.left, y: b.top, w: b.width, h: b.height };
+        clipTarget.clipPath = null; clipTarget.dirty = true;
+      } else if (target) {
         // Re-cropping an already-cropped image must show the FULL original source again (not just
         // the sliver currently visible) with the box seeded to the PREVIOUS crop window — "show the
         // whole image with the current crop selected," same as a fresh crop but starting from
@@ -454,11 +521,19 @@ export class Editor {
     // longer see the origin of is more surprising than being asked to alt-click again.
     if ((prev === 'clone' || prev === 'heal') && t !== 'clone' && t !== 'heal') this.clearCloneSource();
     if (!PAINT_TOOLS.includes(t) && this._brushCursor) { this._brushCursor = null; this._emit('brushcursor', null); }
-    if (t !== 'gradient' && this._gradAxis) this._emitGradientAxis(null);
+    if (t !== 'gradient' && (this._gradAxis || this._gradEdit)) { this._gradEdit = null; this._emitGradientAxis(null); }
+    // Coming back to Gradient with a shape whose fill is a dragged gradient: show its handles.
+    if (t === 'gradient' && prev !== 'gradient') {
+      const a = this.fc.getActiveObject() || (this._lastActiveId && this._byId(this._lastActiveId));
+      if (a) this._beginGradEdit(a);
+    }
     if (drawing) this.fc.discardActiveObject();
+    if (penTarget && this.isEditablePath(penTarget)) this.editPath(penTarget.id);
+    if (this._pathEdit) this._lockForPathEdit();
     this.fc.renderAll();
     this._emit('tool', t);
     this._emit('crop', this.crop);
+    if (this._pathEdit || t === 'pen') this._emitPen();
   }
 
   /* Paint tools hide the OS cursor entirely — the shells draw a brush-footprint ring at the pointer
@@ -468,12 +543,22 @@ export class Editor {
     if (t === 'hand') return 'grab';
     if (t === 'type') return 'text';
     if (PAINT_TOOLS.includes(t)) return 'none';
+    if (t === 'pen') return penCursor('pen');
     return t === 'select' ? 'default' : 'crosshair';
   }
 
   setToolOptions(patch) {
     this.toolOpts = { ...this.toolOpts, ...patch };
     this._emit('tooloptions', this.toolOpts);
+    // Editing the stops while a shape's gradient handles are up restyles that shape (one undo
+    // step per burst, so dragging a colour picker isn't fifty history entries).
+    const ge = patch.gradientStops && this._gradEdit && this._byId(this._gradEdit.id);
+    if (ge) {
+      this._applyObjectGradient(ge, this._gradEdit.from, this._gradEdit.to);
+      this._emitGradientAxis(this._gradEdit.from, this._gradEdit.to);
+      clearTimeout(this._gradCommitT);
+      this._gradCommitT = setTimeout(() => { this._gradCommitT = null; this.commit('gradient-fill'); }, 300);
+    }
     // A size/hardness change must resize the ring under a stationary pointer, not wait for a move.
     if (this._brushCursor && (patch.size != null || patch.hardness != null)) {
       this._brushCursor = { ...this._brushCursor, size: this.toolOpts.size, hardness: this.toolOpts.hardness };
@@ -487,9 +572,33 @@ export class Editor {
 
   _bindPointer() {
     const fc = this.fc;
-    fc.on('mouse:down', (opt) => this._down(opt));
+    // Right button (fireRightClick delivers it as mouse:down/up with button 3) is never a tool
+    // click — it opens the context menu, via the native contextmenu event below (which also
+    // covers Ctrl-click on a Mac and the keyboard's menu key).
+    const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+    const isRight = (opt) => !!opt && (opt.button === 3 || (opt.e && (opt.e.button === 2 || (isMac && opt.e.ctrlKey && opt.e.button === 0))));
+    fc.on('mouse:down', (opt) => { if (!isRight(opt)) this._down(opt); });
     fc.on('mouse:move', (opt) => this._move(opt));
-    fc.on('mouse:up', () => this._up());
+    fc.on('mouse:up', (opt) => { if (!isRight(opt)) this._up(); });
+    this._onCtxMenu = (e) => {
+      e.preventDefault();
+      this.openContextMenu(this.fc.getPointer(e), { x: e.clientX, y: e.clientY });
+    };
+    if (fc.upperCanvasEl) fc.upperCanvasEl.addEventListener('contextmenu', this._onCtxMenu);
+    // Double-click a path (Select tool) to edit its points; inside edit mode, double-click a
+    // point to toggle corner/smooth, or a segment to add a point there.
+    fc.on('mouse:dblclick', (opt) => {
+      if (this.tool !== 'select') return;
+      const pe = this._pathEdit;
+      if (!pe) { if (opt.target && this.isEditablePath(opt.target)) this.editPath(opt.target.id); return; }
+      const hit = this._penHit(this._pt(opt), opt.e || {});
+      if (hit.kind === 'anchor' || hit.kind === 'continue') {
+        toggleSmooth(pe.nodes, pe.closed, hit.i);
+      } else if (hit.kind === 'segment') {
+        pe.sel = new Set([splitSegment(pe.nodes, pe.closed, hit.seg, hit.t)]);
+      } else return;
+      this._writePathEdit(); this.commit('path-edit'); this._emitPen();
+    });
     // Leaving the canvas must drop the brush ring, or it stays frozen at the last point it saw.
     fc.on('mouse:out', (opt) => { if (!opt || !opt.target) { this._brushCursor = null; this._emit('brushcursor', null); } });
     /* Wheel zoom around the cursor. The old 0.999^deltaY curve felt dead: a trackpad pinch
@@ -643,6 +752,13 @@ export class Editor {
 
   /* Which layer the paint tools retouch: the active one if it holds pixels, else the topmost
      image (the photo you opened), else the topmost paint layer. */
+  /* The eraser's target when it's a vector layer (shape, path, text, group): the selected (or
+     last-selected) layer, same rule as _paintTargetLayer. Such layers are erased through a mask. */
+  _vectorEraseTarget() {
+    const o = this.fc.getActiveObject() || (this._lastActiveId && this._byId(this._lastActiveId));
+    return o && !o.locked && isVectorMaskable(o) && this.fc.getObjects().includes(o) ? o : null;
+  }
+
   _paintTargetLayer() {
     const active = this.fc.getActiveObject() || (this._lastActiveId && this._byId(this._lastActiveId));
     if (active && !active.locked && (active.type === 'image' || active.role === 'paint')) return active;
@@ -654,13 +770,122 @@ export class Editor {
      the only feedback is the painted result itself, which makes the angle and especially the
      falloff length pure guesswork — every other editor shows this line while you drag.
      `type` is echoed so a radial gradient can be drawn as a radius + circle instead of an axis. */
+  /* Topmost shape under `pt` that a gradient can fill: a visible, unlocked, top-level vector layer
+     with a fill (shapes, filled paths, text). Images, paint layers and the background are never
+     picked this way — dragging over them paints, as before. Drawing tools turn Fabric's own
+     hit-testing off (evented:false), hence the manual walk. */
+  _gradientShapeAt(pt) {
+    const P = new this.fabric.Point(pt.x, pt.y);
+    const FILLABLE = ['rect', 'ellipse', 'circle', 'triangle', 'polygon', 'path', 'i-text', 'text', 'textbox'];
+    const objs = this.fc.getObjects();
+    for (let i = objs.length - 1; i >= 0; i--) {
+      const o = objs[i];
+      if (!o.visible || o.locked || !o.id || o.role === 'bg' || o.role === 'paint' || o.excludeFromExport) continue;
+      if (!FILLABLE.includes(o.type) || (o.type === 'path' && !o.fill)) continue;
+      if (!o.aCoords) o.setCoords();
+      if (o.containsPoint(P, null, true, true)) return o;
+    }
+    return null;
+  }
+
+  /* Re-open handles on an object whose fill is a pixel-unit linear gradient (what dragging makes);
+     its stops become the tool's stops so re-aiming keeps the same colours. */
+  _beginGradEdit(o) {
+    const g = o && o.type !== 'activeSelection' && o.fill && typeof o.fill === 'object' && o.fill.type === 'linear' && o.fill.gradientUnits !== 'percentage' ? o.fill : null;
+    if (!g || !o.id) return false;
+    const c = g.coords;
+    const from = this._gradLocalToScene(o, { x: c.x1, y: c.y1 }), to = this._gradLocalToScene(o, { x: c.x2, y: c.y2 });
+    // Fabric holds resolved rgba() strings; the stop editors (and <input type=color>) want hex + alpha.
+    this.toolOpts = { ...this.toolOpts, gradientType: 'linear', gradientStops: (g.colorStops || []).map(s => ({ offset: s.offset, ...splitGradientStopColor(s.color) })) };
+    this._emit('tooloptions', this.toolOpts);
+    this._gradEdit = { id: o.id, from, to };
+    this._emitGradientAxis(from, to);
+    return true;
+  }
+  /* Slider drags fire dozens of inputs: apply each live, but record ONE undo step once the burst
+     settles (or right away if something else needs history first — see _flushLiveCommit). */
+  _liveCommit(label) {
+    clearTimeout(this._liveCommitT);
+    this._liveCommitLabel = label;
+    this._liveCommitT = setTimeout(() => { this._liveCommitT = null; this.commit(label); }, 300);
+  }
+  _flushLiveCommit() {
+    if (!this._liveCommitT) return;
+    clearTimeout(this._liveCommitT); this._liveCommitT = null;
+    this.commit(this._liveCommitLabel || 'edit');
+  }
+  _flushGradCommit() {
+    if (!this._gradCommitT) return;
+    clearTimeout(this._gradCommitT); this._gradCommitT = null;
+    this.commit('gradient-fill');
+  }
+  _endGradEdit() {
+    this._flushGradCommit();
+    this._gradEdit = null;
+    this._emitGradientAxis(null);
+  }
+  /* 'from' | 'to' | 'line' | null — the ends' dots on the axis and the line between them. The
+     colour swatches are _gradStopHit's. */
+  _gradHit(pt) {
+    const g = this._gradEdit;
+    if (!g) return null;
+    const z = this.fc.getZoom() || 1, tol = 9 / z;
+    const dx = g.to.x - g.from.x, dy = g.to.y - g.from.y, len = Math.hypot(dx, dy);
+    const nx = len ? -dy / len : 0, ny = len ? dx / len : 0, off = 22 / z;
+    const near = (p) => Math.hypot(pt.x - p.x, pt.y - p.y) <= tol;
+    for (const which of ['to', 'from']) if (near(g[which])) return which;
+    if (len > 0) {
+      const t = ((pt.x - g.from.x) * dx + (pt.y - g.from.y) * dy) / (len * len);
+      if (t > 0 && t < 1 && Math.hypot(pt.x - (g.from.x + dx * t), pt.y - (g.from.y + dy * t)) <= 6 / z) return 'line';
+    }
+    return null;
+  }
+  /* Index (into toolOpts.gradientStops) of the colour swatch under `pt`, or -1. Swatches sit
+     22 screen-px to the side of each stop's point on the axis — same geometry the shells' 
+     drawGradientAxis uses. */
+  _gradStopHit(pt) {
+    const g = this._gradEdit, a = this._gradAxis;
+    if (!g || !a) return -1;
+    const z = this.fc.getZoom() || 1;
+    const dx = g.to.x - g.from.x, dy = g.to.y - g.from.y, len = Math.hypot(dx, dy);
+    if (!len) return -1;
+    const nx = -dy / len, ny = dx / len, off = 22 / z;
+    let best = -1, bd = 11 / z;
+    a.stops.forEach(st => {
+      if (st.i == null) return;
+      const d = Math.hypot(pt.x - (g.from.x + dx * st.offset + nx * off), pt.y - (g.from.y + dy * st.offset + ny * off));
+      if (d <= bd) { bd = d; best = st.i; }
+    });
+    return best;
+  }
+  _gradSwatchPoint(i) {
+    const g = this._gradEdit, a = this._gradAxis, st = a && a.stops.find(s => s.i === i);
+    if (!g || !st) return null;
+    const z = this.fc.getZoom() || 1;
+    const dx = g.to.x - g.from.x, dy = g.to.y - g.from.y, len = Math.hypot(dx, dy) || 1;
+    return { x: g.from.x + dx * st.offset - dy / len * 22 / z, y: g.from.y + dy * st.offset + dx / len * 22 / z };
+  }
+  /* Recolour one stop (index into toolOpts.gradientStops) — the shape being edited follows live
+     (see setToolOptions). Keeps the stop's own alpha. */
+  setGradientStopColor(i, color) {
+    const stops = (this.toolOpts.gradientStops || []).slice();
+    if (!stops[i]) return;
+    stops[i] = { ...stops[i], color };
+    this.setToolOptions({ gradientStops: stops });
+  }
   _emitGradientAxis(from, to) {
     this._gradAxis = from ? {
       from: { x: from.x, y: from.y }, to: { x: to.x, y: to.y },
       type: this.toolOpts.gradientType || 'linear',
       // The stops ride along the axis as colour swatches (Figma-style), so the shell needs both
       // each stop's colour and its 0..1 position to place them.
-      stops: normalizeGradientStops(this.toolOpts.gradientStops).map(s => ({ offset: s.offset, color: s.color })),
+      // `i` is the stop's index in toolOpts.gradientStops (normalizing sorts them), so a click on a
+      // swatch can recolour the right one.
+      stops: (() => {
+        const src = this.toolOpts.gradientStops || [], clamp = (v) => Math.max(0, Math.min(1, v));
+        const order = src.length ? src.map((_, i) => i).sort((a, b) => clamp(src[a].offset) - clamp(src[b].offset)) : [];
+        return normalizeGradientStops(src).map((s, k) => ({ offset: s.offset, color: s.color, i: order.length ? order[k] : null }));
+      })(),
     } : null;
     this._emit('gradientaxis', this._gradAxis);
     this.fc.requestRenderAll();
@@ -696,7 +921,7 @@ export class Editor {
     if (this._maskEdit && (t === 'brush' || t === 'pencil' || t === 'eraser')) {
       const layer = this._byId(this._maskEdit.layerId);
       if (layer && layer.maskCanvas) {
-        maskStamp(layer.maskCanvas.getContext('2d'), pt.x, pt.y, o, t === 'eraser');
+        this._maskPaint(layer, pt, null, o, t === 'eraser');
         this._refreshMaskFilter(layer);
         this._maskDrag = pt;
         this.fc.requestRenderAll();
@@ -714,6 +939,7 @@ export class Editor {
       this._emitPerspective();
       return;
     }
+    if ((t === 'pen' || this._pathEdit) && this._penDown(pt, e)) return;
     if (t === 'select' && e.altKey) {
       const target = this.fc.findTarget(e);
       if (target && target.selectable && !target.locked) {
@@ -726,6 +952,16 @@ export class Editor {
     }
     if (PAINT_TOOLS.includes(t)) {
       this._applySelClip();
+      const vtarget = t === 'eraser' && this._vectorEraseTarget();
+      if (vtarget) {
+        // Erasing a vector layer paints black into its mask instead — the layer stays editable.
+        if (!vtarget.maskCanvas) this._addVectorMask(vtarget);
+        this._maskPaint(vtarget, pt, null, { ...o, color: '#000000' }, false);
+        this._refreshMaskFilter(vtarget);
+        this._drag = { kind: 'vmask-erase', id: vtarget.id, last: pt };
+        this._emitBrushCursor(pt, !!e.altKey, !!e.shiftKey);
+        return;
+      }
       this._bindPaintTarget();
       const r = this.engine.down(t, pt, o);
       // A source-set click is not a stroke — leaving _drag set would make the following move paint.
@@ -739,12 +975,16 @@ export class Editor {
       // handles (or its interior) resizes/moves it instead of starting a brand-new selection —
       // otherwise every click-drag on top of an existing marquee would just replace it, and the
       // only way to nudge a selection's edge would be to redraw the whole thing from scratch.
-      if (t !== 'lasso' && this.selection && (this.selection.kind === 'rect' || this.selection.kind === 'ellipse')) {
+      // Shift-drag adds to / Alt-drag subtracts from an existing selection (Photoshop, and what the
+      // wand tools already do); the new shape is drawn on its own and combined on release.
+      const combine = this.selection && !this.selection.invert ? (e.shiftKey ? 'add' : e.altKey ? 'sub' : null) : null;
+      if (!combine && t !== 'lasso' && this.selection && (this.selection.kind === 'rect' || this.selection.kind === 'ellipse')) {
         const handle = getSelectionHandle(this.selection, pt, this.fc.getZoom());
         if (handle) { this._drag = { kind: 'resize-sel', handle, last: pt, down: pt }; return; }
       }
+      const base = this.selection;
       this.selection = startSelection(t, pt);
-      this._drag = { kind: 'sel' };
+      this._drag = { kind: 'sel', combine, base };
       return;
     }
     if (CLICK_LASSOS.includes(t)) {
@@ -763,7 +1003,7 @@ export class Editor {
       return;
     }
     if (t === 'wand') {
-      this.wandPick(pt, { add: e.shiftKey || this.toolOpts.addMode, subtract: e.altKey });
+      this._trackPick(this.wandPick(pt, { add: e.shiftKey || this.toolOpts.addMode, subtract: e.altKey }), pt);
       return;
     }
     if (t === 'objectselect-bbox') {
@@ -791,14 +1031,14 @@ export class Editor {
       const cyc = !!(this._objCycle && Math.abs(this._objCycle.x - pt.x) < 10 && Math.abs(this._objCycle.y - pt.y) < 10);
       const cached = !cyc && this._hoverCache && this._hoverCache.get(this._hoverCellKey(pt));
       if (cached) this._commitObjectPoly(cached, { add, subtract: e.altKey });
-      else this.selectObjectAt(pt, { add, subtract: e.altKey, cycle: true });
+      else this._trackPick(this.selectObjectAt(pt, { add, subtract: e.altKey, cycle: true }), pt);
       return;
     }
     if (t === 'magicwand') {
       const add = e.shiftKey || this.toolOpts.addMode;
       const cached = this._hoverCache && this._hoverCache.get(this._hoverCellKey(pt));
       if (cached) this._commitPoly(cached, { add, subtract: e.altKey });
-      else this.wandPick(pt, { add, subtract: e.altKey });
+      else this._trackPick(this.wandPick(pt, { add, subtract: e.altKey }), pt);
       return;
     }
     if (SHAPE_TOOLS.includes(t)) {
@@ -823,14 +1063,23 @@ export class Editor {
       return;
     }
     if (t === 'bucket') {
-      this._applySelClip();
+      if (this.selection) this._applySelClip();
+      else {
+        // No selection: fill the contiguous area of similar colour under the click (Photoshop's
+        // paint bucket), not the whole artboard.
+        this.engine.captureFlat();
+        const area = this.engine._flat && wandSelect(this.engine._flat, pt, 32);
+        if (!area) return;
+        this.engine.setClip(selectionToPath2D(area, this.W, this.H), selectionFillRule(area));
+      }
       this.engine.fill(this.toolOpts.color);
+      this.engine.setClip(null);
       this.commit('bucket');
       return;
     }
     if (t === 'gradient') {
-      // Dragging onto an active vector object with no pixel selection applies the gradient
-      // directly as that object's own fill (scales/rotates with it, Fabric's native gradient)
+      // Dragging on a vector shape (or, off any shape, onto the active one) with no pixel
+      // selection applies the gradient directly as that object's own fill (scales/rotates with it, Fabric's native gradient)
       // instead of painting a raster stripe into the paint layer — same "object gradient" mode
       // the reference editor's own gradient tool has, just generalized to Canvasmith's multi-stop
       // gradientStops instead of a hardcoded 2-color pair. bg is excluded unless it's a plain
@@ -839,10 +1088,45 @@ export class Editor {
       // Same _lastActiveId fallback as selectActiveOrCenter() (objectselect-bbox) — setTool()
       // already discarded Fabric's own active object by the time this click lands, since
       // 'gradient' is a drawing tool like any other.
+      // An object gradient stays editable after the drag (Figma-style): its axis handles remain
+      // on screen until you click outside the shape. Grab an end (its dot or colour swatch) to
+      // re-aim it, the line to slide the whole ramp; a drag elsewhere inside the shape redraws it.
+      const ge = this._gradEdit && this._byId(this._gradEdit.id);
+      if (ge) {
+        // A colour swatch: click it to pick that stop's colour; drag an end's swatch to re-aim the
+        // gradient (like its dot), or a middle stop's to slide it along the axis.
+        const si = this._gradStopHit(pt);
+        if (si >= 0) {
+          const off = Math.max(0, Math.min(1, this.toolOpts.gradientStops[si].offset));
+          const which = off <= 0 ? 'from' : off >= 1 ? 'to' : null;
+          this._drag = { kind: which ? 'grad-handle' : 'grad-stop', which, stop: si, obj: ge, moved: false, down: pt };
+          return;
+        }
+        const hit = this._gradHit(pt);
+        if (hit === 'from' || hit === 'to') { this._drag = { kind: 'grad-handle', which: hit, obj: ge, moved: false, down: pt }; return; }
+        if (hit === 'line') { this._drag = { kind: 'grad-move', obj: ge, down: pt, start: { ...this._gradEdit }, moved: false }; return; }
+      }
+      // The shape under the pointer is the target — no need to go back and select it first. A drag
+      // that starts on a different shape than the one being edited simply moves on to that one.
+      const under = !this.selection && this._gradientShapeAt(pt);
+      if (under) {
+        if (ge && ge !== under) this._endGradEdit();
+        this._lastActiveId = under.id;
+        this._drag = { kind: 'gradient-obj', from: pt, obj: under, moved: false };
+        if (!ge || ge !== under) this._emitGradientAxis(pt, pt);
+        return;
+      }
+      if (ge) {
+        // Clicked off every shape: done editing — handles go, and the shape stops being the
+        // implicit target (a following drag on empty canvas paints, it doesn't restyle it).
+        this._endGradEdit();
+        this._lastActiveId = null;
+        return;
+      }
       const active = this.fc.getActiveObject() || (this._lastActiveId && this._byId(this._lastActiveId));
       const objTarget = active && active.type !== 'activeSelection' && (active.role !== 'bg' || active.type === 'rect') && !this.selection ? active : null;
       if (objTarget) {
-        this._drag = { kind: 'gradient-obj', from: pt, obj: objTarget };
+        this._drag = { kind: 'gradient-obj', from: pt, obj: objTarget, moved: false };
         this._emitGradientAxis(pt, pt);
         return;
       }
@@ -853,7 +1137,7 @@ export class Editor {
     }
     if (t === 'eyedropper') {
       const hex = this.engine.sample(pt);
-      if (hex) { this.setToolOptions({ color: hex }); this._emit('eyedropper', hex); }
+      if (hex) { this.setToolOptions({ color: hex, fill: hex }); this._emit('eyedropper', hex); }
       return;
     }
     if (t === 'crop' && this.crop) {
@@ -861,19 +1145,11 @@ export class Editor {
       if (handle) this._drag = { kind: 'crop', handle, last: pt };
       return;
     }
-    if (t === 'pen') {
-      if (!this._penBuild) this._penBuild = startPolyBuild();
-      const next = polyBuildAdd(this._penBuild, pt, 12 / (this.fc.getZoom() || 1));
-      this._penBuild = next;
-      if (next.closed) { this.finishPen(); return; }
-      this._emit('pen', { pts: next.pts.slice() });
-      this.fc.renderAll();
-      return;
-    }
   }
 
   _move(opt) {
     const pt = this._pt(opt), e = opt.e || {};
+    if (this._pickBusy) { this._pickBusy = { x: pt.x, y: pt.y }; this._emit('pickbusy', this._pickBusy); }
     if (this._persp && !(this._drag && this._drag.kind === 'pan')) {
       const st = this._persp;
       if (st.drag >= 0) {
@@ -893,7 +1169,7 @@ export class Editor {
     if (this._maskEdit && this._maskDrag && (this.tool === 'brush' || this.tool === 'pencil' || this.tool === 'eraser')) {
       const layer = this._byId(this._maskEdit.layerId);
       if (layer && layer.maskCanvas) {
-        maskLine(layer.maskCanvas.getContext('2d'), this._maskDrag, pt, { ...this.toolOpts }, this.tool === 'eraser');
+        this._maskPaint(layer, pt, this._maskDrag, { ...this.toolOpts }, this.tool === 'eraser');
         this._refreshMaskFilter(layer);
         this.fc.requestRenderAll();
       }
@@ -906,13 +1182,14 @@ export class Editor {
       this.fc.renderAll();
       return;
     }
-    if (this.tool === 'pen' && this._penBuild) {
-      this._emit('pen', polyBuildPreview(this._penBuild, pt));
-      this.fc.renderAll();
-      return;
-    }
+    if ((this.tool === 'pen' || this._pathEdit) && !(this._drag && this._drag.kind === 'pan') && this._penMove(pt, e)) return;
     if (this.tool === 'hoverselect' || this.tool === 'objectselect') { this._hoverMove(pt); return; }
     const d = this._drag;
+    if (!d && this.tool === 'gradient' && this._gradEdit) {
+      const hit = this._gradHit(pt);
+      this.fc.setCursor(this._gradStopHit(pt) >= 0 ? 'pointer' : hit === 'from' || hit === 'to' ? 'grab' : hit === 'line' ? 'move' : this.fc.defaultCursor);
+      return;
+    }
     if (!d) return;
     if (d.kind === 'pan') {
       const vpt = this.fc.viewportTransform;
@@ -922,6 +1199,15 @@ export class Editor {
       return;
     }
     if (d.kind === 'paint') { this.engine.move(this.tool, pt, { ...this.toolOpts }); return; }
+    if (d.kind === 'vmask-erase') {
+      const layer = this._byId(d.id);
+      if (layer && layer.maskCanvas) {
+        this._maskPaint(layer, pt, d.last, { ...this.toolOpts, color: '#000000' }, false);
+        this._refreshMaskFilter(layer);
+      }
+      d.last = pt;
+      return;
+    }
     if (d.kind === 'sel') { updateSelection(this.selection, pt, { square: e.shiftKey }); this.fc.renderAll(); this._emit('selection', this.selection); return; }
     if (d.kind === 'resize-sel') {
       this.selection = dragSelectionRect(this.selection, d.handle, pt.x - d.last.x, pt.y - d.last.y);
@@ -938,9 +1224,43 @@ export class Editor {
       return;
     }
     if (d.kind === 'gradient-obj') {
+      // A click without a real drag must not collapse the fill into a zero-length ramp.
+      if (!d.moved && Math.hypot(pt.x - d.from.x, pt.y - d.from.y) < 3 / (this.fc.getZoom() || 1)) return;
+      d.moved = true;
       const to = snapAxis(d.from, pt, e.shiftKey);
       this._applyObjectGradient(d.obj, d.from, to);
       this._emitGradientAxis(d.from, to);
+      return;
+    }
+    if ((d.kind === 'grad-handle' || d.kind === 'grad-stop') && !d.moved && Math.hypot(pt.x - d.down.x, pt.y - d.down.y) < 3 / (this.fc.getZoom() || 1)) return;
+    if (d.kind === 'grad-stop') {
+      d.moved = true;
+      const g = this._gradEdit, dx = g.to.x - g.from.x, dy = g.to.y - g.from.y, l2 = dx * dx + dy * dy || 1;
+      const t = Math.max(0, Math.min(1, ((pt.x - g.from.x) * dx + (pt.y - g.from.y) * dy) / l2));
+      const stops = this.toolOpts.gradientStops.slice();
+      stops[d.stop] = { ...stops[d.stop], offset: Math.round(t * 1000) / 1000 };
+      this.setToolOptions({ gradientStops: stops });   // restyles the shape + redraws the axis
+      return;
+    }
+    if (d.kind === 'grad-handle') {
+      d.moved = true;
+      const g = this._gradEdit, other = d.which === 'from' ? g.to : g.from;
+      // keep the grab offset: dragging an end by its swatch (22px to the side) mustn't snap the
+      // end onto the pointer
+      if (!d.grab) d.grab = { x: g[d.which].x - d.down.x, y: g[d.which].y - d.down.y };
+      const p = snapAxis(other, { x: pt.x + d.grab.x, y: pt.y + d.grab.y }, e.shiftKey);
+      g[d.which] = { x: p.x, y: p.y };
+      this._applyObjectGradient(d.obj, g.from, g.to);
+      this._emitGradientAxis(g.from, g.to);
+      return;
+    }
+    if (d.kind === 'grad-move') {
+      d.moved = true;
+      const dx = pt.x - d.down.x, dy = pt.y - d.down.y, g = this._gradEdit;
+      g.from = { x: d.start.from.x + dx, y: d.start.from.y + dy };
+      g.to = { x: d.start.to.x + dx, y: d.start.to.y + dy };
+      this._applyObjectGradient(d.obj, g.from, g.to);
+      this._emitGradientAxis(g.from, g.to);
       return;
     }
     if (d.kind === 'crop') {
@@ -955,8 +1275,10 @@ export class Editor {
   _up() {
     if (this._persp && this._persp.drag >= 0) { this._persp.drag = -1; this._emitPerspective(); return; }
     if (this._maskEdit && this._maskDrag) { this._maskDrag = null; this._flushFrameJob('mask'); this.commit('mask-paint'); return; }
+    if (this._penDrag) { this._penUp(); return; }
     const d = this._drag; this._drag = null;
     if (!d) return;
+    if (d.kind === 'vmask-erase') { this._flushFrameJob('mask'); this.commit('erase'); return; }
     if (d.kind === 'paint') {
       const painted = this.engine._direct && this.engine._direct.layer;
       this.engine.up(); this.engine.setClip(null);
@@ -964,10 +1286,19 @@ export class Editor {
       // and clone/heal must sample the retouched result (captureFlat reads the scene, not this
       // scratch canvas). Also stops a later tool switch from writing onto a stale target.
       this.engine.setDirectTarget(null);
-      if (painted && painted.role === 'paint') this._trimPaintLayer(painted);
+      if (painted && painted.role === 'paint') { this._trimPaintLayer(painted); this._lastActiveId = painted.id; }   // the layer you just painted is the one you're working on (eraser targets it next)
       this.commit('stroke');
     }
-    if (d.kind === 'sel') { this.selection = finalizeSelection(this.selection); this._emit('selection', this.selection); }
+    if (d.kind === 'sel') {
+      const fresh = finalizeSelection(this.selection);
+      if (d.combine) {
+        this.selection = d.base;   // put the original back, then fold the new shape into it
+        const ring = fresh && (selectionPolys(fresh) || [])[0];
+        if (!ring) this._emit('selection', this.selection);
+        else if (d.combine === 'add') this.addToSelection(ring);
+        else this.subtractFromSelection(ring);
+      } else { this.selection = fresh; this._emit('selection', this.selection); }
+    }
     if (d.kind === 'resize-sel') {
       // A plain click (no real drag) on the marquee's own interior/handles is a no-op resize —
       // Ditto has no grab-to-move for marquees at all, so the same click there just restarts a
@@ -981,7 +1312,24 @@ export class Editor {
       this._emit('selection', this.selection);
     }
     if (d.kind === 'gradient') { this.engine.setClip(null); this._emitGradientAxis(null); this.commit('gradient'); }
-    if (d.kind === 'gradient-obj') { this._emitGradientAxis(null); this.commit('gradient-fill'); }
+    if (d.kind === 'gradient-obj') {
+      if (d.moved) {
+        // keep the axis up as live, draggable handles
+        const g = this._gradAxis;
+        this._gradEdit = { id: d.obj.id, from: { ...g.from }, to: { ...g.to } };
+        this.commit('gradient-fill');
+      } else if (!this._gradEdit && !this._beginGradEdit(d.obj)) this._emitGradientAxis(null);   // a click shows an existing gradient's handles
+    }
+    if ((d.kind === 'grad-handle' || d.kind === 'grad-move') && d.moved) this.commit('gradient-fill');
+    if ((d.kind === 'grad-handle' || d.kind === 'grad-stop') && !d.moved && d.stop != null) {
+      // Ask the shell to open a colour picker for this stop, anchored at its swatch. Emitted inside
+      // the mouseup handler so the shell is still within the user gesture showPicker() needs.
+      const st = this.toolOpts.gradientStops[d.stop], at = this._gradSwatchPoint(d.stop);
+      const vt = this.fc.viewportTransform, r = this.fc.upperCanvasEl.getBoundingClientRect();
+      const { color, alpha } = splitGradientStopColor(st.alpha != null && st.alpha < 1 ? rgba(st.color, st.alpha) : st.color);
+      this._emit('gradientstoppick', { index: d.stop, color, alpha, x: at.x, y: at.y,
+        clientX: r.left + at.x * vt[0] + vt[4], clientY: r.top + at.y * vt[3] + vt[5] });
+    }
     if (d.kind === 'shape') { this.commit('shape'); this.setTool('select'); this.fc.setActiveObject(d.obj); }
     if (d.kind === 'pan' && (this.tool === 'hand' || this._spaceDown)) this.fc.setCursor('grab');
   }
@@ -1042,33 +1390,499 @@ export class Editor {
     this.fc.renderAll();
   }
 
-  /* ── pen tool: click-to-place vertices into a real filled fabric.Polygon layer (not a
-     selection) — Enter/double-click-near-start finishes, Escape cancels. Reuses the same
-     poly-build accumulator as the polygonal lasso (startPolyBuild/polyBuildAdd), since "click to
-     place points, snap-close near the start" is identical geometry either way. */
-  finishPen() {
-    const build = finishPolyBuild(this._penBuild, false);
-    this._penBuild = null;
-    this._emit('pen', null);
-    if (!build) { this.fc.renderAll(); return null; }
-    const pts = build.pts;
-    const minX = Math.min(...pts.map(p => p.x)), minY = Math.min(...pts.map(p => p.y));
-    const obj = new this.fabric.Polygon(pts.map(p => ({ x: p.x - minX, y: p.y - minY })), {
-      left: minX, top: minY, originX: 'left', originY: 'top',
-      fill: this.toolOpts.fill || this.toolOpts.color || '#ef6a2d',
-      stroke: this.toolOpts.stroke || null, strokeWidth: this.toolOpts.strokeWidth || 0,
+  /* ── pen tool + vector edit mode ──────────────────────────────────────────────────────────
+     Figma's pen, on real bezier nodes (pen.js holds the geometry):
+       click = corner point · click-drag = smooth point with mirrored handles (⌥ breaks the
+       mirror, ⇧ snaps to 45°, Space moves the point being placed) · click the first point to
+       close (drag there to curve the closing segment) · click the last point to drop its out
+       handle, drag from it to pull a new one · Enter/Escape finish, Backspace removes the last
+       point, ⌘Z/⌘⇧Z step points back/forward while drawing.
+     A finished path is a real fabric.Path layer (closed = filled, open = stroked). Double-click
+     it, press Enter on it, or pick Pen with it selected for vector edit mode: drag points and
+     handles, drag a segment to move it (⌘-drag bends it), double-click a segment or Pen-click it
+     to add a point, Delete removes points, double-click / ⌥-click a point toggles corner/smooth,
+     Pen-click an open end to keep drawing from it. Every finished gesture is one undo step.
+
+     While editing, the layer is kept as an untransformed Path whose data IS the scene geometry
+     (see _bakePathForEdit), so a node edit is just "rewrite the path data". */
+  _penTol(px = 7) { return px / (this.fc.getZoom() || 1); }
+
+  isEditablePath(o) {
+    if (!o || o.group || o.locked || o.role === 'bg' || o.role === 'paint' || isContainerGroup(o)) return false;
+    if (o.type !== 'path' && o.type !== 'polygon' && o.type !== 'polyline') return false;
+    // A mask is mapped onto the layer's own bounding box, which every node edit resizes — it would
+    // smear across the new shape. Masked layers aren't point-editable (remove the mask first).
+    if (o.maskCanvas) return false;
+    return o.type !== 'path' || !!commandsToNodes(o.path || []);
+  }
+  _isPlainPath(o) {
+    return o.type === 'path' && !o.angle && Math.abs(o.scaleX || 1) === 1 && Math.abs(o.scaleY || 1) === 1
+      && !o.skewX && !o.skewY && !o.flipX && !o.flipY;
+  }
+
+  /* The layer's geometry as scene-space nodes, through its full transform. */
+  _pathNodesOf(o) {
+    const F = this.fabric, m = o.calcTransformMatrix(), off = o.pathOffset || { x: 0, y: 0 };
+    const map = (p) => { const q = F.util.transformPoint(new F.Point(p.x - off.x, p.y - off.y), m); return { x: q.x, y: q.y }; };
+    if (o.type === 'path') return commandsToNodes(o.path || [], map);
+    const nodes = (o.points || []).map(p => { const q = map(p); return penNode(q.x, q.y); });
+    return nodes.length ? { nodes, closed: o.type === 'polygon' } : null;
+  }
+
+  /* Make the layer a plain, untransformed fabric.Path drawn from `geo`. Rotation/scale/skew get
+     baked into the points (the stroke keeps its on-screen weight); a polygon/polyline is swapped
+     for an equivalent Path at the same z-index, keeping its id, name and look. */
+  _bakePathForEdit(o, geo) {
+    if (this._isPlainPath(o)) return o;
+    const d = nodesToPathD(geo.nodes, geo.closed);
+    const sw = (o.strokeWidth || 0) * Math.sqrt(Math.abs((o.scaleX || 1) * (o.scaleY || 1)));
+    if (o.type === 'path') {
+      o.set({ angle: 0, scaleX: 1, scaleY: 1, skewX: 0, skewY: 0, flipX: false, flipY: false, strokeWidth: sw });
+      o._setPath(d); o.setCoords(); o.dirty = true;
+      return o;
+    }
+    const keep = ['fill', 'stroke', 'strokeDashArray', 'strokeLineCap', 'strokeLineJoin', 'strokeMiterLimit', 'strokeUniform',
+      'opacity', 'visible', 'shadow', 'globalCompositeOperation', 'paintFirst', 'fillRule', 'clipPath', ...EXTRA];
+    const props = {};
+    keep.forEach(k => { if (o[k] !== undefined) props[k] = o[k]; });
+    const path = new this.fabric.Path(d, { ...props, strokeWidth: sw });
+    path.set({ shapeKind: 'pen' });   // its star/polygon parameters no longer describe it
+    const idx = this.fc.getObjects().indexOf(o);
+    this.fc.remove(o);
+    this.fc.insertAt(path, Math.max(0, idx), false);
+    return path;
+  }
+
+  editPath(id) {
+    let o = this._byId(id);
+    if (!this.isEditablePath(o)) return false;
+    if (this._penBuild) { const b = this._penBuild; this._penBuild = null; this._commitPenBuild(b); }
+    if (this._pathEdit) this._endPathEdit(false);
+    const geo = this._pathNodesOf(o);
+    if (!geo || geo.nodes.length < 2) return false;
+    const before = o;
+    o = this._bakePathForEdit(o, geo);
+    if (o !== before || !this._isPlainPath(before)) this._emit('change', { label: 'path-edit' });   // layer type/geometry changed for the panels
+    this._pathEdit = { id: o.id, nodes: geo.nodes, closed: geo.closed, sel: new Set(), marquee: null };
+    this._penHover = null;
+    this._lockForPathEdit();
+    this._emit('pathedit', { id: o.id });
+    this._emitPen();
+    return true;
+  }
+  exitPathEdit() { this._endPathEdit(true); }
+  _endPathEdit(reselect) {
+    const pe = this._pathEdit;
+    if (!pe) return;
+    this._pathEdit = null; this._penDrag = null; this._penHover = null;
+    const drawing = this.tool !== 'select';
+    this.fc.selection = !drawing;
+    this.fc.getObjects().forEach(o => { o.selectable = !drawing && !o.locked; o.evented = !drawing && !o.locked; });
+    const o = this._byId(pe.id);
+    if (o && reselect && !drawing) this.fc.setActiveObject(o);
+    this.fc.setCursor(this.fc.defaultCursor = this._cursorForTool(this.tool));
+    this._emit('pathedit', null);
+    this._emitPen();
+  }
+  _lockForPathEdit() {
+    // Fabric must not grab, move or marquee-select anything while the pen owns the pointer.
+    this.fc.discardActiveObject();
+    this.fc.selection = false;
+    this.fc.getObjects().forEach(o => { o.selectable = false; o.evented = false; });
+  }
+  _writePathEdit() {
+    const pe = this._pathEdit, o = pe && this._byId(pe.id);
+    if (!o) return;
+    this._setPathKeepingAnchors(o, nodesToPathD(pe.nodes, pe.closed));
+    this.fc.requestRenderAll();
+  }
+  /* Rewrite a path's data without moving what's attached to its box: _setPath re-derives the
+     box/centre from the new points, but a crop (clipPath, centre-relative) and a pixel-unit
+     gradient (top-left-relative) are anchored to that box — re-express both so they stay put on
+     the canvas. */
+  _setPathKeepingAnchors(o, d) {
+    const grads = ['fill', 'stroke'].map(k => {
+      const g = o[k];
+      if (!g || typeof g !== 'object' || !g.coords || g.gradientUnits === 'percentage') return null;
+      const c = g.coords;
+      return { g, a: this._gradLocalToScene(o, { x: c.x1, y: c.y1 }), b: this._gradLocalToScene(o, { x: c.x2, y: c.y2 }) };
+    }).filter(Boolean);
+    const c0 = o.getCenterPoint();
+    o._setPath(d);
+    o.setCoords();
+    const c1 = o.getCenterPoint();
+    const cp = o.clipPath;
+    if (cp && !cp.absolutePositioned) { cp.set({ left: cp.left - (c1.x - c0.x), top: cp.top - (c1.y - c0.y) }); cp.setCoords && cp.setCoords(); }
+    grads.forEach(({ g, a, b }) => {
+      const p1 = this._sceneToGradLocal(o, a), p2 = this._sceneToGradLocal(o, b);
+      Object.assign(g.coords, { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
     });
+    o.dirty = true;
+  }
+  /* Handles are shown (and grabbable) for the selected points and their neighbours — what Figma
+     shows — plus whichever point the pointer is over. */
+  _editHandleNodes() {
+    const pe = this._pathEdit, cnt = pe.nodes.length, out = new Set();
+    pe.sel.forEach(i => {
+      out.add(i);
+      if (i > 0 || pe.closed) out.add((i - 1 + cnt) % cnt);
+      if (i < cnt - 1 || pe.closed) out.add((i + 1) % cnt);
+    });
+    const h = this._penHover;
+    if (h && h.anchor != null) out.add(h.anchor);
+    if (h && h.handleOf != null) out.add(h.handleOf);
+    return [...out];
+  }
+
+  _emitPen() {
+    const b = this._penBuild, pe = this._pathEdit, hov = this._penHover || {};
+    const pts = (ns) => ns.map(p => ({ x: p.x, y: p.y }));
+    if (b) {
+      const n = b.nodes.length, handles = [n - 1, n - 2].filter(i => i >= 0);
+      if (b.closing || hov.close) handles.push(0);
+      this._emit('pen', { mode: 'draw', nodes: b.nodes, closed: false, pts: pts(b.nodes), sel: [n - 1], handles,
+        preview: this._penDrag ? null : (hov.pt || null), closeHover: !!hov.close });
+    } else if (pe) {
+      this._emit('pen', { mode: 'edit', id: pe.id, nodes: pe.nodes, closed: pe.closed, pts: pts(pe.nodes), sel: [...pe.sel],
+        handles: this._editHandleNodes(), hoverAnchor: hov.anchor != null ? hov.anchor : null, segHover: hov.seg || null, marquee: pe.marquee });
+    } else this._emit('pen', null);
+    this.fc.requestRenderAll();
+  }
+
+  /* What's under the pointer in vector edit mode, most specific first. */
+  _penHit(pt, e) {
+    const pe = this._pathEdit;
+    if (!pe) return { kind: 'none' };
+    const h = hitHandle(pe.nodes, pt, this._penTol(), this._editHandleNodes());
+    if (h) return { kind: 'handle', ...h };
+    const a = hitAnchor(pe.nodes, pt, this._penTol());
+    if (a >= 0) {
+      const end = !pe.closed && (a === 0 || a === pe.nodes.length - 1);
+      return { kind: end && !e.altKey ? 'continue' : 'anchor', i: a };
+    }
+    const s = hitSegment(pe.nodes, pe.closed, pt, this._penTol(5));
+    return s ? { kind: 'segment', ...s } : { kind: 'none' };
+  }
+
+  _penSnap(b) { b.undo.push(cloneNodes(b.nodes)); b.redo = []; }
+
+  _penDown(pt, e) {
+    this._penLast = pt;
+    const b = this._penBuild, pe = this._pathEdit, tol = this._penTol();
+    if (this.tool === 'pen') {
+      if (b) {
+        const n = b.nodes, last = n[n.length - 1];
+        this._penSnap(b);
+        if (n.length >= 2 && penDist(pt, n[0]) <= tol) {
+          b.closing = true;
+          this._penDrag = { kind: 'close', down: pt, moved: false };
+        } else if (penDist(pt, last) <= tol) {
+          this._penDrag = { kind: 'last-handle', down: pt, moved: false };
+        } else {
+          const p = e.shiftKey ? constrain45(last, pt) : pt;
+          n.push(penNode(p.x, p.y));
+          this._penDrag = { kind: 'new-node', i: n.length - 1, down: p, last: pt, moved: false };
+        }
+        this._penHover = null; this._emitPen();
+        return true;
+      }
+      if (pe) {
+        const hit = this._penHit(pt, e);
+        if (hit.kind === 'handle') { this._startHandleDrag(hit, pt); return true; }
+        if (hit.kind === 'continue') {
+          this._continuePath(hit.i);
+          this._penDrag = { kind: 'last-handle', down: pt, moved: false };
+          this._emitPen();
+          return true;
+        }
+        if (hit.kind === 'anchor') {
+          if (e.altKey) this._penDrag = { kind: 'convert', i: hit.i, down: pt, moved: false };
+          // the 2nd click of a double-click on a segment lands on the point the 1st just added
+          else if (!(this._penJustAdded && this._penJustAdded.i === hit.i && Date.now() - this._penJustAdded.t < 450)) this._deletePathNodes([hit.i]);
+          return true;
+        }
+        if (hit.kind === 'segment') {
+          const ni = splitSegment(pe.nodes, pe.closed, hit.seg, hit.t);
+          this._penJustAdded = { i: ni, t: Date.now() };
+          pe.sel = new Set([ni]);
+          this._writePathEdit(); this.commit('path-edit');
+          this._penHover = null; this._emitPen();
+          return true;
+        }
+        this.exitPathEdit();   // clicked away from the path: start a new one right here
+      }
+      this._penBuild = { nodes: [penNode(pt.x, pt.y)], closed: false, contId: null, undo: [], redo: [] };
+      this._penDrag = { kind: 'new-node', i: 0, down: pt, last: pt, moved: false };
+      this._penHover = null; this._emitPen();
+      return true;
+    }
+    if (!pe) return false;
+    // Select tool inside vector edit mode
+    const hit = this._penHit(pt, e);
+    if (hit.kind === 'handle') { this._startHandleDrag(hit, pt); return true; }
+    if (hit.kind === 'anchor' || hit.kind === 'continue') {
+      if (e.altKey) { this._penDrag = { kind: 'convert', i: hit.i, down: pt, moved: false }; return true; }
+      if (e.shiftKey) { if (pe.sel.has(hit.i)) pe.sel.delete(hit.i); else pe.sel.add(hit.i); }
+      else if (!pe.sel.has(hit.i)) pe.sel = new Set([hit.i]);
+      this._penDrag = { kind: 'anchors', down: pt, moved: false, before: cloneNodes(pe.nodes) };
+      this._emitPen();
+      return true;
+    }
+    if (hit.kind === 'segment') {
+      const ends = [hit.seg, (hit.seg + 1) % pe.nodes.length];
+      if (e.metaKey || e.ctrlKey) {
+        this._penDrag = { kind: 'bend', seg: hit.seg, t: hit.t, down: pt, moved: false, before: cloneNodes(pe.nodes) };
+      } else {
+        pe.sel = e.shiftKey ? new Set([...pe.sel, ...ends]) : new Set(ends);
+        this._penDrag = { kind: 'anchors', down: pt, moved: false, before: cloneNodes(pe.nodes) };
+      }
+      this._emitPen();
+      return true;
+    }
+    if (!e.shiftKey) pe.sel = new Set();
+    this._penDrag = { kind: 'marquee', down: pt, moved: false, base: new Set(pe.sel) };
+    this._emitPen();
+    return true;
+  }
+  _startHandleDrag(hit, pt) {
+    const n = this._pathEdit.nodes[hit.i];
+    this._penDrag = { kind: 'handle', i: hit.i, which: hit.which, down: pt, moved: false, smooth: isSmooth(n), equal: handlesEqual(n) };
+  }
+
+  _penMove(pt, e) {
+    this._penLast = pt;
+    const d = this._penDrag, b = this._penBuild, pe = this._pathEdit;
+    if (d) {
+      if (!d.moved && penDist(pt, d.down) < this._penTol(3)) return true;
+      d.moved = true;
+      const snap = (from) => (e.shiftKey ? constrain45(from, pt) : { x: pt.x, y: pt.y });
+      switch (d.kind) {
+        case 'new-node': {
+          const n = b.nodes[d.i];
+          if (!n) { this._penDrag = null; break; }
+          // Space held: reposition the point being placed instead of shaping it
+          if (this._spaceDown) { translateNode(n, pt.x - d.last.x, pt.y - d.last.y); d.last = pt; break; }
+          d.last = pt;
+          n.ho = snap(n);
+          if (!e.altKey) n.hi = mirrorFor(n, 'ho', n.ho, { equal: true });
+          break;
+        }
+        case 'close': {
+          // Dragging over the first point carries the path's direction through it: the out
+          // handle follows the pointer and the in handle (the closing segment's) mirrors it.
+          const f = b.nodes[0], h = snap(f);
+          if (!e.altKey) f.ho = h;
+          f.hi = mirrorFor(f, 'ho', h, { equal: true });
+          break;
+        }
+        case 'last-handle': { const l = b.nodes[b.nodes.length - 1]; l.ho = snap(l); break; }
+        case 'handle': {
+          const n = pe.nodes[d.i], h = snap(n);
+          n[d.which] = h;
+          if (d.smooth && !e.altKey) n[d.which === 'ho' ? 'hi' : 'ho'] = mirrorFor(n, d.which, h, { equal: d.equal });
+          this._writePathEdit();
+          break;
+        }
+        case 'convert': {
+          const n = pe.nodes[d.i];
+          n.ho = snap(n); n.hi = mirrorFor(n, 'ho', n.ho, { equal: true });
+          this._writePathEdit();
+          break;
+        }
+        case 'anchors': {
+          let dx = pt.x - d.down.x, dy = pt.y - d.down.y;
+          if (e.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
+          pe.sel.forEach(i => {
+            const o = d.before[i];
+            pe.nodes[i] = penNode(o.x, o.y, o.hi && { ...o.hi }, o.ho && { ...o.ho });
+            translateNode(pe.nodes[i], dx, dy);
+          });
+          this._writePathEdit();
+          break;
+        }
+        case 'bend': {
+          const cnt = d.before.length;
+          bendSegment(pe.nodes, d.seg, d.t, [d.before[d.seg], d.before[(d.seg + 1) % cnt]], { x: pt.x - d.down.x, y: pt.y - d.down.y });
+          this._writePathEdit();
+          break;
+        }
+        case 'marquee': {
+          const x = Math.min(d.down.x, pt.x), y = Math.min(d.down.y, pt.y), w = Math.abs(pt.x - d.down.x), h = Math.abs(pt.y - d.down.y);
+          pe.marquee = { x, y, w, h };
+          pe.sel = new Set(d.base);
+          pe.nodes.forEach((n, i) => { if (n.x >= x && n.x <= x + w && n.y >= y && n.y <= y + h) pe.sel.add(i); });
+          break;
+        }
+      }
+      this._emitPen();
+      return true;
+    }
+    // Hover: the cursor says what a click would do, the overlay previews it.
+    if (!b && !pe) { if (this.tool === 'pen') this.fc.setCursor(penCursor('pen')); return this.tool === 'pen'; }
+    const pen = this.tool === 'pen', hov = {};
+    let cursor = pen ? penCursor('pen') : 'default';
+    if (b) {
+      const n = b.nodes, last = n[n.length - 1], tol = this._penTol();
+      if (n.length >= 2 && penDist(pt, n[0]) <= tol) { hov.close = true; cursor = penCursor('close'); }
+      else if (penDist(pt, last) <= tol) cursor = penCursor('convert');
+      hov.pt = !hov.close && e.shiftKey ? constrain45(last, pt) : { x: pt.x, y: pt.y };
+    } else {
+      const hit = this._penHit(pt, e);
+      if (hit.kind === 'handle') { hov.handleOf = hit.i; cursor = 'move'; }
+      else if (hit.kind === 'anchor' || hit.kind === 'continue') {
+        hov.anchor = hit.i;
+        cursor = !pen ? 'move' : hit.kind === 'continue' ? penCursor('continue') : e.altKey ? penCursor('convert') : penCursor('remove');
+      } else if (hit.kind === 'segment') {
+        if (pen) { hov.seg = { x: hit.x, y: hit.y }; cursor = penCursor('add'); } else cursor = 'pointer';
+      }
+    }
+    this._penHover = hov;
+    this.fc.setCursor(cursor);
+    this._emitPen();
+    return true;
+  }
+
+  _penUp() {
+    const d = this._penDrag; this._penDrag = null;
+    const b = this._penBuild, pe = this._pathEdit;
+    if (!d) return;
+    if (d.kind === 'close' && b) { b.closed = true; this.finishPen(); return; }
+    if (d.kind === 'last-handle' && b && !d.moved) b.nodes[b.nodes.length - 1].ho = null;
+    if (pe) {
+      if ((d.kind === 'handle' || d.kind === 'anchors' || d.kind === 'bend') && d.moved) this.commit('path-edit');
+      if (d.kind === 'convert') {
+        if (!d.moved) { toggleSmooth(pe.nodes, pe.closed, d.i); this._writePathEdit(); }
+        this.commit('path-edit');
+      }
+      if (d.kind === 'marquee') {
+        pe.marquee = null;
+        if (!d.moved) { this.exitPathEdit(); return; }   // a plain click off the path leaves edit mode
+      }
+    }
+    this._emitPen();
+  }
+
+  _continuePath(i) {
+    const pe = this._pathEdit;
+    let nodes = cloneNodes(pe.nodes);
+    // Always extend from the END of the node list — drawing on from the first point reverses it.
+    if (i === 0) nodes = nodes.reverse().map(n => penNode(n.x, n.y, n.ho, n.hi));
+    this._pathEdit = null; this._penHover = null;
+    this._emit('pathedit', null);
+    this._penBuild = { nodes, closed: false, contId: pe.id, undo: [], redo: [] };
+  }
+
+  _deletePathNodes(idx) {
+    const pe = this._pathEdit;
+    if (!pe || !idx.length) return;
+    const drop = new Set(idx);
+    pe.nodes = pe.nodes.filter((_, i) => !drop.has(i));
+    pe.sel = new Set(); this._penHover = null;
+    if (pe.nodes.length < 2) {
+      // nothing left that draws: the layer goes too
+      const id = pe.id;
+      this._endPathEdit(false);
+      this.removeLayer(id);
+      return;
+    }
+    this._writePathEdit();
+    this.commit('path-edit');
+    this._emitPen();
+  }
+
+  /* ── public vector-edit commands (keyboard + the shells' edit bar) ── */
+  deleteSelectedPathNodes() { const pe = this._pathEdit; if (pe && pe.sel.size) this._deletePathNodes([...pe.sel]); }
+  selectAllPathNodes() { const pe = this._pathEdit; if (!pe) return; pe.sel = new Set(pe.nodes.map((_, i) => i)); this._emitPen(); }
+  nudgePathNodes(dx, dy) {
+    const pe = this._pathEdit;
+    if (!pe || !pe.sel.size) return;
+    pe.sel.forEach(i => translateNode(pe.nodes[i], dx, dy));
+    this._writePathEdit(); this.commit('path-edit'); this._emitPen();
+  }
+  /* 'smooth' | 'corner' for the selected points (all points when none is selected). */
+  setPathNodeType(type) {
+    const pe = this._pathEdit;
+    if (!pe) return;
+    const idx = pe.sel.size ? [...pe.sel] : pe.nodes.map((_, i) => i);
+    idx.forEach(i => {
+      const n = pe.nodes[i], has = !!(n.hi || n.ho);
+      if (type === 'corner' && has) { n.hi = null; n.ho = null; }
+      if (type === 'smooth' && !isSmooth(n)) { n.hi = null; n.ho = null; toggleSmooth(pe.nodes, pe.closed, i); }
+    });
+    this._writePathEdit(); this.commit('path-edit'); this._emitPen();
+  }
+  get pathEdit() { const pe = this._pathEdit; return pe ? { id: pe.id, closed: pe.closed, count: pe.nodes.length, selected: [...pe.sel] } : null; }
+
+  /* ── drawing: finish / cancel / step back ── */
+  _commitPenBuild(b) {
+    this._penHover = null;
+    this._emitPen();
+    if (!b || b.nodes.length < 2) { this.fc.requestRenderAll(); return null; }
+    const d = nodesToPathD(b.nodes, b.closed);
+    const color = this.toolOpts.fill || this.toolOpts.color || '#000000';
+    if (b.contId) {
+      const o = this._byId(b.contId);
+      if (o) {
+        this._setPathKeepingAnchors(o, d);
+        if (b.closed && !o.fill) o.set({ fill: color });
+        this.commit('pen');
+        return o;
+      }
+    }
+    // Closed = a filled shape; open = a stroked line (a fill would only close it visually).
+    const sw = this.toolOpts.penStrokeWidth != null ? this.toolOpts.penStrokeWidth : 3;
+    const style = b.closed
+      ? { fill: color, stroke: null, strokeWidth: 0 }
+      : { fill: null, stroke: color, strokeWidth: sw, strokeLineCap: 'round', strokeLineJoin: 'round' };
+    const obj = new this.fabric.Path(d, style);
     obj.set({ id: uid(), role: 'shape', name: 'Path', shapeKind: 'pen' });
     this.fc.add(obj);
-    this.fc.setActiveObject(obj);
     this.commit('pen');
+    return obj;
+  }
+  finishPen() {
+    const b = this._penBuild;
+    this._penBuild = null; this._penDrag = null;
+    const obj = this._commitPenBuild(b);
+    if (!obj) return null;
     this.setTool('select');
+    this.fc.setActiveObject(obj);
+    this.fc.requestRenderAll();
     return obj.id;
   }
   cancelPen() {
-    this._penBuild = null;
-    this._emit('pen', null);
-    this.fc.renderAll();
+    this._penBuild = null; this._penDrag = null; this._penHover = null;
+    this._emitPen();
+  }
+  penUndoPoint() {
+    const b = this._penBuild;
+    this._penDrag = null;   // a drag in flight pointed at a node that's about to change
+    if (!b) return;
+    if (!b.undo.length) { this.cancelPen(); return; }
+    b.redo.push(cloneNodes(b.nodes)); b.nodes = b.undo.pop();
+    this._emitPen();
+  }
+  penRedoPoint() {
+    const b = this._penBuild;
+    this._penDrag = null;   // a drag in flight pointed at a node that's about to change
+    if (!b || !b.redo.length) return;
+    b.undo.push(cloneNodes(b.nodes)); b.nodes = b.redo.pop();
+    this._emitPen();
+  }
+  penRemoveLastPoint() {
+    const b = this._penBuild;
+    this._penDrag = null;   // a drag in flight pointed at a node that's about to change
+    if (!b) return;
+    if (b.nodes.length <= 1) { this.cancelPen(); return; }
+    this._penSnap(b); b.nodes.pop();
+    this._emitPen();
+  }
+  /* Undo/redo/reset swap the whole scene out from under any pen state — drop it rather than let
+     it point at objects that are about to be replaced. */
+  _penAbandon() {
+    this._penBuild = null; this._penDrag = null; this._penHover = null;
+    if (this._pathEdit) this._endPathEdit(false);
+    else this._emitPen();
   }
 
   /* Magnetic lasso needs an edge map of the flattened scene before it can snap — build it once
@@ -1094,6 +1908,39 @@ export class Editor {
      worker is ready they run a true polygon union/subtract, otherwise they fall back to the
      always-available accumulate-into-multipoly (add) or are reported unavailable (subtract, which
      has no meaningful non-boolean fallback). */
+  /* Contour points from the cv worker are pixel CENTRES of a downscaled copy, so a region that runs
+     to the image's last column/row comes back ~1 source px short of the artboard edge — leaving a
+     sliver unselected. Points on the analysed image's border are pushed out to the true edge. */
+  _toSceneEdgeSnapped(pts, iw, ih, sx, sy, ox, oy) {
+    return pts.map(p => ({
+      x: p.x <= 0 ? ox : p.x >= iw - 1 ? ox + iw * sx : ox + p.x * sx,
+      y: p.y <= 0 ? oy : p.y >= ih - 1 ? oy + ih * sy : oy + p.y * sy,
+    }));
+  }
+
+  /* Busy ring at the pointer while a click-to-select pick runs (drawn by the shells — see
+     busy.js). Overlapping picks share one ring; it goes when the LAST one settles. While busy we
+     keep re-rendering every frame so the ring spins even if the pointer stays still. */
+  _trackPick(promise, pt) {
+    if (!promise || typeof promise.then !== 'function') return promise;
+    this._pickCount = (this._pickCount || 0) + 1;
+    this._setPickBusy({ x: pt.x, y: pt.y });
+    const done = () => { this._pickCount = Math.max(0, this._pickCount - 1); if (!this._pickCount) this._setPickBusy(null); };
+    promise.then(done, done);
+    return promise;
+  }
+  _setPickBusy(at) {
+    const was = !!this._pickBusy;
+    this._pickBusy = at;
+    this._emit('pickbusy', at);
+    this.fc.requestRenderAll();
+    if (at && !was && typeof requestAnimationFrame !== 'undefined') {
+      const spin = () => { if (!this._pickBusy || this._destroyed) return; this.fc.requestRenderAll(); requestAnimationFrame(spin); };
+      requestAnimationFrame(spin);
+    }
+  }
+  get pickBusy() { return !!this._pickBusy; }
+
   async wandPick(pt, { add = false, subtract = false } = {}) {
     this._lastWandSeed = pt;
     // Monotonic token guarding against out-of-order resolution: _down() fires this fire-and-forget
@@ -1111,7 +1958,7 @@ export class Editor {
         const seed = { cx: Math.max(1, Math.min(imgd.width - 2, Math.round(pt.x * kx))), cy: Math.max(1, Math.min(imgd.height - 2, Math.round(pt.y * ky))) };
         const pts = await this.cv.wand({ data: imgd.data, width: imgd.width, height: imgd.height }, seed, this.toolOpts.tolerance, SEL_EPS);
         if (this._destroyed) return { status: 'error', reason: 'destroyed' };
-        if (pts && pts.length >= 3) poly = pts.map(p => ({ x: p.x / kx, y: p.y / ky }));
+        if (pts && pts.length >= 3) poly = this._toSceneEdgeSnapped(pts, imgd.width, imgd.height, 1 / kx, 1 / ky, 0, 0);
       } catch (e) { poly = null; }
     }
     if (seq !== this._wandSeq) return { status: 'error', reason: 'superseded' };
@@ -1345,6 +2192,11 @@ export class Editor {
      detected object boxes at all. */
   async selectObjectAt(pt, { add = false, subtract = false, cycle = false } = {}) {
     this._lastWandSeed = pt;
+    // Re-detect against the CURRENT scene if it changed since the tool's snapshot was taken.
+    if (!this._objRegion || this._objRegion.width !== this.W || this._objRegion.height !== this.H) {
+      await this.detectObjectBoxes(true);
+      if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+    }
     const cands = this._objBoxes
       .filter(b => pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h)
       .sort((a, b) => a.w * a.h - b.w * b.h);
@@ -1376,7 +2228,7 @@ export class Editor {
         if (this._destroyed) return { status: 'error', reason: 'destroyed' };
         if (seq === this._wandSeq && pts && pts.length >= 3) {
           const sx = region.width / imgd.width, sy = region.height / imgd.height;
-          const poly = pts.map(p => ({ x: region.left + p.x * sx, y: region.top + p.y * sy }));
+          const poly = this._toSceneEdgeSnapped(pts, imgd.width, imgd.height, sx, sy, region.left, region.top);
           return this._commitObjectPoly(poly, { add, subtract });
         }
       } catch (e) { /* fall through to the plain box rect below */ }
@@ -1428,6 +2280,54 @@ export class Editor {
     } catch (e) { return { status: 'error', reason: 'cv_failed', message: String(e && e.message || e) }; }
   }
 
+  /* Right-click → "Select object": shrink a rough marquee/lasso selection to the objects inside
+     it (Photoshop's Object Selection in rectangle/lasso mode). The area just outside the selection
+     is cropped in too — it's what the cv worker learns "background" from — and every foreground
+     object found comes back as its own ring, so a box over several products selects all of them.
+     `at` (scene px) is where the busy ring shows; defaults to the selection's centre. cv-only. */
+  selectObjectsInSelection(at) {
+    const polys = selectionPolys(this.selection);
+    if (!polys || !polys.length) return Promise.resolve({ status: 'error', reason: 'no_selection' });
+    // An inverted selection is the whole artboard minus its rings, so that's the area to search.
+    const b = this.selection.invert ? { x: 0, y: 0, w: this.W, h: this.H } : selectionBounds(this.selection, this.W, this.H);
+    // Too few pixels for GrabCut's colour models (it throws) — and nothing meaningful to find anyway.
+    if (Math.abs(b.w) < 8 || Math.abs(b.h) < 8) return Promise.resolve({ status: 'error', reason: 'no_match', message: 'The selection is too small to find an object in.' });
+    return this._trackPick(this._objectsInSelection(polys, b), at || { x: b.x + b.w / 2, y: b.y + b.h / 2 });
+  }
+  async _objectsInSelection(polys, b) {
+    this.engine.captureFlat();
+    const flat = this.engine._flat;
+    if (!flat) return { status: 'error', reason: 'no_image' };
+    const sel = this.selection;
+    try {
+      const pad = Math.max(24, Math.max(b.w, b.h) * 0.2);
+      const left = Math.max(0, b.x - pad), top = Math.max(0, b.y - pad);
+      const rw = Math.min(this.W, b.x + b.w + pad) - left, rh = Math.min(this.H, b.y + b.h + pad) - top;
+      if (rw < 4 || rh < 4) return { status: 'error', reason: 'no_match' };
+      const k = Math.min(1, 900 / Math.max(rw, rh));
+      const fx = (flat.width || this.W) / this.W, fy = (flat.height || this.H) / this.H;
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(rw * k)); c.height = Math.max(1, Math.round(rh * k));
+      const ctx = c.getContext('2d');
+      ctx.drawImage(flat, left * fx, top * fy, rw * fx, rh * fy, 0, 0, c.width, c.height);
+      const imgd = ctx.getImageData(0, 0, c.width, c.height);
+      const local = polys.map(pl => pl.map(p => ({ x: (p.x - left) * k, y: (p.y - top) * k })));
+      const res = await this.cv.objects({ data: imgd.data, width: imgd.width, height: imgd.height }, local, !!sel.invert);
+      if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+      if (res == null) return { status: 'error', reason: 'cv_unavailable' };
+      // The user moved on (new selection / deselect) while the worker ran — don't clobber it.
+      if (this.selection !== sel) return { status: 'error', reason: 'superseded' };
+      if (!res.length) return { status: 'error', reason: 'no_match', message: 'No object found inside the selection.' };
+      const out = res.map(pl => pl.map(p => ({ x: left + p.x / k, y: top + p.y / k })));
+      this.selection = polysToSelection(out);
+      this.multiCount = out.length;
+      this._emit('selection', this.selection);
+      this._emit('multicount', this.multiCount);
+      this.fc.renderAll();
+      return { status: 'ok', count: out.length };
+    } catch (e) { return { status: 'error', reason: 'cv_failed', message: String(e && e.message || e) }; }
+  }
+
   /* ── hover-preview object select: debounced, cancellable, grid-cell cached ───────────────
      Shows, on hover, the polygon that a click WOULD select — same hybrid wand the click uses —
      so the user can confirm before committing. Single-flight: a fast-moving cursor replaces the
@@ -1437,7 +2337,9 @@ export class Editor {
   _hoverCellKey(pt) {
     const z = this.fc.getZoom() || 1;
     const cell = Math.max(3, 12 / z);
-    return Math.round(pt.x / cell) + '_' + Math.round(pt.y / cell) + '_t' + this.toolOpts.tolerance;
+    // The cell size changes with zoom, so it's part of the key — otherwise after zooming, cell "10_20"
+    // means a different spot and a preview cached for somewhere else would be shown here.
+    return Math.round(pt.x / cell) + '_' + Math.round(pt.y / cell) + '_c' + cell.toFixed(2) + '_t' + this.toolOpts.tolerance;
   }
   _hoverMove(pt) {
     if (!this._hoverCache) this._hoverCache = new HoverCache(400);
@@ -1461,7 +2363,7 @@ export class Editor {
         const pts = await this.cv.wand({ data: imgd.data, width: imgd.width, height: imgd.height }, seed, this.toolOpts.tolerance, SEL_EPS);
         if (this._destroyed) return;   // editor torn down mid-RPC — drop the result, don't recurse
         if (pts && pts.length >= 3 && seq === this._hoverSeq) {
-          const scene = pts.map(p => ({ x: p.x / kx, y: p.y / ky }));
+          const scene = this._toSceneEdgeSnapped(pts, imgd.width, imgd.height, 1 / kx, 1 / ky, 0, 0);
           this._hoverCache.put(this._hoverCellKey(pt), scene);
           if (this._hoverPt && this._hoverCellKey(this._hoverPt) === this._hoverCellKey(pt)) this._emit('hover', { pt, pts: scene });
         }
@@ -1493,6 +2395,7 @@ export class Editor {
     this.fc.on('selection:created', trackSelected);
     this.fc.on('selection:updated', trackSelected);
     this.fc.on('object:modified', trackTarget);
+    this.fc.on('selection:cleared', (opt) => { if (opt && opt.e) this._lastActiveId = null; });
 
   }
 
@@ -1507,7 +2410,8 @@ export class Editor {
   _bindSpacePan() {
     if (typeof document === 'undefined') return;
     const isTyping = () => {
-      const tag = document.activeElement && document.activeElement.tagName;
+      const el = document.activeElement, tag = el && el.tagName;
+      if (tag === 'INPUT' && ['range', 'checkbox', 'radio', 'color', 'button'].includes((el.type || '').toLowerCase())) return false;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
       const active = this.fc.getActiveObject();
       return !!(active && active.isEditing);
@@ -1528,6 +2432,9 @@ export class Editor {
     // modifier over a stationary cursor would otherwise show the wrong reticle until you twitch.
     this._onPickModifier = (e) => {
       if (e.key !== 'Alt' && e.key !== 'Shift') return;
+      // Pen: Alt over an anchor flips the cursor to "convert", Shift snaps the rubber band —
+      // both must show without waiting for the pointer to move.
+      if ((this.tool === 'pen' || this._pathEdit) && this._penLast && !this._penDrag) this._penMove(this._penLast, e);
       if (!this._brushCursor || (this.tool !== 'clone' && this.tool !== 'heal')) return;
       this._emitBrushCursor({ x: this._brushCursor.x, y: this._brushCursor.y }, !!e.altKey, !!e.shiftKey);
       this.fc.requestRenderAll();
@@ -1561,24 +2468,74 @@ export class Editor {
   }
   _soon() { clearTimeout(this._st); this._st = setTimeout(() => this.commit('text-edit'), 350); }
 
+  /* Pixel-selection history. Every settled selection change (not each tick of a marquee drag)
+     records the previous selection; ⌘Z steps back through those BEFORE touching the document, and
+     any document edit (commit) starts a fresh run — the same model as Photoshop's history. Without
+     it, ⌘Z after Expand/Contract/Deselect undid the last document edit instead (even "Open"). */
+  _recordSelection(sel) {
+    const live = !!(this._drag && (this._drag.kind === 'sel' || this._drag.kind === 'resize-sel')) || !!this._polyBuild;
+    if (live) return;
+    const snap = sel ? JSON.parse(JSON.stringify(sel)) : null;
+    const last = this._selLast === undefined ? null : this._selLast;
+    if (JSON.stringify(snap) === JSON.stringify(last)) return;
+    (this._selUndo = this._selUndo || []).push(last);
+    if (this._selUndo.length > 50) this._selUndo.shift();
+    this._selRedo = [];
+    this._selLast = snap;
+  }
+  _restoreSelection(sel) {
+    this._selRestoring = true;
+    this.selection = sel ? JSON.parse(JSON.stringify(sel)) : null;
+    this._selLast = sel;
+    this.multiCount = this.selection ? (selectionPolys(this.selection) || []).length : 0;
+    this._emit('selection', this.selection);
+    this._emit('multicount', this.multiCount);
+    this._selRestoring = false;
+    this.fc.renderAll();
+  }
+  get canUndoSelection() { return !!(this._selUndo && this._selUndo.length); }
   commit(label) {
     this._recomputeAdjustmentLayers();
+    this._selUndo = []; this._selRedo = [];   // a document edit starts a fresh selection run
+    this._selLast = this.selection ? JSON.parse(JSON.stringify(this.selection)) : null;
     if (this.history.push(this._withIsoRestored(() => serialize(this.fc, this.W, this.H)))) {
       this._emit('history', this.history.depth());
       this._emit('change', { label });
     }
   }
   undo() {
+    this._flushGradCommit();   // a pending stop edit is its own step — undo must see it
+    this._flushLiveCommit();
+    if (this._selUndo && this._selUndo.length) {   // selection steps come first (see _recordSelection)
+      (this._selRedo = this._selRedo || []).push(this._selLast === undefined ? null : this._selLast);
+      this._restoreSelection(this._selUndo.pop());
+      return;
+    }
     if (this._persp) this.cancelPerspectiveEdit();
+    const reGrad = this._gradEdit && this._gradEdit.id;
+    // Undo inside vector edit mode stays in it (Figma) — re-enter on the restored layer.
+    const reEdit = this._pathEdit && this._pathEdit.id;
+    this._penAbandon();
     this._iso = [];
     const s = this.history.undo();
-    if (s) restore(this.fc, s, { engine: this.engine, history: this.history, onDone: (w, h) => { this._afterRestore(w, h); this._recomputeAdjustmentLayers(); this.fc.renderAll(); this._emit('history', this.history.depth()); this._emit('change', { label: 'undo' }); } });
+    if (s) restore(this.fc, s, { engine: this.engine, history: this.history, onDone: (w, h) => { this._afterRestore(w, h); this._recomputeAdjustmentLayers(); this.fc.renderAll(); this._emit('history', this.history.depth()); this._emit('change', { label: 'undo' }); if (reEdit && this._byId(reEdit)) this.editPath(reEdit); if (reGrad) { const go = this._byId(reGrad); if (!go || !this._beginGradEdit(go)) this._endGradEdit(); } } });
   }
   redo() {
+    this._flushGradCommit();   // a pending stop edit is its own step — undo must see it
+    this._flushLiveCommit();
+    if (this._selRedo && this._selRedo.length) {
+      (this._selUndo = this._selUndo || []).push(this._selLast === undefined ? null : this._selLast);
+      this._restoreSelection(this._selRedo.pop());
+      return;
+    }
     if (this._persp) this.cancelPerspectiveEdit();
+    const reGrad = this._gradEdit && this._gradEdit.id;
+    // Undo inside vector edit mode stays in it (Figma) — re-enter on the restored layer.
+    const reEdit = this._pathEdit && this._pathEdit.id;
+    this._penAbandon();
     this._iso = [];
     const s = this.history.redo();
-    if (s) restore(this.fc, s, { engine: this.engine, history: this.history, onDone: (w, h) => { this._afterRestore(w, h); this._recomputeAdjustmentLayers(); this.fc.renderAll(); this._emit('history', this.history.depth()); this._emit('change', { label: 'redo' }); } });
+    if (s) restore(this.fc, s, { engine: this.engine, history: this.history, onDone: (w, h) => { this._afterRestore(w, h); this._recomputeAdjustmentLayers(); this.fc.renderAll(); this._emit('history', this.history.depth()); this._emit('change', { label: 'redo' }); if (reEdit && this._byId(reEdit)) this.editPath(reEdit); if (reGrad) { const go = this._byId(reGrad); if (!go || !this._beginGradEdit(go)) this._endGradEdit(); } } });
   }
   _afterRestore(w, h) {
     if (w === this.W && h === this.H) return;
@@ -1616,7 +2573,7 @@ export class Editor {
         editingMask: !!this._maskEdit && this._maskEdit.layerId === o.id,
         isAdjustment: o.role === 'adjustment', adj: o.role === 'adjustment' ? { ...FX_DEFAULTS, ...o.adj } : null,
         ...(({ kind, subtitle, shape }) => ({ kind, subtitle, shape: shape || null }))(describeLayer(o)),
-        fill: typeof o.fill === 'string' ? o.fill : null, hasShadow: !!o.shadow,
+        fill: typeof o.fill === 'string' && !o.fillOff ? o.fill : null, hasShadow: !!o.shadow,   // a hidden fill (eye off) has no swatch
         parentId: parent ? parent.id : null,
         ...(kids ? { isGroup: true, children: kids.map((c, j) => entry(c, j, o)).reverse(),
           childActive: !!active && hasFocused(o) } : {}),
@@ -1757,15 +2714,16 @@ export class Editor {
     ['selection:created', 'selection:updated', 'selection:cleared'].forEach(ev => this.fc.on(ev, onSel));
   }
   _byId(id) { return this.fc.getObjects().find(o => o.id === id); }
-  setLayer(id, patch) {
+  setLayer(id, patch, { live = false } = {}) {
     const o = this._findLayer(id); if (!o) return;
     if ('visible' in patch) o.visible = patch.visible;
     if ('opacity' in patch) o.opacity = patch.opacity;
-    if ('locked' in patch) { o.locked = patch.locked; o.selectable = !patch.locked; o.evented = !patch.locked; }
+    if ('locked' in patch) { o.locked = patch.locked; o.selectable = !patch.locked; o.evented = !patch.locked; this._syncLockProps(o); }
     if ('blend' in patch) o.globalCompositeOperation = patch.blend;
     if ('name' in patch) { o.name = patch.name; o.renamed = true; }
     this._dirtyUp(o);
-    this.fc.renderAll(); this.commit('layer');
+    this.fc.renderAll();
+    if (live) this._liveCommit('layer'); else this.commit('layer');
   }
   moveLayer(id, dir) {
     if (this._iso.length) return this._withIsoRestored(() => this.moveLayer(id, dir));
@@ -1781,6 +2739,7 @@ export class Editor {
     }
     if (dir === 'up') this.fc.bringForward(o); else if (dir === 'down') this.fc.sendBackwards(o);
     else if (dir === 'top') this.fc.bringToFront(o); else if (dir === 'bottom') this.fc.sendToBack(o);
+    this._keepBgAtBottom();
     this.fc.renderAll(); this.commit('reorder');
   }
   /* Drag-to-reorder: move layer `id` to sit directly in front of (default) or behind layer
@@ -1874,6 +2833,7 @@ export class Editor {
       if (this.tool !== 'select') this.setTool('select');
       // A group member (panel click) is entered the same way a canvas double-click enters it.
       if (this._parentGroup(o) || this._isoEntry(o)) this._enterMember(o);
+      this._syncLockProps(o);
       this.fc.setActiveObject(o);
       this.fc.renderAll();
       this._emit('change', { label: 'activate' });
@@ -1960,6 +2920,174 @@ export class Editor {
         resolve(clone.id);
       }, EXTRA);
     });
+  }
+
+  /* ── right-click menu ───────────────────────────────────────────────────────────────────
+     Figma behaviour: right-clicking a layer that isn't already selected selects it first (a
+     right-click inside a multi-selection keeps the whole selection); right-clicking empty canvas
+     clears the selection. Then emits 'contextmenu' { x, y, pt, sections } for the shell to render
+     (see contextmenu.js — buildContextMenu decides the items, mountContextMenu draws them). */
+  _layersAt(pt) {
+    const F = this.fabric, P = new F.Point(pt.x, pt.y);
+    return this.fc.getObjects().slice().reverse().filter(o => {
+      if (o.visible === false || o.excludeFromExport || o.role === 'draft') return false;
+      if (!o.aCoords) o.setCoords();
+      // Members of a multi-selection keep coordinates relative to it — test in that space.
+      const q = o.group ? F.util.transformPoint(P, F.util.invertTransform(o.group.calcTransformMatrix())) : P;
+      return o.containsPoint(q, null, true, true);
+    });
+  }
+  openContextMenu(pt, client = {}) {
+    if (this._drag || this._penDrag) return null;
+    const hit = this._layersAt(pt)[0] || null;
+    const b = this.selection ? selectionBounds(this.selection, this.W, this.H) : null;
+    this._ctxOnSelection = !!(b && SEL_TOOLS.includes(this.tool) && pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h);
+    if (!this._penBuild && !this._pathEdit && !this._ctxOnSelection) {
+      const active = this.fc.getActiveObject();
+      const inActive = !!(active && hit && (active === hit || (active.type === 'activeSelection' && active.contains(hit))));
+      // (not `selectable` — drawing tools set that false on every layer; activate() switches to Select)
+      if (hit && !hit.locked) { if (!inActive) this.activate(hit.id); }
+      else if (!hit && active) { this.fc.discardActiveObject(); this.fc.requestRenderAll(); this._emit('change', { label: 'activate' }); }
+      else if (hit && hit.locked && active && !inActive) { this.fc.discardActiveObject(); this.fc.requestRenderAll(); }
+    }
+    const sections = buildContextMenu(this, { pt, hit });
+    const ev = { x: client.x != null ? client.x : 0, y: client.y != null ? client.y : 0, pt, targetId: hit && hit.id, sections };
+    this._emit('contextmenu', ev);
+    return ev;
+  }
+
+  /* The active selection as a list of top-level layers (an ActiveSelection's members, or the one object). */
+  _selectedLayers() {
+    const a = this.fc.getActiveObject();
+    if (!a) return [];
+    return a.type === 'activeSelection' ? a.getObjects().slice() : [a];
+  }
+  duplicateSelection() {
+    const a = this.fc.getActiveObject(); if (!a) return null;
+    if (a.type !== 'activeSelection') return this.duplicateLayer(a.id);
+    return Promise.resolve(this.copySelection()).then(() => this.pasteClipboard());
+  }
+  deleteSelection() {
+    const objs = this._selectedLayers(); if (!objs.length) return;
+    this.fc.discardActiveObject();
+    if (objs.length === 1) { this.removeLayer(objs[0].id); return; }
+    objs.forEach(o => this.fc.remove(o));
+    this.fc.renderAll();
+    this.commit('remove');
+  }
+  async cutSelection() {
+    if (!this.fc.getActiveObject()) return false;
+    await this.copySelection();
+    this.deleteSelection();
+    return true;
+  }
+  /* Paste the clipboard centred on scene point `pt` (the right-click spot). */
+  pasteAt(pt, { commit = true } = {}) {
+    const src = this._clipboard; if (!src) return null;
+    return new Promise(resolve => {
+      src.clone(clone => {
+        if (!clone) { resolve(null); return; }   // e.g. an image whose source failed to reload
+        this.fc.discardActiveObject();
+        if (this.tool !== 'select') this.setTool('select');
+        const center = new this.fabric.Point(pt.x, pt.y);
+        if (clone.type === 'activeSelection') {
+          clone.canvas = this.fc;
+          clone.setPositionByOrigin(center, 'center', 'center');
+          clone.forEachObject(o => {
+            o.set({ id: uid(), name: (o.renamed ? o.name : layerLabel(o)) + ' copy', renamed: true });
+            this.fc.add(o);
+          });
+          clone.setCoords();
+          this.fc.setActiveObject(clone);
+        } else {
+          clone.set({ id: uid(), name: (clone.renamed ? clone.name : layerLabel(clone)) + ' copy', renamed: true });
+          clone.setPositionByOrigin(center, 'center', 'center');
+          clone.setCoords();
+          this.fc.add(clone);
+          this.fc.setActiveObject(clone);
+        }
+        this.fc.renderAll();
+        if (commit) this.commit('paste');
+        resolve(clone.id);
+      }, EXTRA);
+    });
+  }
+  /* Swap the selected layer(s) for the clipboard, centred where they were and at their stacking
+     position — one undo step. */
+  pasteToReplace() {
+    const objs = this._selectedLayers(); if (!objs.length || !this._clipboard) return null;
+    const a = this.fc.getActiveObject();
+    const c = a.getCenterPoint();
+    const all = this.fc.getObjects(), idx = Math.min(...objs.map(o => all.indexOf(o)));
+    this.fc.discardActiveObject();
+    objs.forEach(o => this.fc.remove(o));
+    // one undo step for remove + paste: the paste itself doesn't commit, this does
+    return this.pasteAt({ x: c.x, y: c.y }, { commit: false }).then(id => {
+      const o = id && this._byId(id);
+      if (o && idx >= 0) this.fc.moveTo(o, idx);
+      this.fc.renderAll();
+      this.commit('paste-replace');
+      return id;
+    });
+  }
+  /* Bring to front / forward / send backward / to back for whatever is selected. */
+  arrangeSelection(dir) {
+    const a = this.fc.getActiveObject(); if (!a) return;
+    if (a.type !== 'activeSelection') { this.moveLayer(a.id, dir); return; }
+    if (dir === 'top') this.fc.bringToFront(a); else if (dir === 'bottom') this.fc.sendToBack(a);
+    else if (dir === 'up') this.fc.bringForward(a); else if (dir === 'down') this.fc.sendBackwards(a);
+    this._keepBgAtBottom();
+    this.fc.renderAll(); this.commit('reorder');
+  }
+  /* "Send to back" means just above the background — a layer sent under the bg is hidden behind it. */
+  _keepBgAtBottom() {
+    const bgs = this.fc.getObjects().filter(o => o.role === 'bg');
+    for (let i = bgs.length - 1; i >= 0; i--) this.fc.moveTo(bgs[i], 0);
+  }
+  selectAllLayers() {
+    if (this.tool !== 'select') this.setTool('select');
+    const objs = this.fc.getObjects().filter(o => o.selectable !== false && !o.locked && o.role !== 'bg' && o.visible !== false && !o.excludeFromExport);
+    this.fc.discardActiveObject();
+    if (objs.length === 1) this.fc.setActiveObject(objs[0]);
+    else if (objs.length > 1) this.fc.setActiveObject(new this.fabric.ActiveSelection(objs, { canvas: this.fc }));
+    this.fc.renderAll();
+    this._emit('change', { label: 'activate' });
+    return objs.length;
+  }
+  /* Hide/show and lock/unlock the selection as ONE undo step (setLayer commits per layer). */
+  toggleSelectionVisible() {
+    const objs = this._selectedLayers(); if (!objs.length) return;
+    const show = objs.every(o => o.visible === false);
+    objs.forEach(o => { o.visible = show; this._dirtyUp(o); });
+    // the selection stays (Figma does the same), so pressing ⇧⌘H again shows it again
+    this.fc.renderAll(); this.commit('layer');
+  }
+  /* A locked layer can still be selected (layers panel) to unlock/inspect it, but never transformed. */
+  _syncLockProps(o) {
+    const l = !!o.locked;
+    o.set({ lockMovementX: l, lockMovementY: l, lockScalingX: l, lockScalingY: l, lockRotation: l, hasControls: !l });
+  }
+  toggleSelectionLock() {
+    const objs = this._selectedLayers(); if (!objs.length) return;
+    const lock = !objs.every(o => o.locked);
+    this.fc.discardActiveObject();
+    objs.forEach(o => { o.locked = lock; o.selectable = !lock; o.evented = !lock && this.tool === 'select'; this._syncLockProps(o); this._dirtyUp(o); });
+    this.fc.renderAll(); this.commit('layer');
+  }
+  /* The selection, rendered on its own at its on-canvas size, onto the system clipboard as a PNG. */
+  async copyAsPNG() {
+    const a = this.fc.getActiveObject(); if (!a) return { status: 'error', reason: 'no_selection' };
+    const url = a.toDataURL({ format: 'png', multiplier: 1, enableRetinaScaling: false });
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard || typeof ClipboardItem === 'undefined') throw new Error('Clipboard images are not supported in this browser');
+      const blob = await (await fetch(url)).blob();
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      return { status: 'ok' };
+    } catch (e) {
+      const r = { status: 'error', reason: 'clipboard_failed', message: String(e && e.message || e) };
+      this._emit('error', r);
+      return r;
+    }
   }
 
   /* Aligns a layer to the artboard bounds. edge: 'left'|'center'|'right'|'top'|'middle'|'bottom'. */
@@ -2070,6 +3198,7 @@ export class Editor {
     else if (key === 'mask') {
       const target = this._pendingMaskTarget; this._pendingMaskTarget = null;
       if (!target) return;
+      if (this._isVectorMasked(target)) { touchVectorMask(target); this.fc.requestRenderAll(); return; }
       const f = (target.filters || []).find(x => x.type === 'MaskFilter');
       if (f) { f.maskCanvas = target.maskEnabled !== false ? target.maskCanvas : null; target.applyFilters(); this.fc.requestRenderAll(); }
     }
@@ -2615,16 +3744,38 @@ export class Editor {
     });
   }
 
-  /* ── layer masks: paintable, non-destructive, image/paint-role layers only (see mask.js's
-     header comment for why vector shapes/text aren't supported) ───────────────────────────────
-     addMask() creates a blank (fully-visible) mask and pushes a MaskFilter onto the layer's own
+  /* ── layer masks: paintable, non-destructive ──────────────────────────────────────────────
+     Image/paint layers: addMask() creates a blank (fully-visible) mask and pushes a MaskFilter onto the layer's own
      `o.filters`, ahead of any brightness/contrast/etc. filters (see setImageFilters above) so a
      disabled/deleted mask never disturbs those. enterMaskEdit() redirects brush/pencil/eraser
      strokes (via _down/_move/_up) into painting the mask canvas instead of the pixel layer
-     itself — exitMaskEdit() (or picking any other tool) ends that redirect. */
-  _maskable(o) { return !!o && (o.type === 'image' || o.role === 'paint'); }
+     itself — exitMaskEdit() (or picking any other tool) ends that redirect. Vector layers get a
+     mask in their own local box, drawn at render time (mask.js) — same API, no filters. The eraser
+     on a vector layer paints black into that mask, so erasing never rasterizes the shape. */
+  _maskable(o) { return !!o && (o.type === 'image' || o.role === 'paint' || isVectorMaskable(o)); }
+  // Vector layers (shapes/text/groups) are masked at draw time, not by an image filter — see mask.js.
+  _isVectorMasked(o) { return !!o && o.type !== 'image' && isVectorMaskable(o); }
+  _addVectorMask(o) {
+    o.maskCanvas = createVectorMaskCanvas(o);
+    o.maskEnabled = true;
+    touchVectorMask(o);
+  }
+  /* One mask stamp (or a line from `from`) in whatever space the layer's mask lives in: artboard
+     px for image masks, the layer's own box for vector masks. */
+  _maskPaint(layer, pt, from, opts, erase) {
+    const ctx = layer.maskCanvas.getContext('2d');
+    if (!this._isVectorMasked(layer)) {
+      if (from) maskLine(ctx, from, pt, opts, erase); else maskStamp(ctx, pt.x, pt.y, opts, erase);
+      return;
+    }
+    const a = vectorMaskPoint(this.fabric, layer, pt, opts.size || 20);
+    const o2 = { ...opts, size: a.size };
+    if (from) { const b = vectorMaskPoint(this.fabric, layer, from, opts.size || 20); maskLine(ctx, b, a, o2, erase); }
+    else maskStamp(ctx, a.x, a.y, o2, erase);
+  }
   addMask(id) {
     const o = this._byId(id); if (!this._maskable(o) || o.maskCanvas) return;
+    if (this._isVectorMasked(o)) { this._addVectorMask(o); this.fc.renderAll(); this.commit('add-mask'); return; }
     o.maskCanvas = createMaskCanvas(this.W, this.H);
     o.maskEnabled = true;
     const MaskFilter = makeMaskFilterClass(this.fabric);
@@ -2639,8 +3790,11 @@ export class Editor {
     const o = this._byId(id); if (!o || !o.maskCanvas) return;
     if (this._maskEdit && this._maskEdit.layerId === id) this.exitMaskEdit();
     o.maskCanvas = null; o.maskEnabled = false;
-    o.filters = (o.filters || []).filter(f => f.type !== 'MaskFilter');
-    o.applyFilters();
+    if (this._isVectorMasked(o)) touchVectorMask(o);
+    else {
+      o.filters = (o.filters || []).filter(f => f.type !== 'MaskFilter');
+      o.applyFilters();
+    }
     this.fc.renderAll();
     this.commit('remove-mask');
   }
@@ -2649,9 +3803,12 @@ export class Editor {
   setMaskEnabled(id, enabled) {
     const o = this._byId(id); if (!o || !o.maskCanvas) return;
     o.maskEnabled = !!enabled;
-    const f = (o.filters || []).find(x => x.type === 'MaskFilter');
-    if (f) f.maskCanvas = enabled ? o.maskCanvas : null;
-    o.applyFilters();
+    if (this._isVectorMasked(o)) touchVectorMask(o);
+    else {
+      const f = (o.filters || []).find(x => x.type === 'MaskFilter');
+      if (f) f.maskCanvas = enabled ? o.maskCanvas : null;
+      o.applyFilters();
+    }
     this.fc.renderAll();
     this.commit('mask-enabled');
   }
@@ -2662,7 +3819,7 @@ export class Editor {
   invertMask(id) {
     const o = this._byId(id); if (!o || !o.maskCanvas) return;
     invertMaskCanvas(o.maskCanvas);
-    o.applyFilters();
+    if (this._isVectorMasked(o)) touchVectorMask(o); else o.applyFilters();
     this.fc.renderAll();
     this.commit('invert-mask');
   }
@@ -2736,7 +3893,7 @@ export class Editor {
      (both rx and ry together — the properties panel exposes one "corner radius" field, not
      independent x/y radii); no-op on anything but a rect, same silent-no-op contract as
      setFill/setShapeGradient for a property that doesn't apply to the active object's type. */
-  setNumeric(patch) {
+  setNumeric(patch, { live = false } = {}) {
     const o = this.fc.getActiveObject(); if (!o) return;
     // pin a legacy rect's radius BEFORE any w/h rescale below, or it'd be re-read off the stretched shape
     if (o.type === 'rect' && o.cornerRadius == null) o.cornerRadius = this.cornerRadiusOf(o);
@@ -2757,35 +3914,69 @@ export class Editor {
     this._normalizeCorners(o);   // rects, and rects inside a group (e.g. an ad CTA pill)
     o.setCoords();
     this.fc.renderAll();
-    this.commit('transform');
+    if (live) this._liveCommit('transform'); else this.commit('transform');
   }
 
   /* Recolors the active object (shape fill or text colour) — an activeSelection applies the same
      colour to every member, matching how alignActiveSelection/setLayer treat a multi-selection. */
   setFill(color) {
     const o = this.fc.getActiveObject(); if (!o) return;
-    if (o.type === 'activeSelection') o.forEachObject(m => m.set('fill', color));
-    else o.set('fill', color);
+    // picking a colour for a hidden fill shows it again — otherwise the change is invisible
+    if (o.type === 'activeSelection') o.forEachObject(m => m.set({ fill: color, fillOff: false }));
+    else o.set({ fill: color, fillOff: false });
     o.dirty = true;
     this.fc.renderAll();
     this.commit('fill');
   }
 
-  /* Border/stroke — patch keys: color, width. Setting a width with no color yet defaults to black
-     (mirrors the reference: picking up the width slider from 0 should show a visible border right
-     away, not an invisible one). No-op with nothing selected, same silent-no-op contract as
-     setFill/setNumeric for a property that may not apply to every member of a multi-selection —
-     Fabric ignores stroke/strokeWidth on object types that don't render one (e.g. images). */
+  /* Border/stroke — patch keys: color, width, plus the style keys stroke.js handles: style
+     ('solid'|'dashed'|'dotted'), dash, gap (px), cap ('butt'|'round'|'square'), join
+     ('miter'|'round'|'bevel'), position ('inside'|'center'|'outside', closed shapes only).
+     Setting a width with no color yet defaults to black (mirrors the reference: picking up the
+     width slider from 0 should show a visible border right away, not an invisible one). No-op with
+     nothing selected, same silent-no-op contract as setFill/setNumeric for a property that may not
+     apply to every member of a multi-selection — Fabric ignores stroke/strokeWidth on object types
+     that don't render one (e.g. images). */
   setStroke(patch) {
     const o = this.fc.getActiveObject(); if (!o) return;
     const apply = (m) => {
+      const prevWidth = m.strokeWidth || 0;
       if ('width' in patch) { if (patch.width > 0 && !m.stroke) m.set('stroke', '#000000'); m.set('strokeWidth', Math.max(0, patch.width)); }
       if ('color' in patch) m.set('stroke', patch.color);
+      applyStrokeStyle(m, patch, 'width' in patch ? prevWidth : null);
+      m.set('strokeOff', false);   // editing a hidden border shows it again (same as setFill)
     };
     if (o.type === 'activeSelection') o.forEachObject(apply); else apply(o);
     o.dirty = true;
     this.fc.renderAll();
     this.commit('stroke-style');
+  }
+
+  /* Fill / border eye toggles (Figma's per-paint visibility): hide or show the paint without
+     losing it — the colour, gradient, width, dash etc. stay on the object and come back as they
+     were. Applies to every member of a multi-selection. One undo step each. */
+  setFillVisible(visible) { this._setPaintOff('fillOff', !visible, 'fill-visible'); }
+  setStrokeVisible(visible) { this._setPaintOff('strokeOff', !visible, 'stroke-visible'); }
+  _setPaintOff(key, off, label) {
+    const o = this.fc.getActiveObject(); if (!o) return;
+    const apply = (m) => { m.set(key, off); m.dirty = true; };
+    if (o.type === 'activeSelection') o.forEachObject(apply); else apply(o);
+    o.dirty = true;
+    this.fc.renderAll();
+    this.commit(label);
+  }
+  /* Whether the active object's fill is showing (false once its eye is toggled off). */
+  isFillVisible() {
+    const o = this.fc.getActiveObject();
+    const t = o && o.type === 'activeSelection' ? o.getObjects()[0] : o;
+    return !(t && t.fillOff);
+  }
+
+  /* The active object's border settings — { width, style, dash, gap, cap, join, position,
+     canPosition } (see stroke.js strokeInfo). null with nothing selected. */
+  getStroke() {
+    const o = this.fc.getActiveObject();
+    return o ? strokeInfo(o.type === 'activeSelection' ? o.getObjects()[0] : o) : null;
   }
 
   /* Object-local gradient mode's shared apply step (called live on every drag tick from _move,
@@ -2797,18 +3988,33 @@ export class Editor {
      two-point AXIS, which a radial gradient — center + radius, no axis — has no use for; radial
      object gradients go through setShapeGradient's angle-based mode instead). */
   _applyObjectGradient(obj, from, to) {
-    const p1 = obj.toLocalPoint(new this.fabric.Point(from.x, from.y), 'center', 'center');
-    const p2 = obj.toLocalPoint(new this.fabric.Point(to.x, to.y), 'center', 'center');
-    const sx = obj.scaleX || 1, sy = obj.scaleY || 1;
+    const p1 = this._sceneToGradLocal(obj, from), p2 = this._sceneToGradLocal(obj, to);
     const norm = normalizeGradientStops(this.toolOpts.gradientStops);
     const colorStops = norm.map(s => ({ offset: s.offset, color: s.color }));
     obj.set('fill', new this.fabric.Gradient({
       type: 'linear', gradientUnits: 'pixels',
-      coords: { x1: p1.x / sx, y1: p1.y / sy, x2: p2.x / sx, y2: p2.y / sy },
+      coords: { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y },
       colorStops,
     }));
     obj.dirty = true;
     this.fc.renderAll();
+  }
+
+  /* Scene point <-> a pixel-unit gradient's own coordinate space. Fabric draws those coords from
+     the object's TOP-LEFT (see Object#_applyPatternGradientTransform: offset -width/2, -height/2
+     from the centre), unscaled, and the full transform (scale, rotation, skew, flip, parent group)
+     applies on top. Mapping through calcTransformMatrix both ways keeps the drawn handles exactly
+     on the colours. (These used to be centre-relative, which shifted every dragged gradient by half
+     the object's size — the ramp started half a width before the point you dragged from.) */
+  _sceneToGradLocal(obj, p) {
+    const F = this.fabric, inv = F.util.invertTransform(obj.calcTransformMatrix());
+    const q = F.util.transformPoint(new F.Point(p.x, p.y), inv);
+    return { x: q.x + (obj.width || 0) / 2, y: q.y + (obj.height || 0) / 2 };
+  }
+  _gradLocalToScene(obj, p) {
+    const F = this.fabric;
+    const q = F.util.transformPoint(new F.Point(p.x - (obj.width || 0) / 2, p.y - (obj.height || 0) / 2), obj.calcTransformMatrix());
+    return { x: q.x, y: q.y };
   }
 
   /* Gradient fill for a vector shape (rect/ellipse/triangle/polygon/star/text) — Fabric's own
@@ -2830,7 +4036,7 @@ export class Editor {
         const dx = Math.cos(rad) * w / 2, dy = Math.sin(rad) * h / 2;
         coords = { x1: w / 2 - dx, y1: h / 2 - dy, x2: w / 2 + dx, y2: h / 2 + dy };
       }
-      obj.set('fill', new this.fabric.Gradient({ type, coords, colorStops }));
+      obj.set({ fill: new this.fabric.Gradient({ type, coords, colorStops }), fillOff: false });
     };
     if (o.type === 'activeSelection') o.forEachObject(apply); else apply(o);
     o.dirty = true;
@@ -2949,7 +4155,10 @@ export class Editor {
   _restoreCropTarget() {
     if (!this._cropRestore) return;
     const target = this._byId(this._cropRestore.id);
-    if (target) {
+    if (target && target.type !== 'image') {
+      target.clipPath = this._cropRestore.clipPath; target.dirty = true;
+      this.fc.renderAll();
+    } else if (target) {
       target.set(this._cropRestore);
       target.dirty = true;
       target.setCoords();
@@ -2958,9 +4167,50 @@ export class Editor {
     this._cropRestore = null;
   }
 
+  // Layers Crop clips with a rect clipPath: unrotated non-image layers that aren't the background /
+  // an adjustment, and that don't already carry some other clip (a clip-to-selection would be lost).
+  _cropClipTarget(o) {
+    return !!o && o.type !== 'image' && o.type !== 'activeSelection' && o.role !== 'bg' && o.role !== 'adjustment'
+      && !(o.angle % 360) && (!o.clipPath || o.clipPath.role === 'crop');
+  }
+  // Scene-space {x,y,w,h} of a crop clip. Non-absolute clipPaths live in the object's own
+  // centre-origin frame, so map the clip's corners out through the object's transform.
+  _clipSceneRect(o, clip) {
+    const m = o.calcTransformMatrix(), f = this.fabric;
+    const pts = [[clip.left, clip.top], [clip.left + clip.width, clip.top + clip.height]]
+      .map(([x, y]) => f.util.transformPoint(new f.Point(x, y), m));
+    const x = Math.min(pts[0].x, pts[1].x), y = Math.min(pts[0].y, pts[1].y);
+    return { x, y, w: Math.abs(pts[1].x - pts[0].x), h: Math.abs(pts[1].y - pts[0].y) };
+  }
+
   applyCrop() {
     if (!this.crop) return;
     const target = this._cropTarget && this._byId(this._cropTarget);
+    if (target && target.type !== 'image') {
+      const b = target.getBoundingRect(true, true);
+      const { x, y, w, h } = this.crop;
+      // A box covering the whole shape is "no crop" — don't leave a no-op clip behind.
+      const covers = x <= b.left + 0.5 && y <= b.top + 0.5 && x + w >= b.left + b.width - 0.5 && y + h >= b.top + b.height - 0.5;
+      let clip = null;
+      if (!covers) {
+        const f = this.fabric, inv = f.util.invertTransform(target.calcTransformMatrix());
+        const pts = [[x, y], [x + w, y + h]].map(([px, py]) => f.util.transformPoint(new f.Point(px, py), inv));
+        clip = new f.Rect({
+          left: Math.min(pts[0].x, pts[1].x), top: Math.min(pts[0].y, pts[1].y), originX: 'left', originY: 'top',
+          width: Math.abs(pts[1].x - pts[0].x), height: Math.abs(pts[1].y - pts[0].y), strokeWidth: 0, fill: '#000',
+        });
+        clip.role = 'crop';
+      }
+      target.clipPath = clip; target.dirty = true;
+      this.crop = null;
+      this._cropTarget = null;
+      this._cropRestore = null;
+      this.setTool('select');
+      this.fc.setActiveObject(target);
+      this.fc.renderAll();
+      this.commit('crop');
+      return;
+    }
     if (target) {
       // Crop just this image (Fabric's native cropX/cropY/width/height, in the image's own
       // unscaled pixel space) instead of the whole artboard. this.crop is in scene space, seeded
@@ -3001,7 +4251,17 @@ export class Editor {
   }
 
   /* ── io ───────────────────────────────────────────────────────────────────────────────── */
-  async openImage(src, { fitArtboard = true } = {}) {
+  async openImage(src, { fitArtboard = true, replace = true } = {}) {
+    if (replace) {
+      // "Open image" starts a new document from the image — the old layers go (⌘Z brings them back).
+      this._penAbandon(); this._endGradEdit();
+      if (this._persp) this.cancelPerspectiveEdit();
+      if (this._exitIsolation) this._exitIsolation();
+      this.fc.discardActiveObject();
+      this.fc.getObjects().slice().forEach(o => this.fc.remove(o));
+      this.selection = null; this._polyBuild = null; this._lastActiveId = null;
+      this._emit('selection', null);
+    }
     if (fitArtboard) {
       const dim = await artboardForImage(src);
       if (this._destroyed) return null;
@@ -3071,7 +4331,8 @@ export class Editor {
     this._cropTarget = null;
     this._cropRestore = null;
     this._polyBuild = null;
-    this._penBuild = null;
+    this._penAbandon();
+    this._gradEdit = null; this._gradAxis = null; this._emit('gradientaxis', null);
     if (this._hoverCache) this._hoverCache.clear();
     this.history.past = []; this.history.future = [];
     this.history.lock = false;
@@ -3097,7 +4358,7 @@ export class Editor {
      Resolves { status: 'ok', method } or { status: 'error', reason, message }. One undo step. */
   async removeBackground({ method = 'auto', id } = {}) {
     const o = id ? this._byId(id) : this.fc.getActiveObject();
-    if (!o || !this._maskable(o) || o.role === 'adjustment') return { status: 'error', reason: 'no_target', message: 'Select an image or paint layer first.' };
+    if (!o || !(o.type === 'image' || o.role === 'paint') || o.role === 'adjustment') return { status: 'error', reason: 'no_target', message: 'Select an image or paint layer first.' };
     const provider = this.ai && this.ai._provider;
     const aiReady = this.ai.can('removeBackground') && !(provider && typeof provider.hasKey === 'function' && !provider.hasKey());
     let mask = null, used = null, aiError = null;
@@ -4188,6 +5449,9 @@ export class Editor {
         document.removeEventListener('keyup', this._onPickModifier);
       }
     }
+    clearTimeout(this._gradCommitT); this._gradCommitT = null;
+    clearTimeout(this._liveCommitT); this._liveCommitT = null;
+    if (this._onCtxMenu && this.fc.upperCanvasEl) this.fc.upperCanvasEl.removeEventListener('contextmenu', this._onCtxMenu);
     this.fc.dispose();
     this._listeners = {};
     if (this.cv) this.cv.destroy();

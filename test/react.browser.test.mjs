@@ -109,8 +109,7 @@ test('react: the pen tool shows a Finish path / Cancel pair as soon as the tool 
   await page.waitForTimeout(100);
   assert.ok(await page.locator('button:has-text("Finish path")').count() > 0);
   const box = await canvasBox();
-  // 3 points minimum — finishPolyBuild (selection.js, shared by the pen tool and the polygonal
-  // lasso) rejects anything under 3 points as not a real polygon.
+  // Three plain clicks = three corner points; Finish path keeps them as an open stroked path.
   await page.mouse.click(box.x + 50, box.y + 50);
   await page.mouse.click(box.x + 100, box.y + 50);
   await page.mouse.click(box.x + 100, box.y + 100);
@@ -118,7 +117,7 @@ test('react: the pen tool shows a Finish path / Cancel pair as soon as the tool 
   await page.locator('button:has-text("Finish path")').click();
   await page.waitForTimeout(100);
   const objs = await ed(() => window.__mounted.editor().fc.getObjects().map(o => o.type));
-  assert.ok(objs.includes('polygon'));   // finishPen() built a real fabric.Polygon layer
+  assert.ok(objs.includes('path'));   // finishPen() built a real fabric.Path layer
 
   // switching away from pen hides the pair again
   await ed(() => window.__mounted.editor().setTool('select'));
@@ -329,6 +328,75 @@ test('react: the Layer tab shows a Border section for a shape, with a colour swa
   assert.equal(colorInputsAfter, 1);
   const width = await ed(() => window.__mounted.editor().fc.getActiveObject().strokeWidth);
   assert.equal(width, 6);
+});
+
+test('react: Border style / dash / position / caps controls drive setStroke and hide when they don\'t apply', async () => {
+  await ed(() => window.__mounted.editor().setTool('rect'));
+  const box = await canvasBox();
+  await page.mouse.move(box.x + 50, box.y + 50);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 150, box.y + 150, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  await page.locator('button:has-text("Properties")').first().click();
+  const seg = (label) => page.locator(`[role=group][aria-label="${label}"] button`);
+  // the style rows live behind the settings button beside Width
+  const adv = page.locator('button[aria-label="Border settings"]');
+  await adv.waitFor({ timeout: 10000 });
+  assert.equal(await seg('Border style').count(), 0, 'collapsed until the settings button is pressed');
+  await adv.click();
+  assert.equal(await adv.getAttribute('aria-expanded'), 'true');
+  await seg('Border style').first().waitFor({ timeout: 10000 });
+  assert.equal(await seg('Border position').count(), 0, 'no width yet → only Style is offered');
+  // Style on a borderless shape gives it a 2px border too
+  await seg('Border style').filter({ hasText: 'Dashed' }).click();
+  await page.waitForTimeout(100);
+  const o1 = await ed(() => { const o = window.__mounted.editor().fc.getActiveObject(); return { w: o.strokeWidth, dash: o.strokeDashArray }; });
+  assert.equal(o1.w, 2); assert.ok(Array.isArray(o1.dash) && o1.dash[0] > 0, 'dashed: ' + JSON.stringify(o1.dash));
+  await page.locator('input[aria-label="Gap length"]').fill('9');
+  await page.locator('input[aria-label="Gap length"]').press('Enter');
+  await seg('Border position').filter({ hasText: 'Outside' }).click();
+  await seg('Border caps').filter({ hasText: 'Round' }).click();
+  await page.waitForTimeout(100);
+  const o2 = await ed(() => { const o = window.__mounted.editor().fc.getActiveObject(); return { dash: o.strokeDashArray, pos: o.strokePosition, cap: o.strokeLineCap }; });
+  assert.equal(o2.dash[1], 9); assert.equal(o2.pos, 'outside'); assert.equal(o2.cap, 'round');
+  assert.equal(await seg('Border position').filter({ hasText: 'Outside' }).getAttribute('data-on'), 'true');
+  // dotted: no Dash box and no Caps row (dots are round caps)
+  await seg('Border style').filter({ hasText: 'Dotted' }).click();
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('input[aria-label="Dash length"]').count(), 0);
+  assert.equal(await page.locator('input[aria-label="Gap length"]').count(), 1);
+  assert.equal(await seg('Border caps').count(), 0);
+  // pressing it again folds them away; the border keeps its settings
+  await adv.click();
+  assert.equal(await seg('Border style').count(), 0);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getActiveObject().strokeDashArray[0]), 0, 'still dotted');
+});
+
+test('react: the fill and border eye buttons hide / show the paint; the border eye is disabled with no border', async () => {
+  await ed(() => window.__mounted.editor().setTool('rect'));
+  const box = await canvasBox();
+  await page.mouse.move(box.x + 50, box.y + 50);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 150, box.y + 150, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  await page.locator('button:has-text("Properties")').first().click();
+  await page.locator('.cm-paint-eye[aria-label="Hide border"]').waitFor({ timeout: 10000 });
+  assert.equal(await page.locator('.cm-paint-eye[aria-label="Hide border"]').getAttribute('aria-disabled'), 'true', 'nothing to hide yet');
+  await page.locator('.cm-paint-eye[aria-label="Hide fill"]').click();
+  await page.waitForTimeout(100);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getActiveObject().fillOff), true);
+  assert.equal(await page.locator('.cm-paint-eye[aria-label="Show fill"]').getAttribute('aria-pressed'), 'true');
+  await ed(() => window.__mounted.editor().setStroke({ width: 4 }));
+  await page.waitForTimeout(100);
+  await page.locator('.cm-paint-eye[aria-label="Hide border"]').click();
+  await page.waitForTimeout(100);
+  const o = await ed(() => { const a = window.__mounted.editor().fc.getActiveObject(); return { fillOff: a.fillOff, strokeOff: a.strokeOff, w: a.strokeWidth }; });
+  assert.deepEqual(o, { fillOff: true, strokeOff: true, w: 4 });
+  await page.locator('.cm-paint-eye[aria-label="Show fill"]').click();
+  await page.waitForTimeout(100);
+  assert.equal(await ed(() => window.__mounted.editor().fc.getActiveObject().fillOff), false);
 });
 
 test('react: fill and border opacity fields write an rgba colour and keep it across recolours', async () => {
@@ -1068,4 +1136,67 @@ test('react: left panel — AI Vision tab, Auto Shadow toggle and Remove BG enab
   });
   await page.waitForTimeout(150);
   assert.equal(await removeBg.isDisabled(), false, 'enabled for an image');
+});
+
+/* ── overlays only draw for on-screen renders: a pick's offscreen capture (zoom reset to 100%)
+   used to redraw the selection/hover outlines oversized and shifted off the artboard ────────── */
+test('react: a magic wand capture with a selection showing never draws outlines outside the artboard', async () => {
+  // A big document shown zoomed OUT, like a real 1500px ad — the bug only shows below 100% zoom.
+  await ed(() => window.__mounted.editor().resizeCanvas(1600, 1200));
+  await page.waitForTimeout(400);
+  assert.ok(await ed(() => window.__mounted.editor().fc.getZoom()) < 0.9, 'document is shown zoomed out');
+  await ed(() => {
+    const e = window.__mounted.editor();
+    const r = new e.fabric.Rect({ left: 0, top: 0, width: e.W, height: e.H, fill: '#d8e4c0', strokeWidth: 0 }); r.set({ id: 'bg2', role: 'shape' }); e.fc.add(r);
+    const c = new e.fabric.Circle({ left: e.W * 0.55, top: e.H * 0.5, radius: Math.min(e.W, e.H) * 0.2, fill: '#b04020', strokeWidth: 0 }); c.set({ id: 'c', role: 'shape' }); e.fc.add(c);
+    e.commit('add'); e.setTool('magicwand');
+  });
+  await page.waitForTimeout(150);
+  const pt = await ed(() => { const e = window.__mounted.editor(), r = e.fc.upperCanvasEl.getBoundingClientRect(), v = e.fc.viewportTransform, x = e.W * 0.55 + Math.min(e.W, e.H) * 0.2, y = e.H * 0.5 + Math.min(e.W, e.H) * 0.2; return [r.left + x * v[0] + v[4], r.top + y * v[3] + v[5]]; });
+  await page.mouse.click(pt[0], pt[1]);
+  await page.waitForFunction(() => window.__mounted.editor().selection && !window.__mounted.editor().pickBusy, null, { timeout: 20000 });
+  const r = await ed(() => {
+    const e = window.__mounted.editor(), up = e.fc.upperCanvasEl, ctx = up.getContext('2d');
+    const k = up.width / up.getBoundingClientRect().width, v = e.fc.viewportTransform;
+    const box = [v[4] * k, v[5] * k, (v[4] + e.W * v[0]) * k, (v[5] + e.H * v[3]) * k];
+    const count = () => { const d = ctx.getImageData(0, 0, up.width, up.height).data; let inside = 0, outside = 0;
+      for (let y = 0; y < up.height; y += 2) for (let x = 0; x < up.width; x += 2) {
+        if (d[(y * up.width + x) * 4 + 3] <= 40) continue;
+        if (x >= box[0] - 6 && x <= box[2] + 6 && y >= box[1] - 40 * k && y <= box[3] + 6) inside++; else outside++;
+      } return { inside, outside }; };
+    e.fc.renderAll();
+    const before = count();
+    e.engine.captureFlat();   // what the next pick does first
+    return { before, after: count() };
+  });
+  assert.ok(r.before.inside > 0, 'the selection outline is drawn on screen');
+  assert.equal(r.after.outside, 0, 'nothing drawn outside the artboard after a capture');
+  assert.ok(r.after.inside > 0, 'and the on-screen outline is untouched by it');
+});
+
+test('react: right-clicking a layer opens the context menu and its items work', async () => {
+  await ed(() => {
+    const e = window.__mounted.editor();
+    const r = new e.fabric.Rect({ left: 60, top: 60, width: 120, height: 90, fill: '#f60', strokeWidth: 0 }); r.set({ id: 'R', role: 'shape', name: 'Box' }); e.fc.add(r);
+    e.commit('add'); e.setTool('select'); e.fc.discardActiveObject(); e.fc.renderAll();
+  });
+  await page.waitForTimeout(150);
+  const pt = await ed(() => { const e = window.__mounted.editor(), r = e.fc.upperCanvasEl.getBoundingClientRect(), v = e.fc.viewportTransform; return [r.left + 120 * v[0] + v[4], r.top + 105 * v[3] + v[5]]; });
+  await page.mouse.click(pt[0], pt[1], { button: 'right' });
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator('.cmx').count(), 1, 'menu is open');
+  assert.equal(await ed(() => window.__mounted.editor().fc.getActiveObject().id), 'R');
+  // themed from the shell's own tokens (mounted inside .cm-root)
+  assert.ok(await page.evaluate(() => !!document.querySelector('.cm-root .cmx')));
+  await page.locator('.cmx .cmx-item', { hasText: 'Duplicate' }).click();
+  await page.waitForTimeout(200);
+  assert.equal(await page.locator('.cmx').count(), 0, 'menu closes after an action');
+  assert.equal(await ed(() => window.__mounted.editor().fc.getObjects().filter(o => o.type === 'rect').length), 2);
+  // submenu + keyboard: open again, Escape closes
+  await page.mouse.click(pt[0], pt[1], { button: 'right' });
+  await page.locator('.cmx .cmx-item', { hasText: 'Align to canvas' }).hover();
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator('.cmx').count(), 2, 'submenu opens on hover');
+  await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.cmx').count(), 0);
 });

@@ -66,7 +66,7 @@ const BASE = { originX: 'left', originY: 'top' };
 
 export function makeShape(fabric, tool, pt, o = {}) {
   const size = o.size || 160;
-  const fill = o.fill || '#ef6a2d';
+  const fill = o.fill || '#000000';
   const stroke = o.stroke || null;
   const strokeWidth = o.strokeWidth || 0;
   const common = { ...BASE, left: pt.x - size / 2, top: pt.y - size / 2, fill, stroke, strokeWidth };
@@ -208,6 +208,8 @@ export function describeLayer(o) {
   }
   const shape = shapeKindOf(o);
   if (o.type === 'line') return { kind: 'shape', shape, subtitle: locked + 'Line' };
+  // An open pen path is stroke-only too, but it's a vector path, not a brush stroke.
+  if (o.shapeKind === 'pen') return { kind: 'shape', shape, subtitle: locked + (o.maskCanvas ? 'Masked ' : '') + 'Vector path' };
   if (o.isFreehand || (o.type === 'path' && !o.fill)) return { kind: 'shape', shape, subtitle: locked + 'Freehand path' };
-  return { kind: 'shape', shape, subtitle: locked + 'Vector Shape' };
+  return { kind: 'shape', shape, subtitle: locked + (o.maskCanvas ? 'Masked ' : '') + 'Vector Shape' };
 }
