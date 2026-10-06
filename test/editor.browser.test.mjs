@@ -2143,6 +2143,113 @@ test('browser: removeBackground falls back to the local GrabCut cutout when AI f
   assert.ok(await filteredAlpha(id, 80, 60) > 200, 'subject centre kept');
 });
 
+/* ── offline background removal (cv worker cutout / cutRefine) ───────────────────────────── */
+test('browser: offline removeBackground keys a plain backdrop — inner same-colour areas stay, soft edges, decontam, invert drops it', async () => {
+  const id = await addTestImage("ctx.fillStyle='#ffffff';ctx.fillRect(0,0,w,h);ctx.fillStyle='#c0392b';ctx.fillRect(100,50,100,100);ctx.fillStyle='#ffffff';ctx.fillRect(120,90,60,20);ctx.fillStyle='#1f6f3f';ctx.beginPath();ctx.arc(250,150,30,0,7);ctx.fill()", 300, 200);
+  const r = await page.evaluate(async (id) => {
+    const ed = window.__ed, d0 = ed.history.depth().past;
+    const res = await ed.removeBackground({ method: 'local', id });
+    const o = ed._byId(id), mf = o.filters.find(f => f.type === 'MaskFilter');
+    return { res, d: ed.history.depth().past - d0, decon: !!mf.decontamCanvas, canRefine: ed.canRefineCutout(id) };
+  }, id);
+  assert.equal(r.res.status, 'ok', JSON.stringify(r.res)); assert.equal(r.res.method, 'local'); assert.equal(r.res.detail, 'flat');
+  assert.equal(r.d, 1, 'one undo step'); assert.equal(r.canRefine, true);
+  assert.equal(await filteredAlpha(id, 5, 5), 0, 'backdrop removed');
+  assert.equal(await filteredAlpha(id, 110, 60), 255, 'product kept');
+  assert.equal(await filteredAlpha(id, 150, 100), 255, 'white label inside the product is not backdrop');
+  // the circle's anti-aliased rim comes out partially transparent rather than stair-stepped
+  const partial = await page.evaluate((id) => {
+    const o = window.__ed._byId(id), el = o._filteredEl || o._element, c = document.createElement('canvas'); c.width = el.width; c.height = el.height;
+    const x = c.getContext('2d'); x.drawImage(el, 0, 0); const d = x.getImageData(210, 150, 50, 1).data;
+    let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0 && d[i] < 255) n++; return n;
+  }, id);
+  assert.ok(partial > 0, 'soft edge pixels: ' + partial);
+  assert.equal(await page.evaluate((id) => { const ed = window.__ed; ed.invertMask(id); return !!ed._byId(id).filters.find(f => f.type === 'MaskFilter').decontamCanvas; }, id), false, 'invert drops the edge-colour fix');
+});
+
+test('browser: offline cutout on a poster keeps small separate elements (logo, its tagline, a paw over the panel) but drops faint backdrop noise', async () => {
+  // Regression: clean-up kept only pieces ≥4% of the largest, so on a poster the logo and paw
+  // prints (tiny next to the main panel) were cut out with the backdrop.
+  const id = await addTestImage(`
+    ctx.fillStyle='#efe6c1';ctx.fillRect(0,0,w,h);
+    let seed=3;const rnd=()=>(seed=(seed*16807)%2147483647)/2147483647;
+    for(let i=0;i<300;i++){ctx.fillStyle='rgba(225,214,170,0.7)';ctx.fillRect(rnd()*w,rnd()*h,5,5);}   // faint backdrop speckle
+    ctx.fillStyle='#b2c643';ctx.beginPath();ctx.roundRect(100,220,400,260,30);ctx.fill();               // the big panel
+    ctx.fillStyle='#b8322a';ctx.fillRect(470,40,90,36);                                                   // logo
+    ctx.fillStyle='#d9822b';for(let i=0;i<9;i++)ctx.fillRect(470+i*10,82,6,6);                           // tagline: tiny letters under it
+    ctx.fillStyle='#efe6c1';ctx.beginPath();ctx.arc(110,230,46,0,7);ctx.fill();                          // paw's backdrop-coloured outline...
+    ctx.fillStyle='#b2c643';ctx.beginPath();ctx.arc(110,230,38,0,7);ctx.fill();                          // ...over the panel's corner`, 600, 500);
+  const r = await page.evaluate((id) => window.__ed.removeBackground({ method: 'local', id }), id);
+  assert.equal(r.status, 'ok', JSON.stringify(r)); assert.equal(r.detail, 'flat');
+  assert.equal(await filteredAlpha(id, 300, 350), 255, 'panel kept');
+  assert.equal(await filteredAlpha(id, 515, 58), 255, 'logo kept');
+  assert.equal(await filteredAlpha(id, 503, 85), 255, 'tagline letter kept (joins the logo next to it)');
+  assert.equal(await filteredAlpha(id, 95, 215), 255, 'paw kept');
+  assert.equal(await filteredAlpha(id, 20, 20), 0, 'backdrop removed');
+  const noise = await page.evaluate((id) => {
+    const o = window.__ed._byId(id), el = o._filteredEl || o._element, c = document.createElement('canvas'); c.width = el.width; c.height = el.height;
+    const x = c.getContext('2d'); x.drawImage(el, 0, 0); const d = x.getImageData(0, 0, 600, 170).data;   // top band, above the paw (its top is at y≈184): backdrop + logo
+    let n = 0; for (let i = 0; i < d.length; i += 4) { const px = (i / 4) % 600, py = Math.floor(i / 4 / 600); if (px >= 460 && py <= 100) continue; if (d[i + 3] > 128) n++; } return n;
+  }, id);
+  assert.ok(noise < 30, 'faint speckle stays removed: ' + noise + ' opaque px');
+});
+
+test('browser: offline cutout on a busy backdrop (GrabCut), Keep/Remove touch-ups re-cut around the stroke, serialized, off after undo', async () => {
+  await page.evaluate(async () => {
+    const c = document.createElement('canvas'); c.width = 400; c.height = 300; const x = c.getContext('2d');
+    const g = x.createLinearGradient(0, 0, 400, 300); g.addColorStop(0, '#5a86c8'); g.addColorStop(1, '#a8c97a'); x.fillStyle = g; x.fillRect(0, 0, 400, 300);
+    let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < 1500; i++) { x.fillStyle = `rgba(${80 + rnd() * 80 | 0},${120 + rnd() * 80 | 0},${140 + rnd() * 60 | 0},0.5)`; x.fillRect(rnd() * 400, rnd() * 300, 5, 5); }
+    x.fillStyle = '#f08a24'; x.beginPath(); x.ellipse(200, 150, 70, 95, 0.2, 0, 7); x.fill();
+    x.fillStyle = '#d81b60'; x.fillRect(320, 30, 50, 50);   // a second thing that stands out — the stroke removes it
+    await window.__ed.openImage(c.toDataURL('image/png'));
+  });
+  const id = await page.evaluate(() => { const o = window.__ed.fc.getObjects().find(q => q.type === 'image'); window.__ed.fc.setActiveObject(o); return o.id; });
+  const r = await page.evaluate((id) => window.__ed.removeBackground({ method: 'local', id }), id);
+  assert.equal(r.status, 'ok', JSON.stringify(r)); assert.equal(r.detail, 'grabcut');
+  assert.ok(await filteredAlpha(id, 200, 150) > 240, 'subject kept');
+  assert.equal(await filteredAlpha(id, 20, 280), 0, 'backdrop corner removed');
+
+  const box = await page.locator('#cv').boundingBox();
+  const vt = await page.evaluate(() => window.__ed.fc.viewportTransform.slice());
+  const at = (x, y) => [box.x + vt[4] + x * vt[0], box.y + vt[5] + y * vt[3]];
+  const stroke = async (mode, pts) => {
+    const d0 = await page.evaluate((m) => { const ed = window.__ed; ed.enterMaskEdit(ed.fc.getObjects().find(q => q.type === 'image').id); ed.setToolOptions({ size: 24 }); ed.setMaskRefine(m); return ed.history.depth().past; }, mode);
+    await page.mouse.move(...at(...pts[0])); await page.mouse.down();
+    for (const p of pts.slice(1)) await page.mouse.move(...at(...p));
+    await page.mouse.up();
+    await page.waitForFunction((d) => window.__ed.history.depth().past > d, d0, { timeout: 20000 });
+    return page.evaluate((d) => window.__ed.history.depth().past - d, d0);
+  };
+  assert.equal(await stroke('remove', [[325, 55], [345, 55], [365, 55]]), 1, 'one undo step per stroke');
+  assert.equal(await filteredAlpha(id, 345, 55), 0, 'Remove stroke cut the square out');
+  assert.ok(await filteredAlpha(id, 200, 150) > 240, 'the subject is untouched');
+  await stroke('keep', [[40, 240], [60, 240]]);
+  assert.ok(await filteredAlpha(id, 50, 240) > 200, 'Keep stroke brought backdrop back');
+  const after = await page.evaluate(async () => {
+    const ed = window.__ed, json = ed.toJSON();
+    ed.undo(); await new Promise(r => setTimeout(r, 400));   // undo restores the scene asynchronously
+    return { serialized: json.includes('decontamDataURL'), canRefine: ed.canRefineCutout(), refineSet: ed.setMaskRefine('keep') };
+  });
+  assert.ok(after.serialized, 'the edge-colour fix is saved with the mask');
+  assert.equal(after.canRefine, false, 'touch-ups need the live cutout — not after an undo');
+  assert.equal(after.refineSet, false);
+});
+
+test('browser: mask brush strokes land under the pointer on a fitted / offset / scaled image (not at artboard px)', async () => {
+  // a 100×100 image fitted into the 400×300 artboard: left 50, ×3 — mask px are NOT scene px
+  const id = await addTestImage("ctx.fillStyle='#c33';ctx.fillRect(0,0,w,h)", 100, 100);
+  const placed = await page.evaluate((id) => { const ed = window.__ed, o = ed._byId(id); ed.addMask(id); ed.enterMaskEdit(id); ed.setToolOptions({ size: 9, color: '#000000', hardness: 1 }); return { left: o.left, sx: o.scaleX }; }, id);
+  assert.deepEqual(placed, { left: 50, sx: 3 });
+  const box = await page.locator('#cv').boundingBox();
+  const vt = await page.evaluate(() => window.__ed.fc.viewportTransform.slice());
+  await page.mouse.move(box.x + vt[4] + 80 * vt[0], box.y + vt[5] + 30 * vt[3]);   // scene (80,30) = image px (10,10)
+  await page.mouse.down(); await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.equal(await filteredAlpha(id, 10, 10), 0, 'hidden right under the pointer');
+  assert.equal(await filteredAlpha(id, 20, 10), 255, 'not where artboard px would put it');
+});
+
 test('browser: removeBackground reports no_target without an image or paint layer selected', async () => {
   const r = await page.evaluate(() => window.__ed.removeBackground());
   assert.equal(r.status, 'error'); assert.equal(r.reason, 'no_target');

@@ -1138,6 +1138,34 @@ test('react: left panel — AI Vision tab, Auto Shadow toggle and Remove BG enab
   assert.equal(await removeBg.isDisabled(), false, 'enabled for an image');
 });
 
+test('react: with an AI key, "Remove BG offline" cuts out locally; the mask banner then offers Keep / Remove touch-ups', async () => {
+  await page.locator('.cm-tabs button:has-text("AI")').first().click();
+  await page.locator('input.cm-ai-key').fill('fake-key-for-test');
+  await page.locator('input.cm-ai-key').press('Enter');
+  await page.locator('.cm-lp-tab', { hasText: 'Layers' }).click().catch(() => {});
+  const id = await ed(async () => {
+    const e = window.__mounted.editor();
+    const c = document.createElement('canvas'); c.width = 200; c.height = 150; const x = c.getContext('2d');
+    x.fillStyle = '#ffffff'; x.fillRect(0, 0, 200, 150); x.fillStyle = '#c0392b'; x.fillRect(60, 40, 80, 70);
+    const img = await e.addImage(c.toDataURL()); e.fc.setActiveObject(img); return img.id;
+  });
+  const offline = page.locator('.cm-lp-card-row .cm-btn', { hasText: 'Remove BG offline' });
+  await offline.waitFor({ timeout: 10000 });
+  // the AI must not be called — the provider would throw if it were
+  await ed(() => { window.__mounted.editor().ai.provider().removeBackground = async () => { throw new Error('AI should not run'); }; });
+  await offline.click();
+  await page.locator('.cm-note', { hasText: 'Background removed offline' }).first().waitFor({ timeout: 20000 });
+  assert.equal(await ed((id) => window.__mounted.editor().canRefineCutout(id), id), true);
+  await ed((id) => window.__mounted.editor().enterMaskEdit(id), id);
+  const keep = page.locator('[role=group][aria-label="Touch-up brush"] button', { hasText: 'Keep' });
+  await keep.waitFor({ timeout: 10000 });
+  await keep.click();
+  assert.equal(await keep.getAttribute('aria-pressed'), 'true');
+  assert.equal(await ed(() => window.__mounted.editor().toolOpts.maskRefine), 'keep');
+  await keep.click();   // pressing it again goes back to plain mask painting
+  assert.equal(await ed(() => window.__mounted.editor().toolOpts.maskRefine), null);
+});
+
 /* ── overlays only draw for on-screen renders: a pick's offscreen capture (zoom reset to 100%)
    used to redraw the selection/hover outlines oversized and shifted off the artboard ────────── */
 test('react: a magic wand capture with a selection showing never draws outlines outside the artboard', async () => {

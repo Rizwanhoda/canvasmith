@@ -143,6 +143,7 @@
   .lp-ai-card .ai-detect-btn:hover { background:var(--accent); filter:brightness(1.08) }
   .lp-ai-card .ai-detect-btn[data-busy=true] { opacity:.8; pointer-events:none }
   .lp-ai-row { display:flex; gap:6px; margin-top:6px }
+  .lp-ai-row[hidden] { display:none }   /* the offline Remove BG row only shows with an AI key */
   .lp-ai-row .act { flex:1; justify-content:center; font-size:11.5px }
   .lp-ai-row .act[data-busy=true] { opacity:.8; pointer-events:none }
   .lp-ai-row .act[data-on=true] { border-color:var(--accent); color:var(--accent); background:color-mix(in srgb, var(--accent) 10%, var(--panel)) }
@@ -816,6 +817,10 @@
         <button class="act" id="ai-removebg" title="Cut the subject out of the selected image (as a layer mask)"></button>
         <button class="act" id="ai-autoshadow" title="Toggle a soft drop shadow on the selected layer"></button>
       </div>
+      <!-- with an AI key Remove BG uses the AI; this keeps the free offline cut-out one click away -->
+      <div class="lp-ai-row" id="ai-removebg-local-row" hidden>
+        <button class="act" id="ai-removebg-local" title="Cut the subject out offline, without the AI (as a layer mask you can touch up)"></button>
+      </div>
       <div class="note" id="ai-card-msg" style="margin-top:6px" hidden></div>
     </div>
     <div id="left-scroll-cue"></div>
@@ -859,6 +864,14 @@
       <div id="tool-panel" hidden>
         <div id="maskedit-banner" style="display:none;background:var(--accent);color:var(--accent-ink);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12px;font-weight:600">
           Editing layer mask — paint white to reveal, black to hide.
+          <!-- offline cut-outs only: strokes become hints and the cut is re-run around them -->
+          <div id="mask-refine" hidden style="margin-top:8px;font-weight:500">
+            Touch up the cut-out — paint over what to keep or remove:
+            <div class="seg" id="mask-refine-seg" role="group" aria-label="Touch-up brush" style="margin-top:6px">
+              <button class="act" data-refine="keep" aria-pressed="false">Keep</button>
+              <button class="act" data-refine="remove" aria-pressed="false">Remove</button>
+            </div>
+          </div>
           <button class="act" id="maskedit-done" style="width:100%;margin-top:8px;background:var(--panel);color:var(--ink)">Done editing mask</button>
         </div>
         <div class="dock-head">
@@ -3462,7 +3475,7 @@ ed.fc.on('selection:created', refreshDock); ed.fc.on('selection:updated', refres
 
 // AI card: Auto-Detect (above) plus two one-click subject actions. Busy state per button, and all
 // three disabled while any runs — same "one AI call at a time" rule as the AI tab's runAi.
-const cardBtns = () => [detectBtn, removeBgBtn, autoShadowBtn, ...detectResults.querySelectorAll('[data-detect-layer]')];
+const cardBtns = () => [detectBtn, removeBgBtn, removeBgLocalBtn, autoShadowBtn, ...detectResults.querySelectorAll('[data-detect-layer]')];
 const cardMsgEl = document.getElementById('ai-card-msg');
 function cardMsg(t) { cardMsgEl.textContent = t || ''; cardMsgEl.hidden = !t; }
 async function runCardAction(btn, label, fn) {
@@ -3477,12 +3490,25 @@ async function runCardAction(btn, label, fn) {
 const removeBgBtn = document.getElementById('ai-removebg'), autoShadowBtn = document.getElementById('ai-autoshadow');
 removeBgBtn.innerHTML = iconSVG('scissors', 13) + '<span>Remove BG</span>';
 autoShadowBtn.innerHTML = iconSVG('sun', 13) + '<span>Auto Shadow</span>';
-removeBgBtn.onclick = async () => {
-  const r = await runCardAction(removeBgBtn, 'Cutting out…', () => ed.removeBackground());
-  cardMsg(r.status === 'ok'
-    ? `Background removed (${r.method === 'ai' ? 'AI' : 'local'} cutout) — it's a layer mask: refine it with the brush, or undo.` + (r.aiFallback ? (r.aiFallback === 'weak_cutout' ? ' The AI result didn\'t separate a subject, so the local cutout was used.' : ' AI was unavailable, so the local cutout was used.') : '')
-    : (r.message || r.reason));
+const removeBgLocalBtn = document.getElementById('ai-removebg-local');
+removeBgLocalBtn.innerHTML = iconSVG('scissors', 13) + '<span>Remove BG offline</span>';
+const removeBgMsg = (r) => r.status !== 'ok' ? (r.message || r.reason)
+  : r.method === 'ai'
+    ? 'Background removed (AI cutout) — it\'s a layer mask: refine it with the brush, or undo.'
+    : 'Background removed offline — it\'s a layer mask. Edit the mask to touch it up with Keep / Remove, or undo.'
+      + (r.aiFallback ? (r.aiFallback === 'weak_cutout' ? ' The AI result didn\'t separate a subject, so the offline cutout was used.' : ' AI was unavailable, so the offline cutout was used.') : '');
+removeBgBtn.onclick = async () => cardMsg(removeBgMsg(await runCardAction(removeBgBtn, 'Cutting out…', () => ed.removeBackground())));
+removeBgLocalBtn.onclick = async () => cardMsg(removeBgMsg(await runCardAction(removeBgLocalBtn, 'Cutting out…', () => ed.removeBackground({ method: 'local' }))));
+/* Keep / Remove touch-up brushes (mask-edit banner) — only for a layer cut out offline. */
+const maskRefine = document.getElementById('mask-refine');
+const refreshMaskRefine = () => {
+  maskRefine.hidden = !(ed._maskEdit && ed.canRefineCutout(ed._maskEdit.layerId));
+  maskRefine.querySelectorAll('[data-refine]').forEach(b => { const on = ed.toolOpts.maskRefine === b.dataset.refine; b.dataset.on = String(on); b.setAttribute('aria-pressed', String(on)); });
 };
+maskRefine.querySelectorAll('[data-refine]').forEach(b => {
+  b.onclick = () => ed.setMaskRefine(ed.toolOpts.maskRefine === b.dataset.refine ? null : b.dataset.refine);
+});
+['maskedit', 'maskrefine', 'change', 'tool'].forEach(ev => ed.on(ev, refreshMaskRefine));
 autoShadowBtn.onclick = () => {
   const r = ed.toggleAutoShadow();
   if (!r) cardMsg('Select a layer first.');
@@ -3493,11 +3519,13 @@ function refreshAiCard() {
   detectBtn.disabled = busy;
   detectResults.querySelectorAll('[data-detect-layer]').forEach(b => { b.disabled = busy; });
   removeBgBtn.disabled = busy || !(a && (a.kind === 'image' || a.kind === 'paint') && !a.isAdjustment);
+  removeBgLocalBtn.disabled = removeBgBtn.disabled;
   autoShadowBtn.disabled = busy || !(a && a.role !== 'bg' && !a.isAdjustment);
   autoShadowBtn.dataset.on = String(!!(a && a.hasShadow));
   const p = ed.ai._provider, keyed = !!(p && (typeof p.hasKey !== 'function' || p.hasKey()));
   const st = document.getElementById('ai-status');
   st.textContent = keyed ? 'Neural On' : 'Local'; st.dataset.on = String(keyed);
+  document.getElementById('ai-removebg-local-row').hidden = !keyed;   // without a key Remove BG already runs offline
   document.getElementById('ai-engine-gen').textContent = keyed ? 'Gemini' : 'No key';
 }
 setLeftTab((() => { try { return localStorage.getItem('cm-left-tab') === 'ai' ? 'ai' : 'layers'; } catch (e) { return 'layers'; } })());

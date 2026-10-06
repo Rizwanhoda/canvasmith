@@ -22,6 +22,12 @@ export function makeMaskFilterClass(fabric) {
   _MaskFilterClass = fabric.util.createClass(fabric.Image.filters.BaseFilter, {
     type: 'MaskFilter',
     maskCanvas: null,
+    /* Optional edge-colour fix from an offline background removal (Editor#removeBackground):
+       RGBA at any resolution, mapped over the layer like the mask; where its alpha > 0 the pixel's
+       colour is swapped for the stored decontaminated one (the old backdrop's tint taken out of
+       semi-transparent edge pixels). Kept beside the pixels, never written into them, so removing
+       the mask removes the fix too. */
+    decontamCanvas: null,
     mainParameter: 'maskCanvas',
 
     /* Reads maskCanvas's grayscale value at each source pixel (nearest-neighbor sampled up from
@@ -39,6 +45,11 @@ export function makeMaskFilterClass(fabric) {
       let mdata;
       try { mdata = mctx.getImageData(0, 0, mc.width, mc.height).data; } catch (e) { return; }
       const sx = mc.width / w, sy = mc.height / h;
+      const dc = this.decontamCanvas;
+      let ddata = null, dsx = 0, dsy = 0;
+      if (dc && dc.width && dc.height) {
+        try { ddata = dc.getContext('2d').getImageData(0, 0, dc.width, dc.height).data; dsx = dc.width / w; dsy = dc.height / h; } catch (e) { ddata = null; }
+      }
       for (let y = 0; y < h; y++) {
         const my = Math.min(mc.height - 1, Math.floor(y * sy));
         for (let x = 0; x < w; x++) {
@@ -53,6 +64,11 @@ export function makeMaskFilterClass(fabric) {
           const value = maskAlpha > 0 ? gray : 1;
           const i = (y * w + x) * 4;
           data[i + 3] = Math.round(data[i + 3] * value);
+          if (ddata && value > 0 && value < 1) {
+            const di = (Math.min(dc.height - 1, Math.floor(y * dsy)) * dc.width + Math.min(dc.width - 1, Math.floor(x * dsx))) * 4;
+            const da = ddata[di + 3] / 255;
+            if (da > 0) { data[i] += (ddata[di] - data[i]) * da; data[i + 1] += (ddata[di + 1] - data[i + 1]) * da; data[i + 2] += (ddata[di + 2] - data[i + 2]) * da; }
+          }
         }
       }
     },
@@ -70,22 +86,29 @@ export function makeMaskFilterClass(fabric) {
        callback, and Fabric doesn't call ITS callback until every object — filters included — is
        through its own fromObject). */
     toObject() {
-      return { type: this.type, maskDataURL: this.maskCanvas ? this.maskCanvas.toDataURL('image/png') : null };
+      return { type: this.type, maskDataURL: this.maskCanvas ? this.maskCanvas.toDataURL('image/png') : null,
+        ...(this.decontamCanvas ? { decontamDataURL: this.decontamCanvas.toDataURL('image/png') } : {}) };
     },
   });
   _MaskFilterClass.fromObject = function (object, callback) {
     const filter = new _MaskFilterClass({});
-    if (!object.maskDataURL) { callback && callback(filter); return filter; }
-    const img = new Image();
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      c.width = img.naturalWidth || 1; c.height = img.naturalHeight || 1;
-      c.getContext('2d').drawImage(img, 0, 0);
-      filter.maskCanvas = c;
-      callback && callback(filter);
-    };
-    img.onerror = () => { callback && callback(filter); };
-    img.src = object.maskDataURL;
+    // mask + optional decontam canvas decode independently; the callback fires once both are in
+    const jobs = [['maskDataURL', 'maskCanvas'], ['decontamDataURL', 'decontamCanvas']].filter(([k]) => object[k]);
+    if (!jobs.length) { callback && callback(filter); return filter; }
+    let left = jobs.length;
+    const done = () => { if (--left === 0) callback && callback(filter); };
+    jobs.forEach(([k, prop]) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth || 1; c.height = img.naturalHeight || 1;
+        c.getContext('2d').drawImage(img, 0, 0);
+        filter[prop] = c;
+        done();
+      };
+      img.onerror = done;
+      img.src = object[k];
+    });
     return filter;
   };
   // Registered under fabric's own filters namespace so its generic enlivenObjects() dispatch

@@ -1272,6 +1272,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
   const toastIdRef = useRef(0);
   // Border's advanced rows (style / align / caps / join) — shut until the settings button opens them.
   const [strokeAdvOpen, setStrokeAdvOpen] = useState(false);
+  const [maskRefine, setMaskRefine] = useState(null);   // Keep/Remove touch-up brush ('keep'|'remove'|null)
   const toast = useCallback((message, action) => {
     const id = ++toastIdRef.current;
     setToasts(t => [...t, { id, message, action }]);
@@ -1672,6 +1673,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
       ed.on('gradientaxis', g => { gradAxis = g; ed.fc.requestRenderAll(); }),
       ed.on('clonesource', s => setCloneSrc(s)),
       ed.on('maskedit', m => { setMaskEdit(m); setLayers(ed.layers()); }),
+      ed.on('maskrefine', m => setMaskRefine(m)),
       ed.on('aiinsert', ({ pt, region }) => setAiInsert({ pt, region, prompt: '', busy: false, msg: '' })),
       ed.on('hover', h => { hoverPreview = h; ed.fc.requestRenderAll(); setObjselectBusy(false); }),
       ed.on('error', (ev) => {
@@ -2017,11 +2019,14 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
     setDetectResults(r.result.boxes); setDetectRan(true);
     setLeftTab('ai');
   };
-  const removeBg = async () => {
-    const r = await runCard('removebg', () => ed().removeBackground());
-    setCardMsg(r.status === 'ok'
-      ? `Background removed (${r.method === 'ai' ? 'AI' : 'local'} cutout) — it's a layer mask: refine it with the brush, or undo.` + (r.aiFallback ? (r.aiFallback === 'weak_cutout' ? ' The AI result didn\'t separate a subject, so the local cutout was used.' : ' AI was unavailable, so the local cutout was used.') : '')
-      : (r.message || r.reason));
+  // method: undefined = AI when keyed, else offline; 'local' = always offline (same messages as the demo)
+  const removeBg = async (method) => {
+    const r = await runCard(method === 'local' ? 'removebg-local' : 'removebg', () => ed().removeBackground(method ? { method } : undefined));
+    setCardMsg(r.status !== 'ok' ? (r.message || r.reason)
+      : r.method === 'ai'
+        ? 'Background removed (AI cutout) — it\'s a layer mask: refine it with the brush, or undo.'
+        : 'Background removed offline — it\'s a layer mask. Edit the mask to touch it up with Keep / Remove, or undo.'
+          + (r.aiFallback ? (r.aiFallback === 'weak_cutout' ? ' The AI result didn\'t separate a subject, so the offline cutout was used.' : ' AI was unavailable, so the offline cutout was used.') : ''));
   };
   const autoShadow = () => { const r = ed().toggleAutoShadow(); if (!r) setCardMsg('Select a layer first.'); };
   const selectDetected = (box) => ed().selectDetectedBox(box);
@@ -2805,6 +2810,18 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
         {maskEdit && (
           <div style={{ background: 'var(--cm-accent)', color: 'var(--cm-accent-ink)', borderRadius: 8, padding: '8px 10px', marginBottom: 10, fontSize: 12, fontWeight: 600 }}>
             Editing layer mask — paint white to reveal, black to hide.
+            {/* offline cut-outs only: strokes become hints and the cut is re-run around them */}
+            {ed().canRefineCutout(maskEdit.layerId) && (
+              <div style={{ marginTop: 8, fontWeight: 500 }}>
+                Touch up the cut-out — paint over what to keep or remove:
+                <div className="cm-seg" role="group" aria-label="Touch-up brush" style={{ marginTop: 6 }}>
+                  {[['keep', 'Keep'], ['remove', 'Remove']].map(([m, l]) => (
+                    <button key={m} className="cm-btn" data-on={maskRefine === m} aria-pressed={maskRefine === m}
+                      onClick={() => ed().setMaskRefine(maskRefine === m ? null : m)}>{l}</button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="cm-row" style={{ marginTop: 8 }}>
               <button className="cm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--cm-panel)', color: 'var(--cm-ink)' }} onClick={() => ed().invertMask(maskEdit.layerId)} title="Swap hidden/visible across the whole mask">
                 Invert mask
@@ -3262,7 +3279,7 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
               </button>
               <div className="cm-lp-card-row">
                 <button className="cm-btn" data-busy={cardBusy === 'removebg'} title="Cut the subject out of the selected image (as a layer mask)"
-                  disabled={!!cardBusy || !(activeLayer && (activeLayer.kind === 'image' || activeLayer.kind === 'paint') && !activeLayer.isAdjustment)} onClick={removeBg}>
+                  disabled={!!cardBusy || !(activeLayer && (activeLayer.kind === 'image' || activeLayer.kind === 'paint') && !activeLayer.isAdjustment)} onClick={() => removeBg()}>
                   {cardBusy === 'removebg' ? <><span className="cm-btn-spin" />Cutting out…</> : <><Icon name="scissors" size={13} /> Remove BG</>}
                 </button>
                 <button className="cm-btn" data-on={!!(activeLayer && activeLayer.hasShadow)} title="Toggle a soft drop shadow on the selected layer"
@@ -3270,6 +3287,15 @@ export function CanvasmithEditor({ fabric, width = 1080, height = 1080, image = 
                   <Icon name="sun" size={13} /> Auto Shadow
                 </button>
               </div>
+              {/* with an AI key Remove BG uses the AI; this keeps the free offline cut-out one click away */}
+              {aiKeyed && (
+                <div className="cm-lp-card-row">
+                  <button className="cm-btn" data-busy={cardBusy === 'removebg-local'} title="Cut the subject out offline, without the AI (as a layer mask you can touch up)"
+                    disabled={!!cardBusy || !(activeLayer && (activeLayer.kind === 'image' || activeLayer.kind === 'paint') && !activeLayer.isAdjustment)} onClick={() => removeBg('local')}>
+                    {cardBusy === 'removebg-local' ? <><span className="cm-btn-spin" />Cutting out…</> : <><Icon name="scissors" size={13} /> Remove BG offline</>}
+                  </button>
+                </div>
+              )}
               {cardMsg && <div className="cm-note" style={{ marginTop: 6 }}>{cardMsg}</div>}
             </div>
           </div>

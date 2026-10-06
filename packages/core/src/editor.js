@@ -436,6 +436,8 @@ export class Editor {
     const prev = this.tool;
     if (t !== prev) this._drawLayer = null;   // a new brush session starts a new paint layer
     if (CLICK_LASSOS.includes(prev) && prev !== t) this._polyBuild = null;
+    // Keep/Remove touch-ups are brush strokes — another tool (even the eraser) ends them
+    if (t !== 'brush' && this.toolOpts && this.toolOpts.maskRefine) { this.toolOpts.maskRefine = null; this._emit('maskrefine', null); }
     // Switching away from Pen mid-path keeps what was drawn (Figma: changing tools ends the path,
     // it doesn't throw it away) — and always tells listeners, so a host overlay that only updates
     // from 'pen' never keeps drawing an abandoned path.
@@ -921,6 +923,12 @@ export class Editor {
     if (this._maskEdit && (t === 'brush' || t === 'pencil' || t === 'eraser')) {
       const layer = this._byId(this._maskEdit.layerId);
       if (layer && layer.maskCanvas) {
+        // Keep/Remove touch-up: paint white/black now, re-cut around the stroke on mouseup
+        if (this._refineActive(layer)) {
+          const keep = this.toolOpts.maskRefine === 'keep';
+          this._refineStroke = { keep, r: Math.max(1, (o.size || 20) / 2), pts: [pt] };
+          Object.assign(o, { color: keep ? '#ffffff' : '#000000', opacity: 1 });
+        } else this._refineStroke = null;
         this._maskPaint(layer, pt, null, o, t === 'eraser');
         this._refreshMaskFilter(layer);
         this._maskDrag = pt;
@@ -1169,7 +1177,9 @@ export class Editor {
     if (this._maskEdit && this._maskDrag && (this.tool === 'brush' || this.tool === 'pencil' || this.tool === 'eraser')) {
       const layer = this._byId(this._maskEdit.layerId);
       if (layer && layer.maskCanvas) {
-        this._maskPaint(layer, pt, this._maskDrag, { ...this.toolOpts }, this.tool === 'eraser');
+        const rs = this._refineStroke;
+        if (rs) rs.pts.push(pt);
+        this._maskPaint(layer, pt, this._maskDrag, rs ? { ...this.toolOpts, color: rs.keep ? '#ffffff' : '#000000', opacity: 1 } : { ...this.toolOpts }, this.tool === 'eraser');
         this._refreshMaskFilter(layer);
         this.fc.requestRenderAll();
       }
@@ -1274,7 +1284,14 @@ export class Editor {
 
   _up() {
     if (this._persp && this._persp.drag >= 0) { this._persp.drag = -1; this._emitPerspective(); return; }
-    if (this._maskEdit && this._maskDrag) { this._maskDrag = null; this._flushFrameJob('mask'); this.commit('mask-paint'); return; }
+    if (this._maskEdit && this._maskDrag) {
+      this._maskDrag = null; this._flushFrameJob('mask');
+      const rs = this._refineStroke, layer = this._byId(this._maskEdit.layerId);
+      this._refineStroke = null;
+      if (rs && this._refineActive(layer)) this._refineCutout(layer, rs);   // commits when the re-cut lands
+      else this.commit('mask-paint');
+      return;
+    }
     if (this._penDrag) { this._penUp(); return; }
     const d = this._drag; this._drag = null;
     if (!d) return;
@@ -3760,12 +3777,29 @@ export class Editor {
     o.maskEnabled = true;
     touchVectorMask(o);
   }
-  /* One mask stamp (or a line from `from`) in whatever space the layer's mask lives in: artboard
-     px for image masks, the layer's own box for vector masks. */
+  /* Scene point → the image mask's own pixels. MaskFilter stretches maskCanvas over the layer's
+     whole element (see mask.js), so a mask pixel is an element position, not an artboard one —
+     only the same thing when the image fills the artboard unscaled. Goes through the layer's full
+     transform (position, scale, rotation, flip, parent group, crop), so a fitted, offset or
+     stroke-trimmed layer gets painted under the pointer. `size` (scene px) comes back in mask px. */
+  _imageMaskPoint(layer, pt, size) {
+    const F = this.fabric, mc = layer.maskCanvas;
+    const el = layer._originalElement || layer._element;
+    const ew = (el && (el.naturalWidth || el.width)) || layer.width || 1, eh = (el && (el.naturalHeight || el.height)) || layer.height || 1;
+    const m = layer.calcTransformMatrix();
+    const p = F.util.transformPoint(new F.Point(pt.x, pt.y), F.util.invertTransform(m));
+    const ex = p.x + (layer.width || ew) / 2 + (layer.cropX || 0), ey = p.y + (layer.height || eh) / 2 + (layer.cropY || 0);
+    const kx = mc.width / ew, ky = mc.height / eh;
+    const scale = Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;   // scene px per element px
+    return { x: ex * kx, y: ey * ky, size: (size || 20) / scale * Math.sqrt(kx * ky) };
+  }
+  /* One mask stamp (or a line from `from`) in whatever space the layer's mask lives in: the
+     image's own pixels for image masks (see _imageMaskPoint), the layer's own box for vector masks. */
   _maskPaint(layer, pt, from, opts, erase) {
     const ctx = layer.maskCanvas.getContext('2d');
     if (!this._isVectorMasked(layer)) {
-      if (from) maskLine(ctx, from, pt, opts, erase); else maskStamp(ctx, pt.x, pt.y, opts, erase);
+      const a = this._imageMaskPoint(layer, pt, opts.size), o2 = { ...opts, size: a.size };
+      if (from) maskLine(ctx, this._imageMaskPoint(layer, from, opts.size), a, o2, erase); else maskStamp(ctx, a.x, a.y, o2, erase);
       return;
     }
     const a = vectorMaskPoint(this.fabric, layer, pt, opts.size || 20);
@@ -3819,6 +3853,8 @@ export class Editor {
   invertMask(id) {
     const o = this._byId(id); if (!o || !o.maskCanvas) return;
     invertMaskCanvas(o.maskCanvas);
+    // the edge-colour fix belongs to the subject side — after inverting it would tint the backdrop
+    const mf = (o.filters || []).find(f => f.type === 'MaskFilter'); if (mf) mf.decontamCanvas = null;
     if (this._isVectorMasked(o)) touchVectorMask(o); else o.applyFilters();
     this.fc.renderAll();
     this.commit('invert-mask');
@@ -3840,6 +3876,8 @@ export class Editor {
     this._flushFrameJob('mask');
     this._maskEdit = null;
     this._maskDrag = null;
+    this._refineStroke = null;
+    if (this.toolOpts.maskRefine) { this.toolOpts.maskRefine = null; this._emit('maskrefine', null); }
     this._emit('maskedit', null);
   }
   /* applyFilters() re-runs the WHOLE filter chain from the pristine source (including MaskFilter's
@@ -4351,8 +4389,9 @@ export class Editor {
      mask with the brush, toggle it, or delete it. `method`:
        'ai'    the registered provider's removeBackground (Gemini returns the subject on #00FF00,
                a dedicated cutout provider may return real alpha — both are keyed to a mask here)
-       'local' seeded GrabCut in the CV worker over the layer's own (geometry-corrected) pixels,
-               the whole frame as the work rect — free, offline, good on product/portrait shots
+       'local' offline, in the CV worker (see _maskOffline): a plain backdrop is keyed out by
+               colour, anything else gets auto-seeded GrabCut refined along the edge; soft edges
+               and decontaminated edge colours either way. Free; touch up with setMaskRefine()
        'auto'  (default) AI when the provider has a key, else local; an AI failure falls back to
                local rather than leaving the user with nothing.
      Resolves { status: 'ok', method } or { status: 'error', reason, message }. One undo step. */
@@ -4375,12 +4414,14 @@ export class Editor {
       else aiError = r;
       if (!mask && method === 'ai') return aiError || { status: 'error', reason: 'provider_failed', message: 'The AI cutout came back empty.' };
     }
+    let decon = null, detail = null;
     if (!mask) {
-      mask = await this._maskFromGrabCut(o);
+      const cut = await this._maskOffline(o);
       used = 'local';
       if (this._destroyed) return { status: 'error', reason: 'destroyed' };
-      if (!mask) return { status: 'error', reason: 'no_subject', message: 'Could not find a subject to keep — try the brush on a layer mask instead.' };
-    }
+      if (!cut) return { status: 'error', reason: 'no_subject', message: 'Could not find a subject to keep — try the brush on a layer mask instead.' };
+      mask = cut.mask; decon = cut.decon; detail = cut.method;
+    } else if (this._cutout) { this._cutout = null; if (this.cv) this.cv.cutoutFree(); }   // an AI cutout has nothing for Keep/Remove touch-ups to resume
     if (!o.maskCanvas) {
       o.maskCanvas = createMaskCanvas(this.W, this.H);
       o.maskEnabled = true;
@@ -4393,11 +4434,12 @@ export class Editor {
     mctx.drawImage(mask, 0, 0, o.maskCanvas.width, o.maskCanvas.height);
     o.maskEnabled = true;
     const mf = (o.filters || []).find(f => f.type === 'MaskFilter');
-    if (mf) mf.maskCanvas = o.maskCanvas;
+    if (mf) { mf.maskCanvas = o.maskCanvas; mf.decontamCanvas = decon; }
+    if (used === 'local' && this._cutout) this._cutout.maskCanvas = o.maskCanvas;
     o.applyFilters();   // synchronously (not _refreshMaskFilter's next-frame coalesce) so the commit below and the screen agree
     this.fc.renderAll();
     this.commit('remove-bg');
-    return { status: 'ok', method: used, ...(aiError ? { aiFallback: aiError.reason } : {}) };
+    return { status: 'ok', method: used, ...(detail ? { detail } : {}), ...(aiError ? { aiFallback: aiError.reason } : {}) };
   }
   /* The layer's own pixels as the mask filter sees them: full element, geometry applied (the mask
      runs after Geometry in the chain, see _rebuildImageFilters). */
@@ -4469,23 +4511,88 @@ export class Editor {
     ctx.putImageData(d, 0, 0);
     return this._featherMask(c);
   }
-  async _maskFromGrabCut(o) {
+  /* Offline cutout (the CV worker's cutout(): plain-backdrop keying, else auto-seeded GrabCut
+     refined along the edge, then soft alpha + edge-colour decontamination). Works on the layer's
+     own pixels capped at 1280px. Resolves { mask, decon, method } as canvases at that size, or
+     null. Remembers the layer in this._cutout so Keep/Remove touch-ups can resume the cut. */
+  async _maskOffline(o) {
     if (!this.cv || typeof Worker === 'undefined') return null;
     try {
-      const src = this._layerSourceCanvas(o);
-      const imgd = prepImageData(src, 900);
-      const W = imgd.width, H = imgd.height, ix = Math.round(W * 0.02), iy = Math.round(H * 0.02);
-      const pts = await this.cv.grabcut({ data: imgd.data, width: W, height: H }, { cx: Math.round(W / 2), cy: Math.round(H / 2) }, { x: ix, y: iy, w: W - 2 * ix, h: H - 2 * iy });
-      if (!pts || pts.length < 3) return null;
-      const c = document.createElement('canvas'); c.width = W; c.height = H;
-      const ctx = c.getContext('2d');
-      ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = '#fff'; ctx.beginPath();
-      pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-      ctx.closePath(); ctx.fill();
-      return this._featherMask(c);
-    } catch (e) { return null; }
+      const imgd = prepImageData(this._layerSourceCanvas(o), 1280);
+      const r = await this.cv.cutout({ data: imgd.data, width: imgd.width, height: imgd.height });
+      if (!r || r.empty || !r.alpha) { this._cutout = null; return null; }
+      this._cutout = { layerId: o.id, W: r.W, H: r.H, maskCanvas: null };
+      return this._cutCanvases(r);
+    } catch (e) { this._cutout = null; return null; }
   }
+  _cutCanvases(r) {
+    const mask = document.createElement('canvas'); mask.width = r.W; mask.height = r.H;
+    const mctx = mask.getContext('2d'), md = mctx.createImageData(r.W, r.H);
+    for (let i = 0, n = r.W * r.H; i < n; i++) { const v = r.alpha[i], j = i * 4; md.data[j] = md.data[j + 1] = md.data[j + 2] = v; md.data[j + 3] = 255; }
+    mctx.putImageData(md, 0, 0);
+    let decon = null;
+    if (r.decon) {
+      decon = document.createElement('canvas'); decon.width = r.W; decon.height = r.H;
+      decon.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.decon.buffer || r.decon), r.W, r.H), 0, 0);
+    }
+    return { mask, decon, method: r.method };
+  }
+
+  /* ── Keep/Remove touch-ups on an offline cutout ──────────────────────────────────────────
+     While editing the mask of a layer whose background was removed offline, setMaskRefine('keep'
+     | 'remove') turns brush strokes into hints: each stroke paints straight away (white / black)
+     for feedback, then the CV worker re-runs GrabCut around it from where the cut left off and
+     the refined mask (soft edges, decontaminated colours) replaces it — one undo step per stroke.
+     setMaskRefine(null) goes back to plain mask painting. Not available after an undo / reload
+     (the layer is a fresh object then) or for an AI cutout. */
+  canRefineCutout(id) {
+    const c = this._cutout;
+    if (!c || (id && id !== c.layerId)) return false;
+    const o = this._byId(c.layerId);
+    return !!(o && o.maskCanvas && o.maskCanvas === c.maskCanvas);
+  }
+  setMaskRefine(mode) {
+    const m = mode === 'keep' || mode === 'remove' ? mode : null;
+    if (m && !this.canRefineCutout()) return false;
+    this.toolOpts.maskRefine = m;
+    if (m) {
+      if (!this._maskEdit || this._maskEdit.layerId !== this._cutout.layerId) this.enterMaskEdit(this._cutout.layerId);
+      if (this.tool !== 'brush') this.setTool('brush');
+    }
+    this._emit('maskrefine', m);
+    return true;
+  }
+  _refineActive(layer) {
+    return !!(this.toolOpts.maskRefine && layer && this.canRefineCutout(layer.id) && this.tool === 'brush');
+  }
+  /* A finished stroke (scene px) → the image's mask px (_imageMaskPoint) → cutout px hint →
+     worker → mask. */
+  _refineCutout(layer, stroke) {
+    const c = this._cutout, kx = c.W / layer.maskCanvas.width, ky = c.H / layer.maskCanvas.height;
+    const pts = stroke.pts.map(p => this._imageMaskPoint(layer, p, stroke.r * 2));
+    const hint = { keep: stroke.keep, r: pts[0].size / 2 * Math.sqrt(kx * ky), pts: pts.map(p => ({ x: p.x * kx, y: p.y * ky })) };
+    const last = stroke.pts[stroke.pts.length - 1];
+    const run = (async () => {
+      const r = await this.cv.cutoutRefine([hint]);
+      if (this._destroyed) return { status: 'error', reason: 'destroyed' };
+      // Undone / replaced while the worker ran: that state already moved on — committing now would
+      // push a stale entry (and wipe redo). A worker failure keeps the painted stroke as a plain edit.
+      if (!this.canRefineCutout(layer.id)) return { status: 'error', reason: 'superseded' };
+      if (!r || !r.alpha) { this.commit('mask-paint'); return { status: 'error', reason: 'no_refine' }; }
+      const cut = this._cutCanvases(r);
+      const mctx = layer.maskCanvas.getContext('2d');
+      mctx.clearRect(0, 0, layer.maskCanvas.width, layer.maskCanvas.height);
+      mctx.drawImage(cut.mask, 0, 0, layer.maskCanvas.width, layer.maskCanvas.height);
+      const mf = (layer.filters || []).find(f => f.type === 'MaskFilter');
+      if (mf) mf.decontamCanvas = cut.decon;
+      layer.applyFilters();
+      this.fc.renderAll();
+      this.commit('mask-refine');
+      return { status: 'ok' };
+    })();
+    return this._trackPick(run, last);
+  }
+
   _featherMask(c) {
     const f = document.createElement('canvas'); f.width = c.width; f.height = c.height;
     const ctx = f.getContext('2d');
