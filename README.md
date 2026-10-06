@@ -4,7 +4,7 @@
 
 Use the complete tool with one `<script>`, or import the JS functions and build your own UI.
 
-**▶ Try it live: [canvasmith.netlify.app](https://canvasmith.netlify.app)** — or open any image straight into it: `canvasmith.netlify.app/?image=<url>`
+**▶ Try it live: [canvasmith.netlify.app](https://canvasmith.netlify.app)** · **[Documentation](docs/index.html)** · **[Release notes](docs/release-notes.html)** — or open any image straight into it: `canvasmith.netlify.app/?image=<url>`
 
 ![A finished moodboard design tilting into 3D and unpacking into dozens of labelled layers — people, clothing, vehicles, maps, symbols — as the camera travels up through the stack](docs/hero.gif)
 
